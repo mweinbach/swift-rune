@@ -872,6 +872,7 @@ public protocol DesktopMember: AnyObject {
     var isStale: Bool { get }
     func advance(dt: Double)
     func setFocused(_ focused: Bool)
+    func resizeBy(dw: Float, dh: Float)
     func input(_ kind: DesktopInputKind, at localPt: (Float, Float))
     func leave()
     func find(key: String) -> (Float, Float)?
@@ -882,6 +883,10 @@ public protocol DesktopMember: AnyObject {
     func backdropDark() -> Bool?
     func treeJSON(at t: Double) -> [String: Any]
     func renderFrame(scale: Float) -> Frame?
+}
+
+public extension DesktopMember {
+    func resizeBy(dw: Float, dh: Float) {}
 }
 
 private protocol DesktopCaptureWindow: AnyObject {
@@ -1152,6 +1157,8 @@ public final class DesktopWindow<State>: DesktopMember, DesktopCaptureWindow {
     public func hide() {
         guard life.isShown else { return }
         life.hide()
+        _ = runtime.keysLost(at: currentTime)
+        runtime.cancelPointer(at: currentTime)
         runtime.pointerExit(at: currentTime)
     }
 
@@ -1171,6 +1178,32 @@ public final class DesktopWindow<State>: DesktopMember, DesktopCaptureWindow {
             captureReferenceScene()
             lastProductionFrame = nil
         }
+        applyFitOrResize()
+    }
+
+    private func applyFitOrResize() {
+        let scale = runtime.windowScale()
+        if let req = runtime.takeWindowFrameRequest(), let reqSize = req.size {
+            let nextW = max(1, reqSize.0)
+            let nextH = max(1, reqSize.1)
+            frame[2] = nextW
+            frame[3] = nextH
+            runtime.setWindowViewport(Vec2(nextW, nextH), pixelScale: scale)
+        } else if runtime.fitHeight {
+            let fittedH = max(1, runtime.contentHeight() * runtime.zoom())
+            if abs(fittedH - frame[3]) > 0.5 {
+                frame[3] = fittedH
+                runtime.setWindowViewport(Vec2(frame[2], fittedH), pixelScale: scale)
+            }
+        }
+    }
+
+    public func resizeBy(dw: Float, dh: Float) {
+        let nextW = max(1, frame[2] + dw)
+        let nextH = max(1, frame[3] + dh)
+        frame[2] = nextW
+        frame[3] = nextH
+        runtime.setWindowViewport(Vec2(nextW, nextH), pixelScale: runtime.windowScale())
     }
 
     private func captureReferenceScene() {
@@ -1189,7 +1222,8 @@ public final class DesktopWindow<State>: DesktopMember, DesktopCaptureWindow {
     }
 
     public func input(_ kind: DesktopInputKind, at localPt: (Float, Float)) {
-        let p = Vec2(localPt.0, localPt.1)
+        let zoom = max(0.1, runtime.zoom())
+        let p = Vec2(localPt.0 / zoom, localPt.1 / zoom)
         switch kind {
         case .move:
             runtime.pointerMove(to: p, mods: .none, at: currentTime)
@@ -1200,10 +1234,12 @@ public final class DesktopWindow<State>: DesktopMember, DesktopCaptureWindow {
         case .leave:
             runtime.pointerExit(at: currentTime)
         case let .scroll(dx, dy):
-            runtime.wheelXY(p.x, p.y, dx, dy, now: currentTime)
+            runtime.wheelXY(p.x, p.y, dx / zoom, dy / zoom, now: currentTime)
         case .wheel(let dx, let dy, let mods):
-            runtime.wheel(WheelEvent(dx: dx, dy: dy, mods: mods), at: p, now: currentTime)
-        case .wheelEvent(let event):
+            runtime.wheel(WheelEvent(dx: dx / zoom, dy: dy / zoom, mods: mods), at: p, now: currentTime)
+        case .wheelEvent(var event):
+            event.dx /= zoom
+            event.dy /= zoom
             runtime.wheel(event, at: p, now: currentTime)
         case .magnify(let event):
             runtime.magnify(event, at: p, now: currentTime)
@@ -1212,7 +1248,7 @@ public final class DesktopWindow<State>: DesktopMember, DesktopCaptureWindow {
         case .smartMagnify:
             runtime.smartMagnify(at: p, now: currentTime)
         case let .fling(vx, vy):
-            runtime.fling(vx: vx, vy: vy, at: p, now: currentTime)
+            runtime.fling(vx: vx / zoom, vy: vy / zoom, at: p, now: currentTime)
         case .keyDown(let ev):
             _ = runtime.keyDown(ev, at: currentTime)
         case .fileDrop(let phase):
@@ -1225,13 +1261,15 @@ public final class DesktopWindow<State>: DesktopMember, DesktopCaptureWindow {
     }
 
     public func find(key: String) -> (Float, Float)? {
-        runtime.find(key).map { ($0.x, $0.y) }
+        let zoom = runtime.zoom()
+        return runtime.find(key).map { ($0.x * zoom, $0.y * zoom) }
     }
 
     public func pointer() -> (Float, Float)? {
         let pos = runtime.pointerPosition
         if pos.x < -5000 || pos.y < -5000 { return nil }
-        return (pos.x, pos.y)
+        let zoom = runtime.zoom()
+        return (pos.x * zoom, pos.y * zoom)
     }
 
     public func reopenCandidate() -> DesktopReopenCandidate {

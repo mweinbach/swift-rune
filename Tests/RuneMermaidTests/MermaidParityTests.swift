@@ -1244,4 +1244,27 @@ struct MermaidParityTests {
             #expect(MermaidParser.parse(src) != nil)
         }
     }
+
+    @Test("ink sRGB enc/dec match clamped reference bit-for-bit")
+    func srgbEncDecMatchClampedReferenceBitForBit() {
+        func refEnc(_ raw: Float) -> Float {
+            let c = min(max(raw, 0.0), 1.0)
+            return c <= 0.003_130_8 ? c * 12.92 : 1.055 * powf(c, 1.0 / 2.4) - 0.055
+        }
+        func refDec(_ raw: Float) -> Float {
+            let c = min(max(raw, 0.0), 1.0)
+            return c <= 0.040_45 ? c / 12.92 : powf((c + 0.055) / 1.055, 2.4)
+        }
+        for v in 0...255 {
+            let x = Float(v) / 255.0
+            #expect(InkFlattener.enc(x).bitPattern == refEnc(x).bitPattern, "enc byte \(v)")
+            #expect(InkFlattener.dec(x).bitPattern == refDec(x).bitPattern, "dec byte \(v)")
+            #expect(InkFlattener.enc(x).bitPattern == RefShader.linearToSRGB(x).bitPattern, "enc RefShader byte \(v)")
+            #expect(InkFlattener.dec(x).bitPattern == RefShader.srgbToLinear(x).bitPattern, "dec RefShader byte \(v)")
+        }
+        for x: Float in [-1.0, -0.01, -0.0, 0.0, 0.003_130_8, 0.040_45, 0.5, 1.0, 1.5] {
+            #expect(InkFlattener.enc(x).bitPattern == refEnc(x).bitPattern, "enc \(x)")
+            #expect(InkFlattener.dec(x).bitPattern == refDec(x).bitPattern, "dec \(x)")
+        }
+    }
 }

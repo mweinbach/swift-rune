@@ -43,7 +43,19 @@ float g_smoothstep(float e0, float e1, float x) {
     return t * t * (3.0 - 2.0 * t);
 }
 
+const float GL_CONTINUOUS_K = 1.52866483;
+float g_sd_continuous(vec2 p, vec2 halfSize, float r) {
+    float e = GL_CONTINUOUS_K * r;
+    vec2 q = halfSize - abs(p);
+    vec2 v = vec2(e) - q;
+    if (v.x <= 0.0 || v.y <= 0.0) { return max(-q.x, -q.y); }
+    float u = atan(v.y, v.x) * (4.0 / glassPI) - 1.0;
+    float u2 = u * u;
+    return length(v) - e * (1.14602295 + u2 * (-0.37573161 + u2 * (0.30796609 - 0.07724354 * u2)));
+}
+
 float g_sd_rrect(vec2 p, vec2 halfSize, float r0) {
+    if (r0 < 0.0) { return g_sd_continuous(p, halfSize, min(-r0, min(halfSize.x, halfSize.y))); }
     float r = min(r0, min(halfSize.x, halfSize.y));
     vec2 q = abs(p) - halfSize + vec2(r);
     return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;

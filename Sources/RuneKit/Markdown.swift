@@ -8049,20 +8049,36 @@ private final class MarkdownRenderer<State> {
         let fill: Color? = s.tableFrame?.fill
         let inset: Float = s.tableFrame.map { max(0.5, $0.pad) } ?? (s.tableOutline != nil ? 0.5 : 0)
 
-        let fixedWidths: [Float]? = (s.textWidth.flatMap { view.config.isScrollWide ? $0 : nil }).map { w in
+        let fixed: (widths: [Float], over: Bool)? = (s.textWidth.flatMap { view.config.isScrollWide ? $0 : nil }).map { w in
             let avail = max(0, w - flow.inset - 2 * inset)
-            return autoLayoutColumns(natural: colWidths.natural, fit: colWidths.fit, avail: avail, fullWidth: s.tableFullWidth)
+            let widths = autoLayoutColumns(natural: colWidths.natural, fit: colWidths.fit, avail: avail, fullWidth: s.tableFullWidth)
+            let over = widths.reduce(0, +) > avail + 0.5
+            return (widths, over)
         }
+        let fixedWidths = fixed?.widths
 
         var frame: El<State> = col().wFull().p(inset)
+        var decor: El<State> = col().role(.table).wFull()
         if !view.config.isScrollWide {
             frame = frame.role(.table)
         }
         if !s.tableFullWidth {
             frame = frame.maxW(total + 2 * inset)
         }
-        if let fill { frame = frame.rounded(6).bg(fill) }
-        if let ring { frame = frame.rounded(6).border(0.5, ring) }
+        if let fill {
+            if fixed != nil {
+                decor = decor.rounded(6).bg(fill)
+            } else {
+                frame = frame.rounded(6).bg(fill)
+            }
+        }
+        if let ring {
+            if fixed != nil {
+                decor = decor.rounded(6).border(0.5, ring)
+            } else {
+                frame = frame.rounded(6).border(0.5, ring)
+            }
+        }
 
         let headPad = s.tableHeadPad ?? s.tablePad
         let baseTableFont = s.tableFont ?? s.body
@@ -8175,16 +8191,26 @@ private final class MarkdownRenderer<State> {
             }
         }
 
+        if let fixed {
+            let wTotal = fixed.widths.reduce(0, +)
+            return renderWideTableFrame(decor: decor, rows: frame.w(wTotal + 2 * inset), over: fixed.over)
+        }
         if view.config.isScrollWide {
-            if let fixedWidths {
-                let wTotal = fixedWidths.reduce(0, +)
-                frame = frame.w(wTotal + 2 * inset)
-            } else {
-                frame = s.tableFullWidth ? frame.maxW(total + 2 * inset) : frame.w(total + 2 * inset)
-            }
+            frame = s.tableFullWidth ? frame.maxW(total + 2 * inset) : frame.w(total + 2 * inset)
             return col().role(.table).wFull().child(col().key("scroll").wFull().scrollX().child(frame))
         }
         return frame
+    }
+
+    /// `rows`, a table sized to `textWidth`, scrolling sideways in `decor` when `over` it, with
+    /// the style's horizontal scroll bar in room under it (`markdown/table.rs::wide_frame`).
+    private func renderWideTableFrame(decor: El<State>, rows: El<State>, over: Bool) -> El<State> {
+        let viewport: El<State> = col().key("scroll").wFull().scrollX().clipRounded(6.0).child(rows)
+        guard over, let barColors = s.tableBar, barColors.count >= 2 else {
+            return decor.child(viewport)
+        }
+        let bar = KitScrollBarStyle.native(thumb: barColors[0], thumbHover: barColors[1]).horizontal()
+        return decor.child(viewport.scrollBarStyled(bar).pb(bar.resolvedStripWidth))
     }
 
     private func renderTableRow(

@@ -73,7 +73,8 @@ final class LinuxSystemTray {
         for item in spec.menu {
             switch item {
             case .separator: rune_linux_tray_item(model, nil, nil, 0)
-            case let .action(id, label, enabled): rune_linux_tray_item(model, id, label, enabled ? 1 : 0)
+            case let .action(id, label, enabled):
+                rune_linux_tray_item(model, id, TrayLabelFormatting.dbusMenuLabel(label), enabled ? 1 : 0)
             }
         }
         return model

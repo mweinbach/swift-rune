@@ -22,7 +22,8 @@ extension Runtime {
                   geometry.opacity > 0.001, geometry.contains(point),
                   let i = nodeByPath[path], hoverAllowed(i), !subtreeExiting(i) else { continue }
             let el = flatNodes[i].el
-            if !el.layout.scrollAxes.isEmpty || el.anchor != nil || el.isRaised || el.layout.sticky != nil {
+            if !el.layout.scrollAxes.isEmpty || el.anchor != nil || el.isRaised || el.layout.sticky != nil
+                || el.wheelScrollsTarget != nil {
                 return i
             }
             if hasActiveTextLinks(el) && !el.isSelectable {
@@ -44,21 +45,53 @@ extension Runtime {
         return nil
     }
 
-    /// `pointer.rs` `scroll_at_axis`: the innermost scroll viewport at `pos` that moves on `axis`,
-    /// walking up from `gestureStartIndex(at:)` so raised/anchored overlays occlude viewports beneath
-    /// (`#1219`). One whose content fits on that axis (`scrollHasRoom`) is passed over for the one
-    /// around it, as Chromium skips a scroller with nothing to scroll (`#1021`).
+    /// `pointer.rs` `scroll_at_axis` / `scroll_in_chain` (`#1214`, `#1219`): the innermost scroll
+    /// viewport at `pos` that moves on `axis`, walking up from `gestureStartIndex(at:)` so
+    /// raised/anchored overlays occlude viewports beneath. An element naming a target viewport
+    /// via `El.wheelScrolls(_:)` hands off to that viewport once before chaining upward from it.
     internal func scrollContainerAt(at pos: Vec2, axis: ScrollAxes) -> String? {
         var walkIdx = gestureStartIndex(at: pos)
+        var handed = false
         while let i = walkIdx, flatNodes.indices.contains(i) {
             let n = flatNodes[i]
             if !n.effectiveInert && n.el.layout.scrollAxes.contains(axis) && scrollHasRoom(n.path, axis: axis)
                 && hoverAllowed(i) && !subtreeExiting(i) {
                 return n.path
             }
-            walkIdx = n.parentIndex
+            if !handed, let targetKey = n.el.wheelScrollsTarget,
+               let targetIdx = wheelScrollViewport(from: i, key: targetKey), targetIdx != i {
+                handed = true
+                walkIdx = targetIdx
+            } else {
+                walkIdx = n.parentIndex
+            }
         }
         return nil
+    }
+
+    /// Resolves `El.wheelScrolls(key)` starting inside `from` and walking up its ancestor scopes
+    /// innermost-first (`pointer.rs::wheel_scroll_viewport`, `#1214`). The first scope containing
+    /// a matching element decides; if that match is exiting or inert/disallowed, returns `nil`
+    /// rather than spilling into another pane.
+    internal func wheelScrollViewport(from: Int, key: String) -> Int? {
+        var at: Int? = from
+        while let a = at, flatNodes.indices.contains(a) {
+            let scope = flatNodes[a].path
+            if let match = flatNodes.firstIndex(where: { n in
+                selectsElementSelector(key, path: n.path, key: n.key) && Self.pathWithinScope(n.path, scope: scope)
+            }) {
+                return (!subtreeExiting(match) && hoverAllowed(match) && !flatNodes[match].effectiveInert) ? match : nil
+            }
+            at = flatNodes[a].parentIndex
+        }
+        return nil
+    }
+
+    /// Whether `path` equals `scope` or lies inside `scope` on path-segment boundaries (`pointer.rs::within`).
+    private static func pathWithinScope(_ path: String, scope: String) -> Bool {
+        guard path.hasPrefix(scope) else { return false }
+        let rest = path.dropFirst(scope.count)
+        return rest.isEmpty || rest.first == "/"
     }
 
     internal func subtreeExiting(_ idx: Int) -> Bool {
@@ -244,20 +277,29 @@ extension Runtime {
         }
     }
 
-    /// An exhausted viewport passes a new run to its enclosing viewport.
+    /// An exhausted viewport passes a new run to its enclosing viewport, honoring `El.wheelScrolls(_:)` (`#1214`).
     private func verticalWheelTarget(dy: Float, at point: Vec2, start: WheelStart) -> Int? {
         var next: Int?
         switch start {
         case .unknown: next = gestureStartIndex(at: point)
         case .at(let hit): next = hit
         }
-        while let i = next {
+        var handed = false
+        while let i = next, flatNodes.indices.contains(i) {
             let node = flatNodes[i]
-            next = node.parentIndex
-            guard node.el.layout.scrollAxes.contains(.vertical), hoverAllowed(i), !subtreeExiting(i),
-                  let limit = scrollMaxExtents[node.path]?.y else { continue }
-            let offset = wheelTargetY(for: node.path)
-            if dy > 0 ? offset > 0 : offset < limit { return i }
+            if !node.effectiveInert, node.el.layout.scrollAxes.contains(.vertical),
+               hoverAllowed(i), !subtreeExiting(i),
+               let limit = scrollMaxExtents[node.path]?.y {
+                let offset = wheelTargetY(for: node.path)
+                if dy > 0 ? offset > 0 : offset < limit { return i }
+            }
+            if !handed, let targetKey = node.el.wheelScrollsTarget,
+               let targetIdx = wheelScrollViewport(from: i, key: targetKey), targetIdx != i {
+                handed = true
+                next = targetIdx
+            } else {
+                next = node.parentIndex
+            }
         }
         return nil
     }

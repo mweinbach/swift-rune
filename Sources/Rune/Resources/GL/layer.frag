@@ -101,6 +101,12 @@ vec4 blur(ivec2 px) {
     return sum / float(uRadius * 2 + 1);
 }
 
+vec4 layerTexel(ivec2 texel, ivec2 dims, bool clampUnit) {
+    if (any(lessThan(texel, ivec2(0))) || any(greaterThanEqual(texel, dims))) return vec4(0.0);
+    vec4 c = texelFetch(uSource, ivec2(texel.x, dims.y - 1 - texel.y), 0);
+    return clampUnit ? clamp(c, 0.0, 1.0) : c;
+}
+
 vec4 layer(ivec2 px, vec2 frag, vec2 size) {
     vec2 halfSize = uRect.zw * 0.5, center = uRect.xy + halfSize;
     vec2 pivot = uFrameStyle == 0 ? center : uPose.xy;
@@ -128,17 +134,29 @@ vec4 layer(ivec2 px, vec2 frag, vec2 size) {
     vec4 source = uSourceRect.z > 0.0 ? uSourceRect : vec4(0.0, 0.0, size);
     vec2 position = uPose.z == 0.0 ? frag : pivot + local;
     vec2 sourcePixel = ((position - source.xy) / source.zw) * size;
+    bool additive = (uFrameStyle == 2);
+    ivec2 dims = ivec2(size);
     vec4 value;
     if (uPose.z == 0.0 && all(equal(source.zw, size))) {
         ivec2 texel = ivec2(floor(sourcePixel));
-        if (any(lessThan(texel, ivec2(0))) || any(greaterThanEqual(texel, ivec2(size)))) return vec4(0.0);
-        value = texelFetch(uSource, ivec2(texel.x, int(size.y) - 1 - texel.y), 0);
+        if (any(lessThan(texel, ivec2(0))) || any(greaterThanEqual(texel, dims))) return vec4(0.0);
+        value = layerTexel(texel, dims, additive);
+    } else if (additive) {
+        // Clamp each PlusLighter texel to [0, 1] before bilinear interpolation (#1228).
+        vec2 samplePos = sourcePixel - vec2(0.5);
+        vec2 base = floor(samplePos);
+        vec2 f = samplePos - base;
+        ivec2 t0 = ivec2(base);
+        value = mix(
+            mix(layerTexel(t0, dims, true), layerTexel(t0 + ivec2(1, 0), dims, true), f.x),
+            mix(layerTexel(t0 + ivec2(0, 1), dims, true), layerTexel(t0 + ivec2(1, 1), dims, true), f.x),
+            f.y
+        );
     } else {
         // Match the oracle's transparent bilinear border on GLES (which lacks CLAMP_TO_BORDER).
         vec2 edge = clamp(min(sourcePixel, size - sourcePixel) + 0.5, 0.0, 1.0);
         value = texture(uSource, vec2(sourcePixel.x, size.y - sourcePixel.y) / size) * (edge.x * edge.y);
     }
-    if (uFrameStyle == 2) value = clamp(value, 0.0, 1.0);
     return value * (clamp(uPose.w, 0.0, 1.0) * coverage);
 }
 

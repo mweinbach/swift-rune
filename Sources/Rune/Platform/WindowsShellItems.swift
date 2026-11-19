@@ -46,7 +46,10 @@ final class WindowsSystemTray {
 
     private static func nativeModel(_ spec: TraySpec, keepIcon: Bool = false) throws -> OpaquePointer {
         let icon = try spec.icon?.validated()
-        let model = spec.tooltip.withCString(encodedAs: UTF16.self) { tooltip in
+        var tooltipUnits = TrayLabelFormatting.truncateUTF16(spec.tooltip, maxUnits: 127)
+        tooltipUnits.append(0)
+        let model = tooltipUnits.withUnsafeBufferPointer { buf -> OpaquePointer? in
+            let tooltip = buf.baseAddress!
             if keepIcon { return rune_win_tray_spec_keeping_icon(tooltip) }
             guard let icon else { return rune_win_tray_spec(tooltip, nil, 0, 0) }
             return icon.rgba.withUnsafeBytes { bytes in
@@ -59,8 +62,9 @@ final class WindowsSystemTray {
             case .separator:
                 rune_win_tray_item(model, nil, nil, 0)
             case let .action(id, label, enabled):
+                let escaped = TrayLabelFormatting.win32MenuLabel(label)
                 id.withCString(encodedAs: UTF16.self) { id in
-                    label.withCString(encodedAs: UTF16.self) { label in
+                    escaped.withCString(encodedAs: UTF16.self) { label in
                         rune_win_tray_item(model, id, label, enabled ? 1 : 0)
                     }
                 }

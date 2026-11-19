@@ -29,14 +29,32 @@ private func simd_cross(_ a: SIMD3<Float>, _ b: SIMD3<Float>) -> SIMD3<Float> {
 #endif
 
 public enum RuneLightCPU: Sendable {
-    public static func sdRoundedRect(_ p: SIMD2<Float>, half: SIMD2<Float>, radii: SIMD4<Float>) -> Float {
-        var r: Float
-        if p.x > 0.0 {
-            r = p.y > 0.0 ? radii.z : radii.y
-        } else {
-            r = p.y > 0.0 ? radii.w : radii.x
+    private static let continuousK: Float = 1.528_664_8
+
+    public static func sdContinuous(_ p: SIMD2<Float>, half: SIMD2<Float>, r: Float) -> Float {
+        let e = continuousK * r
+        let q = SIMD2<Float>(half.x - abs(p.x), half.y - abs(p.y))
+        let v = SIMD2<Float>(e - q.x, e - q.y)
+        if v.x <= 0.0 || v.y <= 0.0 {
+            return max(-q.x, -q.y)
         }
-        r = min(r, min(half.x, half.y))
+        let u = atan2f(v.y, v.x) * (4.0 / Float.pi) - 1.0
+        let u2 = u * u
+        return sqrtf(v.x * v.x + v.y * v.y) - e * (1.146_022_95 + u2 * (-0.375_731_61 + u2 * (0.307_966_09 - 0.077_243_54 * u2)))
+    }
+
+    public static func sdRoundedRect(_ p: SIMD2<Float>, half: SIMD2<Float>, radii: SIMD4<Float>) -> Float {
+        let rawR: Float
+        if p.x > 0.0 {
+            rawR = p.y > 0.0 ? radii.z : radii.y
+        } else {
+            rawR = p.y > 0.0 ? radii.w : radii.x
+        }
+        let m = min(half.x, half.y)
+        if rawR < 0.0 {
+            return sdContinuous(p, half: half, r: min(-rawR, m))
+        }
+        let r = min(rawR, m)
         let q = SIMD2<Float>(abs(p.x) - half.x + r, abs(p.y) - half.y + r)
         return min(max(q.x, q.y), 0.0) + hypotf(max(q.x, 0.0), max(q.y, 0.0)) - r
     }

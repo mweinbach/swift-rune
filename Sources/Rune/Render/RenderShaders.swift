@@ -297,14 +297,26 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         float2 offset = float2(spring_sample(node.x, time).x, spring_sample(node.y, time).x);
         float alpha = clamp(spring_sample(node.opacity, time).x, 0.0, 1.0);
         RenderInstanceIn i = instances[iid];
+        float kind = i.params.y;
         i.rect = float4(i.rect.xy + offset, i.rect.zw);
         i.fill *= alpha;
-        // Image border stores atlas bounds rather than a paint color.
-        if (i.params.y != 7.0) { i.border *= alpha; }
-        if (i.params.y > 3.5 && i.params.y < 4.5) { i.uv *= alpha; }
-        if (i.params.y > 4.5 && i.params.y < 6.5) {
+        // Match CPU opacity folding (`render/instance.rs` `end_layer`, `#1228`):
+        // - Rect (0) and Gradient (4) carry opacity in `params.w` for `border_over`.
+        // - Gradient (4) carries its bottom colour in `uv`.
+        // - Glyph (2), Image (7), and Layer (8) store non-colour data in `border`.
+        if (kind < 0.5) {
+            i.border *= alpha;
+            i.params.w *= alpha;
+        } else if (kind > 3.5 && kind < 4.5) {
+            i.border *= alpha;
+            i.uv *= alpha;
+            i.params.w *= alpha;
+        } else if (!(kind > 1.5 && kind < 2.5) && !(kind > 6.5 && kind < 8.5)) {
+            i.border *= alpha;
+        }
+        if (kind > 4.5 && kind < 6.5) {
             i.radii += float4(offset, offset);
-            if (i.params.y > 5.5) { i.uv = float4(i.uv.xy + offset, i.uv.zw); }
+            if (kind > 5.5) { i.uv = float4(i.uv.xy + offset, i.uv.zw); }
         }
         return base_vs(i, vi, g);
     }
@@ -519,11 +531,18 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         return clamp((length(p - h.xy) - (h.z + h.w) * 0.5) / max(h.w - h.z, 1.0) + 0.5, 0.0, 1.0);
     }
 
-    static inline float4 layer_texel(int2 t, float2 size, texture2d<float> images) {
+    // A texel of a layer, clamped to [0, 1] when `clamp_unit` is set (`Blend::PlusLighter`, `#1228`),
+    // so bilinear filtering saturates each accumulated source texel before interpolation.
+    static inline float4 layer_load(int2 t, bool clamp_unit, texture2d<float> images) {
+        float4 c = images.read(uint2(t));
+        return clamp_unit ? clamp(c, float4(0.0), float4(1.0)) : c;
+    }
+
+    static inline float4 layer_texel(int2 t, float2 size, bool clamp_unit, texture2d<float> images) {
         int2 dims = int2(images.get_width(), images.get_height());
         int2 bound = min(int2(size), dims);
         if (any(t < int2(0)) || any(t >= bound)) { return float4(0.0); }
-        return images.read(uint2(t));
+        return layer_load(t, clamp_unit, images);
     }
 
     #ifdef RUNE_WINDFOIL
@@ -540,6 +559,7 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         if (i.params.y > 7.5 && i.params.y < 8.5) {
             float2 screen = i.pos.xy + g.projection.xy;
             float2 p = screen - i.rect.xy;
+            bool additive = (i.params.x == 1.0);
             float4 color;
             if (i.border.y != 0.0) {
                 float2 q = screen - i.border.zw;
@@ -551,8 +571,8 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
                 float2 f = local - base;
                 int2 t0 = int2(base);
                 color = mix(
-                    mix(layer_texel(t0, i.rect.zw, images), layer_texel(t0 + int2(1, 0), i.rect.zw, images), f.x),
-                    mix(layer_texel(t0 + int2(0, 1), i.rect.zw, images), layer_texel(t0 + int2(1, 1), i.rect.zw, images), f.x),
+                    mix(layer_texel(t0, i.rect.zw, additive, images), layer_texel(t0 + int2(1, 0), i.rect.zw, additive, images), f.x),
+                    mix(layer_texel(t0 + int2(0, 1), i.rect.zw, additive, images), layer_texel(t0 + int2(1, 1), i.rect.zw, additive, images), f.x),
                     f.y
                 );
             } else if (any(p < float2(0.0)) || any(p >= i.rect.zw)) {
@@ -565,14 +585,14 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
                 int2 t0 = clamp(int2(base), int2(0), hi);
                 int2 t1 = clamp(int2(base) + int2(1, 1), int2(0), hi);
                 color = mix(
-                    mix(layer_texel(t0, i.uv.zw, images), layer_texel(int2(t1.x, t0.y), i.uv.zw, images), f.x),
-                    mix(layer_texel(int2(t0.x, t1.y), i.uv.zw, images), layer_texel(t1, i.uv.zw, images), f.x),
+                    mix(layer_texel(t0, i.uv.zw, additive, images), layer_texel(int2(t1.x, t0.y), i.uv.zw, additive, images), f.x),
+                    mix(layer_texel(int2(t0.x, t1.y), i.uv.zw, additive, images), layer_texel(t1, i.uv.zw, additive, images), f.x),
                     f.y
                 );
             } else {
-                color = layer_texel(int2(floor(p)), i.rect.zw, images);
+                color = layer_texel(int2(floor(p)), i.rect.zw, additive, images);
             }
-            return select(color, clamp(color, float4(0.0), float4(1.0)), i.params.x == 1.0)
+            return color
                 * i.fill.a
                 * clip_alpha(screen, i.clip, i.fade)
                 * hole_alpha(screen, i.radii);

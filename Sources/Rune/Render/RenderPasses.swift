@@ -882,32 +882,7 @@ public final class LayersPool {
                     Self.unionEdges(&scopes[pIdx].edges, edges)
                 }
             } else if let at = stack.last, scopes[at].cache == nil {
-                var rect = inst.rect
-                if kind == KIND_GLYPH && inst.params.x != 0.0 {
-                    let s = sinf(inst.params.x)
-                    let c = cosf(inst.params.x)
-                    let width = abs(c) * rect.z + abs(s) * rect.w
-                    let height = abs(s) * rect.z + abs(c) * rect.w
-                    rect = SIMD4<Float>(rect.x + (rect.z - width) * 0.5, rect.y + (rect.w - height) * 0.5, width, height)
-                }
-                let grow: Float
-                if kind == KIND_GLYPH {
-                    grow = 0.0
-                } else if kind == KIND_SHADOW {
-                    grow = inst.params.z * 3.0 + 1.0
-                } else if kind == KIND_EFFECT {
-                    grow = inst.params.z + 1.0
-                } else if kind == KIND_RECT || kind == KIND_GRADIENT || kind == KIND_DASHED || kind == KIND_RADIAL {
-                    grow = 1.0 + inst.params.z * 2.0
-                } else {
-                    grow = 1.0
-                }
-                Self.unionEdges(&scopes[at].edges, SIMD4<Float>(
-                    max(rect.x - grow, inst.clip.x),
-                    max(rect.y - grow, inst.clip.y),
-                    min(rect.x + rect.z + grow, inst.clip.z),
-                    min(rect.y + rect.w + grow, inst.clip.w)
-                ))
+                Self.unionEdges(&scopes[at].edges, inst.layerBounds())
             }
         }
 

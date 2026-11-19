@@ -512,13 +512,23 @@ public final class SurfaceRenderer: @unchecked Sendable {
         return out;
     }
 
+    static inline float sd_continuous_video(float2 p, float2 halfSize, float r) {
+        float e = 1.52866483 * r;
+        float2 q = halfSize - abs(p);
+        float2 v = float2(e) - q;
+        if (v.x <= 0.0 || v.y <= 0.0) { return max(-q.x, -q.y); }
+        float u = atan2(v.y, v.x) * (4.0 / 3.14159265) - 1.0;
+        float u2 = u * u;
+        return length(v) - e * (1.14602295 + u2 * (-0.37573161 + u2 * (0.30796609 - 0.07724354 * u2)));
+    }
+
     static inline float sd_rounded_box(float2 p, float2 halfSize, float4 r) {
         float rr = (p.x > 0.0) ? ((p.y > 0.0) ? r.z : r.y) : ((p.y > 0.0) ? r.w : r.x);
         float cr = min(max(0.0, abs(rr)), min(halfSize.x, halfSize.y));
-        float2 q = abs(p) - halfSize + cr;
         if (rr < 0.0) {
-            return max(max(q.x, q.y), (q.x + q.y + 0.41421356 * cr) * 0.70710678);
+            return sd_continuous_video(p, halfSize, cr);
         }
+        float2 q = abs(p) - halfSize + cr;
         return length(max(q, float2(0.0))) + min(max(q.x, q.y), 0.0) - cr;
     }
 

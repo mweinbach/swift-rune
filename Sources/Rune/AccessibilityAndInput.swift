@@ -1469,52 +1469,84 @@ public final class SpellChecker: @unchecked Sendable {
         }
     }
 
-    private func selectedLanguages() -> [String] {
-        #if os(WASI) && RUNE_BROWSER_TEXT
-        if let browser = backend as? BrowserSpellChecker {
-            let chosen = availableList.filter(chosenLanguages.contains)
-            if !chosen.isEmpty { return chosen }
-            func base(_ tag: String) -> String { String(tag.prefix { $0 != "-" }).lowercased() }
-            var defaults: [String] = []
-            for pref in browser.preferredLanguages {
-                let match = availableList.first { $0.caseInsensitiveCompare(pref) == .orderedSame }
-                    ?? availableList.first { $0.caseInsensitiveCompare(base(pref)) == .orderedSame }
-                if let match, !defaults.contains(where: { base($0) == base(match) }) { defaults.append(match) }
-            }
-            if !defaults.contains(where: { base($0) == "en" }), availableList.contains("en-US") {
-                defaults.append("en-US")
-            }
-            return defaults
+    /// Primary language subtag of a BCP 47 / POSIX tag (`en-AU` and `en_AU` both yield `en`, `#1222`).
+    internal static func baseLanguage(_ tag: String) -> Substring {
+        let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.split(whereSeparator: { $0 == "-" || $0 == "_" }).first ?? trimmed[...]
+    }
+
+    /// Exact tag equality ignoring ASCII case and `-` vs `_` separators (`#1222`).
+    internal static func tagsMatch(_ a: String, _ b: String) -> Bool {
+        let aBytes = Array(a.trimmingCharacters(in: .whitespacesAndNewlines).utf8)
+        let bBytes = Array(b.trimmingCharacters(in: .whitespacesAndNewlines).utf8)
+        guard aBytes.count == bBytes.count else { return false }
+        @inline(__always) func norm(_ c: UInt8) -> UInt8 {
+            if c == UInt8(ascii: "_") { return UInt8(ascii: "-") }
+            if c >= UInt8(ascii: "A") && c <= UInt8(ascii: "Z") { return c + 32 }
+            return c
         }
-        #endif
-        let chosen = chosenLanguages
-        let available = availableList
-        if !chosen.isEmpty {
-            let intersection = chosen.compactMap { c in
-                available.first { $0.caseInsensitiveCompare(c) == .orderedSame }
-            }
-            if !intersection.isEmpty {
-                return intersection
-            }
-        }
-        var defaults: [String] = []
-        for pref in Locale.preferredLanguages {
-            if let match = available.first(where: { $0.caseInsensitiveCompare(pref) == .orderedSame })
-                ?? available.first(where: { $0.lowercased().split(separator: "-").first == pref.lowercased().split(separator: "-").first }) {
-                if !defaults.contains(match) {
-                    defaults.append(match)
+        for i in aBytes.indices where norm(aBytes[i]) != norm(bBytes[i]) { return false }
+        return true
+    }
+
+    /// Finds the best available dictionary for `requested`: exact match (case/`_`-insensitive),
+    /// then bare base-language dictionary (`de`), then any regional dictionary sharing the exact
+    /// primary language subtag (`de-DE`), never matching unrelated languages by prefix (`#1222`).
+    internal static func matchTag(in available: [String], requested: String) -> String? {
+        let base = baseLanguage(requested)
+        guard !base.isEmpty else { return nil }
+        let baseStr = String(base)
+        return available.first(where: { tagsMatch($0, requested) })
+            ?? available.first(where: { tagsMatch($0, baseStr) })
+            ?? available.first(where: { baseLanguage($0).caseInsensitiveCompare(baseStr) == .orderedSame })
+    }
+
+    /// Default dictionaries for `preferred` locales plus `en-US` when none is English (`#1222`).
+    internal static func defaultLanguages(available: [String], preferred: [String]) -> [String] {
+        var found: [String] = []
+        for tag in preferred {
+            if let language = matchTag(in: available, requested: tag) {
+                let langBase = String(baseLanguage(language))
+                if !found.contains(where: { baseLanguage($0).caseInsensitiveCompare(langBase) == .orderedSame }) {
+                    found.append(language)
                 }
             }
         }
-        if !defaults.contains(where: { $0.lowercased().hasPrefix("en") }),
-           let english = available.first(where: { $0.caseInsensitiveCompare("en-US") == .orderedSame }) {
-            defaults.append(english)
+        if found.contains(where: { baseLanguage($0).caseInsensitiveCompare("en") == .orderedSame }) {
+            return found
         }
-        return defaults
+        if let us = available.first(where: { tagsMatch($0, "en-US") }) {
+            found.append(us)
+        }
+        return found
+    }
+
+    /// Resolves active dictionaries from explicit `chosen` overrides, falling back to `preferred` (`#1222`).
+    internal static func resolveLanguages(available: [String], chosen: [String], preferred: [String]) -> [String] {
+        var resolved: [String] = []
+        for tag in chosen {
+            if let matched = matchTag(in: available, requested: tag),
+               !resolved.contains(where: { tagsMatch($0, matched) }) {
+                resolved.append(matched)
+            }
+        }
+        if !resolved.isEmpty {
+            return resolved
+        }
+        return defaultLanguages(available: available, preferred: preferred)
+    }
+
+    private func selectedLanguages() -> [String] {
+        #if os(WASI) && RUNE_BROWSER_TEXT
+        if let browser = backend as? BrowserSpellChecker {
+            return Self.resolveLanguages(available: availableList, chosen: chosenLanguages, preferred: browser.preferredLanguages)
+        }
+        #endif
+        return Self.resolveLanguages(available: availableList, chosen: chosenLanguages, preferred: Locale.preferredLanguages)
     }
 
     public func languageName(for tag: String) -> String {
-        for (k, v) in Self.dialects where k.caseInsensitiveCompare(tag) == .orderedSame {
+        for (k, v) in Self.dialects where Self.tagsMatch(k, tag) {
             return v
         }
         #if os(Windows) || os(Linux)

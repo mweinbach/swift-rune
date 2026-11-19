@@ -1,9 +1,9 @@
 {
   "swiftExecutables" : 99,
   "swiftTargets" : 19,
-  "syncedAt" : "2026-11-19T16:07:49Z",
-  "syncedCommit" : "eb9f11047bbe2b3927ad4b65ffcf7bfef4d3deb8",
-  "syncedCommitDate" : "2026-11-18T22:20:34-06:00",
-  "syncedCommitSubject" : "fix(runtime): make drifted hit-testing, scroll, focus and accessibility paths use the canonical rule (#1219)",
+  "syncedAt" : "2026-11-19T18:39:38Z",
+  "syncedCommit" : "f54cbcfa84d995d339c243a579218f5062c940b5",
+  "syncedCommitDate" : "2026-11-19T04:16:09-06:00",
+  "syncedCommitSubject" : "refactor: split the last four framework files over 800 lines (#1237)",
   "upstreamRepo" : "https:\/\/github.com\/anomalyco\/rune"
 }

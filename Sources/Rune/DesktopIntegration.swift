@@ -1733,6 +1733,53 @@ public struct TrayIcon: Sendable, Equatable {
     }
 }
 
+/// Tray label escaping and UTF-16 tooltip truncation (`tray.rs`, `#1222`).
+public enum TrayLabelFormatting {
+    /// Escapes a tray menu label so Win32 `AppendMenuW` displays it literally (`&` -> `&&`, `\t` -> ` `, strips NUL).
+    public static func win32MenuLabel(_ label: String) -> String {
+        var out = ""
+        out.reserveCapacity(label.count)
+        for scalar in label.unicodeScalars {
+            switch scalar {
+            case "&": out.append("&&")
+            case "\t": out.append(" ")
+            case "\0": break
+            default: out.unicodeScalars.append(scalar)
+            }
+        }
+        return out
+    }
+
+    /// Escapes a tray menu label so `com.canonical.dbusmenu` displays `_` literally (`_` -> `__`, strips NUL).
+    public static func dbusMenuLabel(_ label: String) -> String {
+        var out = ""
+        out.reserveCapacity(label.count)
+        for scalar in label.unicodeScalars {
+            switch scalar {
+            case "_": out.append("__")
+            case "\0": break
+            default: out.unicodeScalars.append(scalar)
+            }
+        }
+        return out
+    }
+
+    /// Encodes `text` as UTF-16 code units fitting in `maxUnits` without splitting a surrogate pair
+    /// or embedding interior NULs (`tray.rs::truncate_utf16`, `#1222`).
+    public static func truncateUTF16(_ text: String, maxUnits: Int) -> [UInt16] {
+        guard maxUnits > 0 else { return [] }
+        var out: [UInt16] = []
+        out.reserveCapacity(min(text.utf16.count, maxUnits))
+        for scalar in text.unicodeScalars {
+            if scalar == "\0" { continue }
+            let encoded = scalar.utf16
+            if out.count + encoded.count > maxUnits { break }
+            out.append(contentsOf: encoded)
+        }
+        return out
+    }
+}
+
 public enum TrayItem: Sendable, Equatable {
     case action(id: String, label: String, enabled: Bool)
     case separator
@@ -3695,6 +3742,26 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             }
             view.onWheel = { [weak self] wev, pt, now in
                 self?.withLockedRuntime { rt in rt.wheelFromWindow(wev, at: rt.inputPoint(fromWindow: pt), now: now) }
+                self?.macHost?.requestFrame()
+            }
+            view.onMagnify = { [weak self] delta, pt, phase, now in
+                self?.withLockedRuntime { rt in
+                    let p = rt.inputPoint(fromWindow: pt)
+                    _ = rt.magnify(MagnifyEvent(delta: delta, x: p.x, y: p.y, phase: phase), at: p, now: now)
+                }
+                self?.macHost?.requestFrame()
+            }
+            view.onRotate = { [weak self] degrees, pt, phase, now in
+                self?.withLockedRuntime { rt in
+                    let p = rt.inputPoint(fromWindow: pt)
+                    _ = rt.rotate(RotateEvent(degrees: degrees, x: p.x, y: p.y, phase: phase), at: p, now: now)
+                }
+                self?.macHost?.requestFrame()
+            }
+            view.onSmartMagnify = { [weak self] pt, now in
+                self?.withLockedRuntime { rt in
+                    _ = rt.smartMagnify(at: rt.inputPoint(fromWindow: pt), now: now)
+                }
                 self?.macHost?.requestFrame()
             }
             view.onKeyDown = { [weak self] kev, now in

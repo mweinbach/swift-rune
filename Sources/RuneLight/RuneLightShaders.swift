@@ -54,6 +54,19 @@ public enum RuneLightShaders: Sendable {
         return uint(max(p.mat.z, 0.0f) + 0.5f);
     }
 
+    // Rune's rounded rect (clip.wgsl `sd_continuous` / `sd_rounded`):
+    // radii tl, tr, br, bl, y down; negative selects Apple's continuous corner.
+    constant float CONTINUOUS_K = 1.52866483f;
+    inline float sd_continuous(float2 p, float2 halfSize, float r) {
+        float e = CONTINUOUS_K * r;
+        float2 q = halfSize - abs(p);
+        float2 v = float2(e) - q;
+        if (v.x <= 0.0f || v.y <= 0.0f) { return max(-q.x, -q.y); }
+        float u = atan2(v.y, v.x) * (4.0f / RL_PI) - 1.0f;
+        float u2 = u * u;
+        return length(v) - e * (1.14602295f + u2 * (-0.37573161f + u2 * (0.30796609f - 0.07724354f * u2)));
+    }
+
     inline float sd_rrect(float2 p, float2 halfSize, float4 radii) {
         float r = radii.x;
         if (p.x > 0.0f) {
@@ -61,6 +74,7 @@ public enum RuneLightShaders: Sendable {
         } else {
             r = select(radii.x, radii.w, p.y > 0.0f);
         }
+        if (r < 0.0f) { return sd_continuous(p, halfSize, min(-r, min(halfSize.x, halfSize.y))); }
         r = min(r, min(halfSize.x, halfSize.y));
         float2 q = abs(p) - halfSize + float2(r);
         return min(max(q.x, q.y), 0.0f) + length(max(q, float2(0.0f))) - r;
@@ -842,7 +856,20 @@ public enum RuneLightShaders: Sendable {
         return o;
     }
 
+    // Apple's continuous corner (clip.wgsl `sd_continuous` / `sd_rounded`).
+    constant float GL_CONTINUOUS_K = 1.52866483f;
+    inline float g_sd_continuous(float2 p, float2 halfSize, float r) {
+        float e = GL_CONTINUOUS_K * r;
+        float2 q = halfSize - abs(p);
+        float2 v = float2(e) - q;
+        if (v.x <= 0.0f || v.y <= 0.0f) { return max(-q.x, -q.y); }
+        float u = atan2(v.y, v.x) * (4.0f / GL_PI) - 1.0f;
+        float u2 = u * u;
+        return length(v) - e * (1.14602295f + u2 * (-0.37573161f + u2 * (0.30796609f - 0.07724354f * u2)));
+    }
+
     inline float g_sd_rrect(float2 p, float2 halfSize, float r0) {
+        if (r0 < 0.0f) { return g_sd_continuous(p, halfSize, min(-r0, min(halfSize.x, halfSize.y))); }
         float r = min(r0, min(halfSize.x, halfSize.y));
         float2 q = abs(p) - halfSize + float2(r);
         return min(max(q.x, q.y), 0.0f) + length(max(q, float2(0.0f))) - r;

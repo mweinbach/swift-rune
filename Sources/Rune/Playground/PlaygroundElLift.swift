@@ -74,6 +74,7 @@ extension El {
         if scrollFadeStyle != .smooth { out.scrollFadeStyle = scrollFadeStyle }
         if scrollMarginPts != 0 { out.scrollMarginPts = scrollMarginPts }
         if scrollAnchorEnabled { out.scrollAnchorEnabled = true }
+        if let wheelScrollsTarget { out.wheelScrollsTarget = wheelScrollsTarget }
         if let stickyConfig { out.stickyConfig = stickyConfig }
         if let growthSpec { out.growthSpec = growthSpec }
         if let kitFilterKeysValue { out.kitFilterKeysValue = kitFilterKeysValue }

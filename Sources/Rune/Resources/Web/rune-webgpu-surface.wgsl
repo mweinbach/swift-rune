@@ -65,13 +65,8 @@ fn sample_linear(uv: vec2<f32>) -> vec4<f32> {
         }}
         col /= f32(taps.x * taps.y);
     }
-    let half = u.node.zw*0.5; let rel = p-u.node.xy-half;
-    var radius = select(u.radii.x, u.radii.y, rel.x > 0.0);
-    if rel.y > 0.0 { radius = select(u.radii.w, u.radii.z, rel.x > 0.0); }
-    let r = min(abs(radius), min(half.x, half.y));
-    let q = abs(rel) - half + r;
-    let distance = select(min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r,
-        max(max(q.x, q.y), (q.x + q.y + 0.41421356 * r) * 0.70710678), radius < 0.0);
+    let half = u.node.zw * 0.5;
+    let distance = sd_rounded(p - u.node.xy - half, half, u.radii);
     let hard = vec4(p - u.clip.xy, u.clip.zw - p);
     var mask = clamp(0.5 - distance, 0.0, 1.0);
     for (var edge = 0u; edge < 4u; edge++) {

@@ -1034,4 +1034,135 @@ struct ScrollBarRuntimeParityTests {
         #expect(try top(rt) == -400.0)
         #expect(rt.state.clicks == [4])
     }
+
+    // 23. crates/rune-kit/src/scroll_bar/tests.rs (`#1214`): wheel over bar/thumb scrolls viewport it follows.
+    @Test("Wheel over scroll bar track and thumb scrolls the viewport it follows (#1214, scroll_bar/tests.rs)")
+    func wheelOverBarScrollsViewportItFollows() throws {
+        let rt = Runtime(state: 20, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+            makeView(rows)
+        }
+        rt.setSystemScrollBars(.always)
+        var now = 0.0
+        _ = rt.frame(at: now)
+        frames(rt, 2, now: &now)
+
+        let track = try rect(rt, "scroll-bar")
+        #expect(track[0] == 186.0 && track[2] == 14.0)
+
+        rt.wheel(WheelEvent(dy: -40.0), at: Vec2(track[0] + track[2] / 2.0, 50.0), now: now)
+        now += 1.0 / 60.0
+        _ = rt.frame(at: now)
+        #expect(try top(rt) == -40.0)
+
+        let thumb = try rect(rt, "thumb")
+        rt.wheel(WheelEvent(dy: -40.0), at: Vec2(thumb[0] + thumb[2] / 2.0, thumb[1] + thumb[3] / 2.0), now: now)
+        now += 1.0 / 60.0
+        _ = rt.frame(at: now)
+        #expect(try top(rt) == -80.0)
+
+        rt.wheel(WheelEvent(dy: -40.0), at: Vec2(60.0, 50.0), now: now)
+        now += 1.0 / 60.0
+        _ = rt.frame(at: now)
+        #expect(try top(rt) == -120.0)
+    }
+
+    // 24. `#1214` thumbOnly bar + two identically-keyed vertical panes resolve wheel to their own viewport.
+    @Test("Wheel over thumbOnly scroll bar and identically-keyed sibling panes scrolls only its own viewport (#1214)")
+    func wheelOverThumbOnlyAndSiblingPanesScrollsOwnViewport() throws {
+        // Part A: thumbOnly (ScrollView style) handles wheel over both thumb and empty track while keeping click passthrough.
+        struct ClickState {
+            var clicks: [Int] = []
+        }
+        let kit = Kit.neutral(dark: true)
+        let thumbOnlyStyle = KitScrollBarStyle.scrollView(kit).alwaysVisible(true)
+        let thumbOnlyRT = Runtime(state: ClickState(), viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { _, _ in
+            col().size(200.0, 100.0).child(
+                col()
+                    .key("scroll")
+                    .wFull()
+                    .h(100.0)
+                    .scroll(stickBottom: false)
+                    .child(col().children((0..<25).map { i in
+                        el().key("row\(i)")
+                            .wFull()
+                            .h(20.0)
+                            .onClick { st, _ in st.clicks.append(i) }
+                    }))
+                    .scrollBarStyled(thumbOnlyStyle)
+            )
+        }
+        thumbOnlyRT.setSystemScrollBars(.always)
+        var now = 0.0
+        _ = thumbOnlyRT.frame(at: now)
+        frames(thumbOnlyRT, 2, now: &now)
+
+        let slotR = try rect(thumbOnlyRT, "thumb-slot")
+        let emptyTrackPt = Vec2(194.0, 88.0)
+        #expect(emptyTrackPt.y > slotR[1] + slotR[3] + 2.0)
+
+        // Wheel over empty track scrolls the viewport.
+        thumbOnlyRT.wheel(WheelEvent(dy: -30.0), at: emptyTrackPt, now: now)
+        now += 1.0 / 60.0
+        _ = thumbOnlyRT.frame(at: now)
+        #expect(try top(thumbOnlyRT) == -30.0)
+
+        // Wheel over thumb-slot also scrolls the viewport.
+        let updatedSlot = try rect(thumbOnlyRT, "thumb-slot")
+        thumbOnlyRT.wheel(WheelEvent(dy: -25.0), at: Vec2(updatedSlot[0] + updatedSlot[2] / 2.0, updatedSlot[1] + updatedSlot[3] / 2.0), now: now)
+        now += 1.0 / 60.0
+        _ = thumbOnlyRT.frame(at: now)
+        #expect(try top(thumbOnlyRT) == -55.0)
+
+        // Click on empty track still passes through to the row behind it.
+        thumbOnlyRT.pointerMove(to: emptyTrackPt, at: now)
+        thumbOnlyRT.pointerDown(at: emptyTrackPt, at: now)
+        thumbOnlyRT.pointerUp(at: emptyTrackPt, at: now)
+        frames(thumbOnlyRT, 2, now: &now)
+        #expect(!thumbOnlyRT.state.clicks.isEmpty)
+
+        // Part B: two side-by-side panes keying their viewports identically ("scroll") each take their own bar's wheel.
+        final class PaneOffsets: @unchecked Sendable {
+            var left: Float = 0.0
+            var right: Float = 0.0
+        }
+        let offsets = PaneOffsets()
+        let panesRT = Runtime(state: (), viewport: Vec2(400, 100), pixelScale: 1.0, systemDark: true) { _, _ in
+            let k = Kit.neutral(dark: true)
+            func makePane(_ key: String, onScroll: @escaping @Sendable (ScrollPos) -> Void) -> El<Void> {
+                col().key(key).size(200.0, 100.0).child(
+                    col()
+                        .key("scroll")
+                        .wFull()
+                        .h(100.0)
+                        .scroll(stickBottom: false)
+                        .onScrollOffset(onScroll)
+                        .child(col().children((0..<20).map { i in el().key("row\(i)").wFull().h(20.0) }))
+                        .scrollBar(k)
+                )
+            }
+            return row().key("root").wFull().hFull()
+                .child(makePane("left") { offsets.left = $0.offset.y })
+                .child(makePane("right") { offsets.right = $0.offset.y })
+        }
+        panesRT.setSystemScrollBars(.always)
+        now = 0.0
+        _ = panesRT.frame(at: now)
+        frames(panesRT, 2, now: &now)
+
+        let tracks = panesRT.elements().filter { !$0.exiting && $0.key == "scroll-bar" }.map(\.rect)
+        let leftBar = try #require(tracks.first { $0[0] < 200.0 })
+        let rightBar = try #require(tracks.first { $0[0] >= 200.0 })
+
+        panesRT.wheel(WheelEvent(dy: -40.0), at: Vec2(rightBar[0] + rightBar[2] / 2.0, 50.0), now: now)
+        now += 1.0 / 60.0
+        _ = panesRT.frame(at: now)
+        #expect(offsets.right == 40.0)
+        #expect(offsets.left == 0.0)
+
+        panesRT.wheel(WheelEvent(dy: -25.0), at: Vec2(leftBar[0] + leftBar[2] / 2.0, 50.0), now: now)
+        now += 1.0 / 60.0
+        _ = panesRT.frame(at: now)
+        #expect(offsets.left == 25.0)
+        #expect(offsets.right == 40.0)
+    }
 }

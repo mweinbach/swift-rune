@@ -53,7 +53,7 @@ export function mountRuneFields(canvas, send, placeEditor) {
             if (placeEditor && event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey) return;
             // Navigation and undo operate on the full model, beyond the mirrored window.
             // Copy, cut and paste arrive as separate browser clipboard events.
-            const chord = event.metaKey || event.ctrlKey;
+            const chord = (event.metaKey || event.ctrlKey) && !event.getModifierState?.('AltGraph');
             if (chord && ['c', 'v', 'x'].includes(event.key.toLowerCase())) return;
             const editing = ['Enter', 'Tab', 'Escape', 'PageUp', 'PageDown', 'Home', 'End',
                 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'];
@@ -141,9 +141,12 @@ export function mountRuneFields(canvas, send, placeEditor) {
     };
 }
 
+const IS_MAC = typeof navigator !== 'undefined' && /Mac|iP/.test(navigator.platform || '');
+
 function keyEvent(event) {
     return { kind: 'key', code: event.code, key: event.key, repeated: event.repeat, shift: event.shiftKey,
-        ctrl: event.ctrlKey, alt: event.altKey, cmd: event.metaKey };
+        ctrl: event.ctrlKey, alt: event.altKey, cmd: event.metaKey,
+        altGraph: Boolean(event.getModifierState?.('AltGraph')), isMac: IS_MAC };
 }
 
 // The caller initializes the WASI Preview 1 reactor once, e.g. with wasi.initialize(instance).
@@ -281,7 +284,7 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
         const pointer = wasm.rune_web_buffer(message.length);
         new Uint8Array(wasm.memory.buffer, pointer, message.length).set(message);
         const handled = wasm.rune_web_event(message.length, now()) !== 0;
-        if (handled || (event.kind !== 'pageScroll' && event.kind !== 'pageScrollX' && event.kind !== 'wheel')) frames.request();
+        if (handled || (event.kind !== 'pageScroll' && event.kind !== 'pageScrollX' && event.kind !== 'wheel' && event.kind !== 'keyup' && event.kind !== 'mods')) frames.request();
         readField();
         clipboard?.drain();
         syncPopup();
@@ -571,7 +574,7 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
         }
         canvas.addEventListener('keydown', event => {
             if (page && !page.focused && ['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(event.key)) return;
-            if (clipboard && (event.ctrlKey || event.metaKey) && !event.altKey &&
+            if (clipboard && (event.ctrlKey || event.metaKey) && !event.altKey && !event.getModifierState?.('AltGraph') &&
                 ['c', 'x', 'v'].includes(event.key.toLowerCase())) return;
             if (!event.isComposing && send(keyEvent(event))) event.preventDefault();
         }, options);
@@ -582,13 +585,16 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
         const focusDocument = canvas.ownerDocument;
         const focusWindow = focusDocument.defaultView ?? window;
         const syncWindowFocus = event => {
-            const focused = focusDocument.hasFocus();
-            if (!send({ kind: 'focus', focused }) && event?.type === 'blur' && !focused) {
+            const focused = !focusDocument.hidden && focusDocument.hasFocus();
+            if (!send({ kind: 'focus', focused }) && (event?.type === 'blur' || focusDocument.hidden) && !focused) {
                 send({ kind: 'focuslost' }); // Older reactors only accept the keyboard reset.
             }
         };
         focusWindow.addEventListener('focus', syncWindowFocus, options);
         focusWindow.addEventListener('blur', syncWindowFocus, options);
+        focusDocument.addEventListener('visibilitychange', () => {
+            if (focusDocument.hidden) syncWindowFocus({ type: 'visibilitychange' });
+        }, options);
         queueMicrotask(() => { if (!disposed) syncWindowFocus(); });
         focusWindow.addEventListener('resize', invalidateCanvasRect, options);
         focusWindow.addEventListener('scroll', invalidateCanvasRect, { ...options, capture: true, passive: true });
@@ -603,7 +609,7 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
             const point = localPoint(event);
             if (point && send({ kind: 'wheel', ...point, dx: event.deltaX, dy: event.deltaY,
                 deltaMode: event.deltaMode, shift: event.shiftKey, ctrl: event.ctrlKey,
-                alt: event.altKey, cmd: event.metaKey })) event.preventDefault();
+                alt: event.altKey, cmd: event.metaKey, isMac: IS_MAC })) event.preventDefault();
         }, { ...options, passive: false });
         const buttons = ['primary', 'middle', 'secondary', 'back', 'forward'];
         for (const kind of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
@@ -611,13 +617,14 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
                 if (kind === 'pointerdown') cachedCanvasRect = null;
                 const point = localPoint(event);
                 if (!point) return;
-                const secondary = event.button === 2 && popup && event.pointerType === 'mouse';
+                const isSecondary = event.button === 2 || (IS_MAC && event.button === 0 && event.ctrlKey && !event.metaKey);
+                const secondary = isSecondary && popup && event.pointerType !== 'touch';
                 if (kind === 'pointerdown' && !secondary) {
                     canvas.focus({ preventScroll: true });
                     canvas.setPointerCapture(event.pointerId);
                 }
                 send({ kind, ...point, button: buttons[event.button], pointerType: event.pointerType, pointerId: event.pointerId,
-                    shift: event.shiftKey, ctrl: event.ctrlKey, alt: event.altKey, cmd: event.metaKey });
+                    shift: event.shiftKey, ctrl: event.ctrlKey, alt: event.altKey, cmd: event.metaKey, isMac: IS_MAC });
                 if (kind === 'pointerdown' && secondary) {
                     const claim = popupJSON(wasm.rune_web_secondary_claim) ?? {kind:''};
                     if (popup.arm(event, claim)) {
@@ -627,6 +634,11 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
                 } else if (kind === 'pointerdown' && (!page || event.pointerType !== 'touch')) event.preventDefault();
             }, options);
         }
+        canvas.addEventListener('lostpointercapture', event => {
+            if (event.pointerType !== 'touch') {
+                send({ kind: 'pointercancel', pointerType: event.pointerType, pointerId: event.pointerId, lostCapture: true });
+            }
+        }, options);
         if (page || resizeTo) {
             observer = new ResizeObserver(updateSize);
             observer.observe(page?.container ?? resizeTo);

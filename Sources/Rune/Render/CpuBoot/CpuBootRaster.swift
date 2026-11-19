@@ -257,6 +257,10 @@ public enum CpuBootRaster {
             occ.removeAll(keepingCapacity: true)
             for n in list {
                 let idx = Int(n)
+                let within = bins.within[idx]
+                // Inside a PlusLighter layer every primitive adds to what came before it; an opaque
+                // box never hides an earlier sibling (`#1228`).
+                if within != CpuBootBin.topLayer && bins.layers[Int(within)].additive { continue }
                 let i = scene.instances[idx]
                 guard let solid = CpuBootBin.opaqueBox(i) else { continue }
                 let b = bins.bounds[idx]
@@ -265,7 +269,7 @@ public enum CpuBootRaster {
                 let rx1 = min(UInt32(max(0, b.z)), tile.2)
                 let ry1 = min(UInt32(max(0, b.w)), tile.3)
                 if rx1 > rx0 && ry1 > ry0 {
-                    occ.append(Occluder(n: n, within: bins.within[idx], solid: solid, clip: CpuBootShade.Clip.of(i), r: (rx0, ry0, rx1, ry1)))
+                    occ.append(Occluder(n: n, within: within, solid: solid, clip: CpuBootShade.Clip.of(i), r: (rx0, ry0, rx1, ry1)))
                 }
             }
         }

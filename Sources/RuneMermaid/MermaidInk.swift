@@ -93,7 +93,7 @@ enum InkFlattener {
         let a = top.a + bottom.a * (1.0 - top.a)
         if a <= 1e-6 { return .transparent }
         func mixChannel(_ t: Float, _ b: Float) -> Float {
-            RefShader.srgbToLinear((RefShader.linearToSRGB(t) * top.a + RefShader.linearToSRGB(b) * bottom.a * (1.0 - top.a)) / a)
+            dec((enc(t) * top.a + enc(b) * bottom.a * (1.0 - top.a)) / a)
         }
         return Color(
             r: mixChannel(top.r, bottom.r),
@@ -101,6 +101,14 @@ enum InkFlattener {
             b: mixChannel(top.b, bottom.b),
             a: a
         )
+    }
+
+    static func enc(_ c: Float) -> Float {
+        MotionColor.srgbEncode(min(max(c, 0.0), 1.0))
+    }
+
+    static func dec(_ c: Float) -> Float {
+        MotionColor.srgbDecode(min(max(c, 0.0), 1.0))
     }
 
     private static func bounds(of points: [Vec2]) -> (Float, Float, Float, Float) {

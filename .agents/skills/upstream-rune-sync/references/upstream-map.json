@@ -826,6 +826,24 @@
           "note": "The public thread clock excludes sleep and captures fine native work. Windows ARM64 and x64 emulation resolved 22/22 and 21/21 eligible short slices where GetThreadTimes returned zero. Longer samples agreed with an independent scheduler clock. macOS/Linux thread clocks and Android ARM64 use native clocks; physical Intel TSC timing is outside the Windows run."
         },
         {
+          "upstream": "src/frame/host_step.rs",
+          "swift": [
+            "Sources/Rune/Platform/Embed.swift",
+            "Sources/Rune/Tooling/VirtualDesktop.swift",
+            "Sources/Rune/Platform/OverlayHostingMacOS.swift"
+          ],
+          "status": "ported",
+          "note": "Shared host frame step order across window, overlay, embed, headless, and virtual desktop hosts (#1236)."
+        },
+        {
+          "upstream": "src/frame/host_step_tests.rs",
+          "swift": [
+            "Tests/RuneTests/UpstreamParityF54Tests.swift"
+          ],
+          "status": "ported",
+          "note": "Unified host frame sequencing tests (#1236)."
+        },
+        {
           "upstream": "src/frame/live_log.rs",
           "swift": [
             "Sources/Rune/Runtime.swift"
@@ -1027,6 +1045,24 @@
           "note": "FnKeyMonitor flagsChanged local monitor + classifyFlagsChanged + take() wired in MacOSApp, WindowHostingMacOS & OverlayHostingMacOS (MacOSFnAndLayout.swift + TextAuditCloseoutTests.swift)"
         },
         {
+          "upstream": "src/input/host_events.rs",
+          "swift": [
+            "Sources/Rune/WebBrowserSession.swift",
+            "Sources/Rune/Platform/OverlayHostingMacOS.swift",
+            "Sources/Rune/Tooling/VirtualDesktop.swift"
+          ],
+          "status": "ported",
+          "note": "Shared host event translation across window, overlay, web, and virtual desktop hosts (#1222, #1226)."
+        },
+        {
+          "upstream": "src/input/host_events_tests.rs",
+          "swift": [
+            "Tests/RuneTests/UpstreamParityF54Tests.swift"
+          ],
+          "status": "ported",
+          "note": "Host event translation parity tests (#1222, #1226)."
+        },
+        {
           "upstream": "src/input/key_diagnostics.rs",
           "swift": [
             "Sources/Rune/Input/PointerObserverAndDiagnostics.swift",
@@ -1122,6 +1158,30 @@
           "status": "partial"
         },
         {
+          "upstream": "src/memo/built.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ],
+          "status": "ported",
+          "note": "Built memo snapshot storage (#1237 split)."
+        },
+        {
+          "upstream": "src/memo/reads.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ],
+          "status": "ported",
+          "note": "Memo tracked read dependency recording (#1237 split)."
+        },
+        {
+          "upstream": "src/memo/region.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ],
+          "status": "ported",
+          "note": "Memo region scoping (#1237 split)."
+        },
+        {
           "upstream": "src/memo/snapshot.rs",
           "swift": [
             "Sources/Rune/Shell/MemoAndSnapshot.swift",
@@ -1139,6 +1199,15 @@
           ],
           "status": "ported",
           "note": "MemoSnapshot.enter is driven four times with Bool/Int under the same item. Subsequent commits see the new values, separate keys still work, and a thrown error inside a nested scope restores the original outer value."
+        },
+        {
+          "upstream": "src/memo/tests.rs",
+          "swift": [
+            "Tests/RuneTests/MemoLiveLatestGrowthRewindTests.swift",
+            "Tests/RuneTests/MemoLayoutSpanTests.swift"
+          ],
+          "status": "ported",
+          "note": "Memo invalidation and layout span tests (#1237 split)."
         },
         {
           "upstream": "src/motion_gate/check.rs",
@@ -1644,6 +1713,22 @@
           "note": "Embeddable UI components on macOS (RuneMacView), SwiftUI (RuneView for macOS/iOS/tvOS/visionOS), UIKit (RuneIOSView), and Android (RuneSurfaceView + AndroidSurfaceHost)."
         },
         {
+          "upstream": "src/platform/embed_frame.rs",
+          "swift": [
+            "Sources/Rune/Platform/Embed.swift"
+          ],
+          "status": "ported",
+          "note": "LayerHost embed frame pipeline with sRGB reblend and post-step miss handling (#1222, #1236)."
+        },
+        {
+          "upstream": "src/platform/embed_frame_tests.rs",
+          "swift": [
+            "Tests/RuneTests/UpstreamParityF54Tests.swift"
+          ],
+          "status": "ported",
+          "note": "Embed frame pipeline tests (#1222, #1236)."
+        },
+        {
           "upstream": "src/platform/ime.rs",
           "swift": [
             "Sources/Rune/PlatformCommon.swift"
@@ -1845,6 +1930,14 @@
           "note": "The seven original redraw/present/land ordering checks are grouped into one simulated shadow-resampling fixture. It observes settled resize, suppressed ordinary redraws, cancellation on hide, prewarm then show, and later resize/show pending a presented frame. Both originals and translations inspect the state-machine effect count."
         },
         {
+          "upstream": "src/platform/portal.rs",
+          "swift": [
+            "Sources/Rune/LinuxPlatform.swift"
+          ],
+          "status": "partial",
+          "note": "Consolidated Linux XDG Desktop Portal client (#1222)."
+        },
+        {
           "upstream": "src/platform/portal_appearance.rs",
           "swift": [
             "Sources/Rune/LinuxPlatform.swift"
@@ -1858,6 +1951,14 @@
           ],
           "status": "ported",
           "note": "Explicit dark/light values select the scheme. Default and invalid inputs decline it. Swift unwraps nested variant wrappers to reach the same preference and tests fallback."
+        },
+        {
+          "upstream": "src/platform/portal_tests.rs",
+          "swift": [
+            "Tests/RuneTests/RunePlatformCloseoutPlatformToolingTests.swift"
+          ],
+          "status": "partial",
+          "note": "Linux XDG Desktop Portal token and client tests (#1222)."
         },
         {
           "upstream": "src/platform/preferences.rs",
@@ -2172,6 +2273,14 @@
           ],
           "status": "partial",
           "note": "Windows ARM64/x64 verified 108 actual DWM frames across four sources, dirty updates, resize and rollback. Four stock Swift windows then verified seamless CPU→GPU pixels, CPU-only operation, direct GPU and interactive CPU fallback after three real failed GPU retries. Physical direct WGL_NV_DX_interop2 and exact backend timing are separate."
+        },
+        {
+          "upstream": "src/platform/win32/dcomp_handover_tests.rs",
+          "swift": [
+            "Tests/RuneTests/RunePlatformIncrement8Tests.swift"
+          ],
+          "status": "partial",
+          "note": "Windows DirectComposition handover tests (#1222)."
         },
         {
           "upstream": "src/platform/win32/dib.rs",
@@ -2592,6 +2701,14 @@
           "note": "The Win32 host posts a native TrackPopupMenuEx session, anchors it to a point or rectangle, routes selection and cancellation to Rune and handles keys during tracking."
         },
         {
+          "upstream": "src/popup_menu/win32_tests.rs",
+          "swift": [
+            "Tests/RuneTests/RunePlatformIncrement7Tests.swift"
+          ],
+          "status": "partial",
+          "note": "Windows popup menu trampoline tests (#1222)."
+        },
+        {
           "upstream": "src/quit.rs",
           "swift": [
             "Sources/Rune/DesktopIntegration.swift"
@@ -2647,6 +2764,15 @@
           ],
           "status": "partial",
           "note": "Apple uses Metal. Windows and Linux draw Rune frames via desktop OpenGL, Android via GLES3, and the browser via WebGL2. The GL path consumes RenderFrame instances, atlases, layers and blur passes. Upstream DX12 and WebGPU backends remain missing."
+        },
+        {
+          "upstream": "src/render/abi_tests.rs",
+          "swift": [
+            "Tests/RuneTests/UpstreamParityF54Tests.swift",
+            "Tests/RuneTests/RenderParityTests.swift"
+          ],
+          "status": "ported",
+          "note": "Canonical RenderInstance kind/bounds ABI tests (#1224, #1228, #1230)."
         },
         {
           "upstream": "src/render/backdrop_blur.rs",
@@ -2867,6 +2993,15 @@
           "note": "The stock GL renderer diffs instances, conservatively bounds damage and redraws the retained root. On both Apple CGL and Linux GLES, 218 mixed-edit frames matched full redraw byte-for-byte. Compatible Windows devices pass dirty rectangles to DXGI Present1. Native Windows tested the queue, full, partial and resized pixels. Full WGL-to-DXGI interoperation requires a driver exposing the sharing extension."
         },
         {
+          "upstream": "src/render/device.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift",
+            "Sources/Rune/Render/MetalRendererEngine.swift"
+          ],
+          "status": "ported",
+          "note": "GPU device initialization and adapter selection (#1230 split)."
+        },
+        {
           "upstream": "src/render/dxbc.rs",
           "swift": [
             "Sources/Rune/MetalRenderer.swift"
@@ -2923,6 +3058,14 @@
           ],
           "status": "ported",
           "note": "Image atlas upload and svg_rgba_cover tests."
+        },
+        {
+          "upstream": "src/render/instance.rs",
+          "swift": [
+            "Sources/Rune/Render/RenderABI.swift"
+          ],
+          "status": "ported",
+          "note": "Canonical RenderInstance kinds, quadBounds, damageQuadBounds, layerBounds, pixelBounds, and endLayer opacity folding (#1224, #1230)."
         },
         {
           "upstream": "src/render/layer_blur.rs",
@@ -3003,6 +3146,15 @@
           "note": "NativeSurface byte/dmabuf/video upload tests."
         },
         {
+          "upstream": "src/render/offscreen.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift",
+            "Sources/Rune/MetalRenderer.swift"
+          ],
+          "status": "ported",
+          "note": "Offscreen GPU frame capture (#1230 split)."
+        },
+        {
           "upstream": "src/render/outlines.rs",
           "swift": [
             "Sources/Rune/Render/MetalOutlineText.swift",
@@ -3043,6 +3195,14 @@
             "Sources/Rune/MetalRenderer.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/render/prewarm_tests.rs",
+          "swift": [
+            "Tests/RuneTests/RenderParityTests.swift"
+          ],
+          "status": "ported",
+          "note": "Pipeline prewarm tests (#1230)."
         },
         {
           "upstream": "src/render/surface_alpha.rs",
@@ -3319,6 +3479,22 @@
           "status": "partial"
         },
         {
+          "upstream": "src/runtime/commit/apply/exits.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "ported",
+          "note": "Exiting subtree cleanup during commit (#1237 split)."
+        },
+        {
+          "upstream": "src/runtime/commit/apply/growth.rs",
+          "swift": [
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift"
+          ],
+          "status": "ported",
+          "note": "Growth row and fold application during commit (#1237 split)."
+        },
+        {
           "upstream": "src/runtime/commit/apply_scratch.rs",
           "swift": [
             "Sources/Rune/Runtime.swift"
@@ -3524,6 +3700,30 @@
           "status": "partial"
         },
         {
+          "upstream": "src/runtime/frame/latch.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "ported",
+          "note": "Frame live-binding latching (#1237 split)."
+        },
+        {
+          "upstream": "src/runtime/frame/motion.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "ported",
+          "note": "Frame motion advancement (#1237 split)."
+        },
+        {
+          "upstream": "src/runtime/frame/wakes.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "ported",
+          "note": "Frame wake deadline resolution (#1237 split)."
+        },
+        {
           "upstream": "src/runtime/grid_tests.rs",
           "swift": [
             "Tests/RuneTests/PaintGridAndBandsParityTests.swift"
@@ -3554,6 +3754,15 @@
           ],
           "status": "ported",
           "note": "Runtime initialization."
+        },
+        {
+          "upstream": "src/runtime/input.rs",
+          "swift": [
+            "Sources/Rune/Input/CanvasGestureAndTouch.swift",
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "ported",
+          "note": "Runtime input subsystem struct (#1234)."
         },
         {
           "upstream": "src/runtime/input/action.rs",
@@ -3649,6 +3858,15 @@
             "Tests/RuneTests/WheelChainParityTests.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/runtime/input/gesture_tests.rs",
+          "swift": [
+            "Tests/RuneTests/UpstreamParityF54Tests.swift",
+            "Tests/RuneKitTests/ScrollBarRuntimeParityTests.swift"
+          ],
+          "status": "ported",
+          "note": "El.wheelScrolls gesture and scrollbar wheel forwarding tests (#1214)."
         },
         {
           "upstream": "src/runtime/input/help.rs",
@@ -3941,6 +4159,14 @@
           "note": "Paired memo/fresh runtimes test moved ancestors and paths, exits, nested self-prefix keys, selection, focus, duplicate keys and virtual children. Geometry and metadata are compared across frames. Rust also checks retained spare-node capacity after content height probes and storage reuse through a move. Swift’s move/fresh equality does not establish retained allocations."
         },
         {
+          "upstream": "src/runtime/motion.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "ported",
+          "note": "Runtime motion subsystem struct (#1234)."
+        },
+        {
           "upstream": "src/runtime/motion/content_slide.rs",
           "swift": [
             "Sources/Rune/Runtime.swift",
@@ -4122,6 +4348,15 @@
           ],
           "status": "partial",
           "note": "Measured focus paths and handler outputs cover text input precedence, modal routing, innermost-first dispatch, click focus, scope-constrained reveal and modifiers. All eleven assertions, including faded-truncation tooltip state, animation/removal semantics and reduced-motion icon rotation through the same key input path, were not confirmed."
+        },
+        {
+          "upstream": "src/runtime/paint.rs",
+          "swift": [
+            "Sources/Rune/Render/RenderElAndRuntime.swift",
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "ported",
+          "note": "Runtime paint subsystem struct (#1234)."
         },
         {
           "upstream": "src/runtime/paint/bands.rs",
@@ -4328,6 +4563,14 @@
           "note": "Compiled original pinned Rust inherit_fade/in_fade and the Swift renderer’s actual private helpers. Across 65,536 deterministic inputs including signed widths, nested origins, empty bounds, edge ties and crossing rectangles, every component bit pattern and Boolean matched (digest 7332120261417384581). Native painter calls these helpers for nested and scrolled clips; shipped GPU tests inspect inherited linear/nested soft edges."
         },
         {
+          "upstream": "src/runtime/paint/state.rs",
+          "swift": [
+            "Sources/Rune/Render/RenderElAndRuntime.swift"
+          ],
+          "status": "ported",
+          "note": "Runtime paint retained state (#1234)."
+        },
+        {
           "upstream": "src/runtime/paint/text_flights.rs",
           "swift": [
             "Sources/Rune/Runtime.swift"
@@ -4399,6 +4642,14 @@
           ],
           "status": "partial",
           "note": "Exercises growth-row reordering, reduced motion, stable focus and virtual row slides."
+        },
+        {
+          "upstream": "src/runtime/scroll.rs",
+          "swift": [
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift"
+          ],
+          "status": "ported",
+          "note": "Runtime scroll subsystem struct (#1234)."
         },
         {
           "upstream": "src/runtime/scroll/anchor.rs",
@@ -4559,6 +4810,14 @@
           ],
           "status": "partial",
           "note": "The six SelectAll routing scenarios are exercised against SelectAllResolver, including focused field/app precedence and group fallback. Normal runtime tests separately cover selecting and copying groups. Rust runs all six through the physical or routed runtime and inspects selected_text. An equivalent physical dispatch test for all six cases was not located."
+        },
+        {
+          "upstream": "src/runtime/selection.rs",
+          "swift": [
+            "Sources/Rune/Runtime/SelectionRuntime.swift"
+          ],
+          "status": "ported",
+          "note": "Runtime selection subsystem struct (#1234)."
         },
         {
           "upstream": "src/runtime/selection/caret.rs",
@@ -5322,6 +5581,15 @@
           "note": "Scrolling a Runtime element on/offscreen yields ordered true/false notifications and the standalone half-page/half-element threshold cases agree."
         },
         {
+          "upstream": "src/runtime/web.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift",
+            "Sources/Rune/WebBrowserSession.swift"
+          ],
+          "status": "ported",
+          "note": "Runtime web subsystem struct (#1234)."
+        },
+        {
           "upstream": "src/runtime/web/a11y.rs",
           "swift": [
             "Sources/Rune/Runtime.swift",
@@ -5844,6 +6112,14 @@
           ],
           "status": "ported",
           "note": "Headless app runner."
+        },
+        {
+          "upstream": "src/tooling/headless/frame.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ],
+          "status": "ported",
+          "note": "Headless frame stepping via shared host_step (#1236)."
         },
         {
           "upstream": "src/tooling/headless_run.rs",
@@ -6390,6 +6666,14 @@
           "status": "partial"
         },
         {
+          "upstream": "src/window/host/draw_tests.rs",
+          "swift": [
+            "Tests/RuneTests/MacOSHostFrameTests.swift"
+          ],
+          "status": "ported",
+          "note": "Window host draw and reblend miss tests (#1236)."
+        },
+        {
           "upstream": "src/window/host/events.rs",
           "swift": [
             "Sources/Rune/MacOSApp.swift",
@@ -6418,6 +6702,15 @@
             "Tests/RuneTests/DesktopWindowGroupTests.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/window/host/render.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Platform/WindowHostingMacOS.swift"
+          ],
+          "status": "ported",
+          "note": "Window host GPU frame draw submission (#1236)."
         },
         {
           "upstream": "src/window/host/shell_requests.rs",
@@ -6830,6 +7123,14 @@
           ],
           "status": "partial",
           "note": "Compatible Windows swap chains use the DXGI frame-latency waitable object. The native queue test presented 27 full/partial/resize frames and received 15 registered slot wakes. WGL-only fallback and overlay windows do not use that DXGI wait object."
+        },
+        {
+          "upstream": "src/window/win32/slot_tests.rs",
+          "swift": [
+            "Tests/RuneTests/RunePlatformIncrement8Tests.swift"
+          ],
+          "status": "partial",
+          "note": "Windows DXGI swap-chain slot reset tests (#1222)."
         },
         {
           "upstream": "src/window/win32/video_layer.rs",
@@ -8437,6 +8738,14 @@
       "status": "partial",
       "moduleMappings": [
         {
+          "upstream": "src/abi_tests.rs",
+          "swift": [
+            "Tests/RuneLightTests/RuneLightABITests.swift"
+          ],
+          "status": "ported",
+          "note": "RuneLight ABI layout and Metal pipeline reflection tests (#1224)."
+        },
+        {
           "upstream": "src/cpu.rs",
           "swift": [
             "Sources/RuneLight/RuneLightCPU.swift",
@@ -9920,6 +10229,15 @@
       "status": "done",
       "moduleMappings": [
         {
+          "upstream": "src/buffer.rs",
+          "swift": [
+            "Sources/RuneStaging/Buffer.swift",
+            "Tests/RuneStagingTests/RuneStagingTests.swift"
+          ],
+          "status": "ported",
+          "note": "GrowBuffer, paddedRowBytes, unpadRows, and 2D Readback (#1224, #1230)."
+        },
+        {
           "upstream": "src/lib.rs",
           "swift": [
             "Sources/RuneStaging/Staging.swift",
@@ -10921,11 +11239,36 @@
           "status": "partial"
         },
         {
-          "upstream": "src/video/macos.rs",
+          "upstream": "src/video/macos/asset.rs",
           "swift": [
-            "Sources/Rune/MediaPipeline.swift"
+            "Sources/Rune/Video/MacOSVideoBackend.swift"
           ],
-          "status": "partial"
+          "status": "ported",
+          "note": "macOS AVAsset video loader (#1237 split)."
+        },
+        {
+          "upstream": "src/video/macos/mod.rs",
+          "swift": [
+            "Sources/Rune/Video/MacOSVideoBackend.swift"
+          ],
+          "status": "ported",
+          "note": "macOS AVFoundation video backend (#1237 split)."
+        },
+        {
+          "upstream": "src/video/macos/park.rs",
+          "swift": [
+            "Sources/Rune/Video/MacOSVideoBackend.swift"
+          ],
+          "status": "ported",
+          "note": "macOS video decoder parking lifecycle (#1237 split)."
+        },
+        {
+          "upstream": "src/video/macos/port.rs",
+          "swift": [
+            "Sources/Rune/Video/MacOSVideoBackend.swift"
+          ],
+          "status": "ported",
+          "note": "macOS video frame output port (#1237 split)."
         },
         {
           "upstream": "src/video/mod.rs",
@@ -11148,6 +11491,14 @@
             "Sources/Rune/Edit/SpellPause.swift"
           ],
           "status": "ported"
+        },
+        {
+          "upstream": "src/tests.rs",
+          "swift": [
+            "Tests/RuneTests/UpstreamParityF54Tests.swift"
+          ],
+          "status": "ported",
+          "note": "Regional language tag matching and prefix isolation tests (#1222)."
         },
         {
           "upstream": "src/web.js",

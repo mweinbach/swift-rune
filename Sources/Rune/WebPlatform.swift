@@ -504,13 +504,17 @@ public final class WebAppHost<State> {
 
     func handlePointer(_ phase: TouchPhase, x: Float, y: Float, button: PointerButton,
                        pointerType: String, pointerID: UInt64 = 1, mods: Mods = .none, at now: Double) {
-        let point = Vec2(x, y)
+        let point = runtime.inputPoint(fromWindow: Vec2(x, y))
         if pointerType == "touch" {
             runtime.touch(id: pointerID, phase: phase, at: point, time: now, holdClock: now)
             if phase == .ended { finishActivation(at: now) }
             return
         }
-        guard !runtime.touching(), phase != .cancelled else { return }
+        if phase == .cancelled {
+            runtime.cancelPointer(at: now)
+            return
+        }
+        guard !runtime.touching() else { return }
         runtime.hostInput(.pointer) {
             switch phase {
             case .started where button == .secondary: runtime.secondaryDown(at: point, at: now)

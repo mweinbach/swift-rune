@@ -1010,6 +1010,83 @@ struct MetalDifferentialTests {
         #expect(report.outlierPixels == 0, "rounded-clip-primitive: \(report)")
     }
 
+    @Test("differential.rs:722 cpu_gpu_turned_plus_lighter_saturates_before_interpolation")
+    func cpuGpuTurnedPlusLighterSaturatesBeforeInterpolation() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+
+        func makeScene(_ children: [RenderInstance]) -> OracleScene {
+            var scene = OracleGenerator.scene(records: [])
+            scene.width = 48
+            scene.height = 48
+            scene.clear = [0.02, 0.04, 0.08, 1.0]
+            let open = RenderInstance.beginLayer(
+                bounds: SIMD4<Float>(12.0, 12.0, 24.0, 24.0),
+                clip: NO_CLIP,
+                spec: LayerSpec(opacity: 0.8, blend: .plusLighter)
+            )
+            .turned(angle: 0.4, pivot: SIMD2<Float>(24.0, 24.0))
+            var all = [open]
+            all.append(contentsOf: children)
+            all.append(RenderInstance.endLayer())
+            scene.primitives = all.enumerated().map { idx, inst in
+                oraclePrimitive(from: inst, node: UInt32(idx + 1), source: "turned-add/\(idx)")
+            }
+            return scene
+        }
+
+        func boxInst(_ fill: SIMD4<Float>) -> RenderInstance {
+            RenderInstance(
+                rect: SIMD4<Float>(12.0, 12.0, 24.0, 24.0),
+                radii: .zero,
+                fill: fill,
+                border: .zero,
+                params: SIMD4<Float>(0.0, KIND_RECT, 0.0, 1.0),
+                uv: .zero,
+                clip: NO_CLIP,
+                fade: .zero
+            )
+        }
+
+        // Two overlapping [0.8, 0.2, 0.0, 0.8] rects sum to [1.6, 0.4, 0.0, 1.6], which saturates to
+        // [1.0, 0.4, 0.0, 1.0]. Saturation must happen before the turned layer's bilinear sampling.
+        let single = makeScene([boxInst(SIMD4<Float>(1.0, 0.4, 0.0, 1.0))])
+        let doubled = makeScene([
+            boxInst(SIMD4<Float>(0.8, 0.2, 0.0, 0.8)),
+            boxInst(SIMD4<Float>(0.8, 0.2, 0.0, 0.8)),
+        ])
+        try single.validate()
+        try doubled.validate()
+
+        var cpuSingle = OracleFrame(width: 48, height: 48, provenance: true)
+        cpuSingle.render(single)
+        var cpuDoubled = OracleFrame(width: 48, height: 48, provenance: true)
+        cpuDoubled.render(doubled)
+        let cpuDiff = Oracle.compare(scene: doubled, cpu: cpuSingle, gpu: cpuDoubled.rgba, tolerance: 1)
+        #expect(cpuDiff.outlierPixels == 0, "rune-ref turned PlusLighter clamped after interpolation: \(cpuDiff)")
+
+        let gpuSingle = try gpu.renderOffscreen(makeRenderFrame(from: single, glyphGeneration: await sharedGen.allocate())).rgba
+        let gpuDoubled = try gpu.renderOffscreen(makeRenderFrame(from: doubled, glyphGeneration: await sharedGen.allocate())).rgba
+        var gpuMax: UInt8 = 0
+        var gpuWorst: (Int, Int, [UInt8], [UInt8])?
+        for y in 0..<48 {
+            for x in 0..<48 {
+                let i = (y * 48 + x) * 4
+                let a = [gpuSingle[i], gpuSingle[i + 1], gpuSingle[i + 2], gpuSingle[i + 3]]
+                let b = [gpuDoubled[i], gpuDoubled[i + 1], gpuDoubled[i + 2], gpuDoubled[i + 3]]
+                let d = (0..<4).map { UInt8(abs(Int(a[$0]) - Int(b[$0]))) }.max() ?? 0
+                if d > gpuMax {
+                    gpuMax = d
+                    gpuWorst = (x, y, a, b)
+                }
+            }
+        }
+        #expect(gpuMax <= 1, "GPU turned PlusLighter clamped after interpolation: max=\(gpuMax) worst=\(String(describing: gpuWorst))")
+
+        let report = Oracle.compare(scene: doubled, cpu: cpuDoubled, gpu: gpuDoubled, tolerance: 2)
+        #expect(report.outlierPixels == 0, "turned-plus-lighter: \(report)")
+    }
+
     private static func runCLI(binaryURL: URL, arguments: [String]) throws -> (status: Int32, stdout: String, stderr: String) {
         let proc = Process()
         proc.executableURL = binaryURL

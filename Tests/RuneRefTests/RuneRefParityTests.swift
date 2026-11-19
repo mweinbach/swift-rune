@@ -700,4 +700,54 @@ struct RuneRefParityTests {
         #expect(corner == [0, 0, 0, 255], "rounded clip must cut the corner")
         #expect(center == [255, 255, 255, 255], "centre stays filled")
     }
+
+    @Test("turned PlusLighter saturates each texel before bilinear interpolation")
+    func turnedPlusLighterSaturatesBeforeInterpolation() throws {
+        func makeScene(children: [OraclePrimitive]) -> OracleScene {
+            var scene = OracleGenerator.scene(records: [])
+            scene.width = 48
+            scene.height = 48
+            scene.clear = [0.02, 0.04, 0.08, 1.0]
+            var open = makeOracleLayer(kind: 8.0, blur: 0.0)
+            open.rect = [12.0, 12.0, 24.0, 24.0]
+            open.params[0] = 1.0 // PlusLighter
+            open.fill = [0.0, 0.0, 0.0, 0.8]
+            open.turn = [0.4, 24.0, 24.0]
+            var all = [open]
+            all.append(contentsOf: children)
+            all.append(makeOracleLayer(kind: 9.0, blur: 0.0))
+            scene.primitives = all
+            return scene
+        }
+        func boxPrim(fill: [Float], node: UInt32) -> OraclePrimitive {
+            OraclePrimitive(
+                node: node,
+                source: "turned-add/\(node)",
+                rect: [12.0, 12.0, 24.0, 24.0],
+                radii: [0, 0, 0, 0],
+                fill: fill,
+                border: [0, 0, 0, 0],
+                params: [0.0, 0.0, 0.0, 1.0],
+                uv: [0, 0, 0, 0],
+                clip: oracleNoClip,
+                fade: [0, 0, 0, 0]
+            )
+        }
+        // Two overlapping [0.8, 0.2, 0.0, 0.8] rects sum to [1.6, 0.4, 0.0, 1.6], which saturates
+        // to [1.0, 0.4, 0.0, 1.0]. Saturation must happen before the turned layer's bilinear sampling.
+        let single = makeScene(children: [boxPrim(fill: [1.0, 0.4, 0.0, 1.0], node: 2)])
+        let doubled = makeScene(children: [
+            boxPrim(fill: [0.8, 0.2, 0.0, 0.8], node: 2),
+            boxPrim(fill: [0.8, 0.2, 0.0, 0.8], node: 3),
+        ])
+        try single.validate()
+        try doubled.validate()
+
+        var cpuSingle = OracleFrame(width: 48, height: 48, provenance: true)
+        cpuSingle.render(single)
+        var cpuDoubled = OracleFrame(width: 48, height: 48, provenance: true)
+        cpuDoubled.render(doubled)
+        let cpuDiff = Oracle.compare(scene: doubled, cpu: cpuSingle, gpu: cpuDoubled.rgba, tolerance: 1)
+        #expect(cpuDiff.outlierPixels == 0, "rune-ref turned PlusLighter clamped after interpolation: \(cpuDiff)")
+    }
 }

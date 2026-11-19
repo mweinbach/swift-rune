@@ -1604,6 +1604,7 @@ extension El {
 
     /// Attaches a styled scrollbar track/thumb pair overlaid along the scrollable viewport edge (`El::scroll_bar_styled`),
     /// wired to `ScrollBarVisibility`, `ScrollBarPressTracker`, and live `MotionRect`/`Opacity`/`Fill` bindings.
+    /// A wheel over the bar scrolls the viewport it follows, as a browser's scrollbar belongs to its scroller (`#1214`).
     public func scrollBarStyled(
         _ style: KitScrollBarStyle,
         viewportKey: String = "scroll",
@@ -1625,6 +1626,7 @@ extension El {
         let savedSticky = self.layout.sticky
         let savedSelf = self
         var (area, resolvedKey, outer, inner) = self.wrapScrollArea(file: file, line: line, column: column)
+        let target = "\(area)/\(resolvedKey)"
         let slotKey = "\(effectiveStyle.key)::\(area)::\(effectiveStyle.horizontal ? "x" : "y")"
         let slot = ScrollBarLiveStore.shared.slot(for: slotKey, style: effectiveStyle, viewportKey: resolvedKey)
 
@@ -1728,12 +1730,16 @@ extension El {
 
         let wiredThumbSlot = effectiveStyle.thumbOnly ? attachDragHandlers(thumbSlot) : thumbSlot
 
+        // A wheel over the bar is the viewport's, the track standing beside it rather than in it, on
+        // either axis: a sideways wheel over a table's bar scrolls the table, and a vertical wheel
+        // over it chains on up from the table to the pane that holds it (`#1214`).
         let baseTrack: El<State> = el()
             .key(effectiveStyle.key)
             .rounded(effectiveStyle.trackRadius)
             .absolute(x: 0, y: 0)
             .liveRect(slot.liveTrack.binding)
             .liveOpacity(slot.liveOpacity.smooth(effectiveStyle.enterSpring).rest(effectiveStyle.leaveSpring))
+            .wheelScrolls(target)
 
         var track: El<State> = (effectiveStyle.thumbOnly ? baseTrack : attachDragHandlers(baseTrack))
             .child(wiredThumbSlot)

@@ -34,6 +34,17 @@ uint flags_of(Prim p) {
     return uint(max(p.mat.z, 0.0) + 0.5);
 }
 
+const float CONTINUOUS_K = 1.52866483;
+float sd_continuous(vec2 p, vec2 halfSize, float r) {
+    float e = CONTINUOUS_K * r;
+    vec2 q = halfSize - abs(p);
+    vec2 v = vec2(e) - q;
+    if (v.x <= 0.0 || v.y <= 0.0) { return max(-q.x, -q.y); }
+    float u = atan(v.y, v.x) * (4.0 / RL_PI) - 1.0;
+    float u2 = u * u;
+    return length(v) - e * (1.14602295 + u2 * (-0.37573161 + u2 * (0.30796609 - 0.07724354 * u2)));
+}
+
 float sd_rrect(vec2 p, vec2 halfSize, vec4 radii) {
     float r = radii.x;
     if (p.x > 0.0) {
@@ -41,6 +52,7 @@ float sd_rrect(vec2 p, vec2 halfSize, vec4 radii) {
     } else {
         r = (p.y > 0.0 ? radii.w : radii.x);
     }
+    if (r < 0.0) { return sd_continuous(p, halfSize, min(-r, min(halfSize.x, halfSize.y))); }
     r = min(r, min(halfSize.x, halfSize.y));
     vec2 q = abs(p) - halfSize + vec2(r);
     return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;

@@ -222,6 +222,150 @@ public struct RenderInstance: Sendable, Equatable {
             fade: .zero
         )
     }
+
+    // MARK: - Canonical Quad, Layer & Damage Bounds (`render/instance.rs`, `#1224`)
+
+    @inline(__always)
+    private static func clampBand(rect: SIMD4<Float>, uv: SIMD4<Float>, lo: SIMD2<Float>, hi: SIMD2<Float>) -> SIMD4<Float> {
+        let bx0 = max(lo.x, rect.x + uv.x)
+        let by0 = max(lo.y, rect.y + uv.y)
+        let bx1 = max(bx0, min(hi.x, rect.x - uv.z))
+        let by1 = max(by0, min(hi.y, rect.y + uv.w))
+        return SIMD4<Float>(bx0, by0, bx1, by1)
+    }
+
+    @inline(__always)
+    private static func turnedGlyphBounds(_ rect: SIMD4<Float>, angle: Float) -> SIMD4<Float> {
+        let s = sinf(angle)
+        let c = cosf(angle)
+        let w = abs(c) * rect.z + abs(s) * rect.w
+        let h = abs(s) * rect.z + abs(c) * rect.w
+        let x0 = rect.x + (rect.z - w) * 0.5
+        let y0 = rect.y + (rect.w - h) * 0.5
+        return SIMD4<Float>(x0, y0, x0 + w, y0 + h)
+    }
+
+    /// Upright bounding box of edges `[x0, y0, x1, y1]` turned `angle` radians clockwise about `pivot`.
+    @inline(__always)
+    public static func turnedBounds(_ r: SIMD4<Float>, angle: Float, pivot: SIMD2<Float>) -> SIMD4<Float> {
+        let sn = sinf(angle)
+        let c = cosf(angle)
+        var minX = Float.infinity
+        var minY = Float.infinity
+        var maxX = -Float.infinity
+        var maxY = -Float.infinity
+        let corners: [(Float, Float)] = [(r.x, r.y), (r.z, r.y), (r.x, r.w), (r.z, r.w)]
+        for (x, y) in corners {
+            let dx = x - pivot.x
+            let dy = y - pivot.y
+            let qx = pivot.x + c * dx - sn * dy
+            let qy = pivot.y + sn * dx + c * dy
+            if qx < minX { minX = qx }
+            if qy < minY { minY = qy }
+            if qx > maxX { maxX = qx }
+            if qy > maxY { maxY = qy }
+        }
+        return SIMD4<Float>(minX, minY, maxX, maxY)
+    }
+
+    private func boundsCore(damage: Bool, glyphRotPad: Float) -> SIMD4<Float>? {
+        let kind = params.y
+        if kind < 0.5 && kind >= -0.5 {
+            let grow = 1.0 + params.z * 2.0
+            let lo = SIMD2<Float>(rect.x - grow, rect.y - grow)
+            let hi = damage
+                ? SIMD2<Float>(rect.x + rect.z + grow, rect.y + rect.w + grow)
+                : SIMD2<Float>(lo.x + rect.z + 2.0 * grow, lo.y + rect.w + 2.0 * grow)
+            return uv.z < 0.0 ? Self.clampBand(rect: rect, uv: uv, lo: lo, hi: hi) : SIMD4<Float>(lo.x, lo.y, hi.x, hi.y)
+        }
+        if kind == KIND_GLYPH {
+            if params.x != 0.0 {
+                let tb = Self.turnedGlyphBounds(rect, angle: params.x)
+                return SIMD4<Float>(tb.x - glyphRotPad, tb.y - glyphRotPad, tb.z + glyphRotPad, tb.w + glyphRotPad)
+            }
+            return SIMD4<Float>(rect.x, rect.y, rect.x + rect.z, rect.y + rect.w)
+        }
+        if !damage && (kind > 11.5 || kind == KIND_LAYER_END) { return nil }
+        if damage && (kind == KIND_LAYER_END || kind > 13.5) { return nil }
+        let kInt = Int(kind.rounded())
+        let grow: Float
+        switch kInt {
+        case 1: grow = params.z * 3.0 + 1.0
+        case 3, 5...9, 13: grow = 1.0
+        case 12: grow = max(params.z, 0.0) + 1.0
+        default: grow = 1.0 + params.z * 2.0
+        }
+        let lo = SIMD2<Float>(rect.x - grow, rect.y - grow)
+        let hi = damage
+            ? SIMD2<Float>(rect.x + rect.z + grow, rect.y + rect.w + grow)
+            : SIMD2<Float>(lo.x + rect.z + 2.0 * grow, lo.y + rect.w + 2.0 * grow)
+        if kInt == 1 && uv.z < 0.0 {
+            return Self.clampBand(rect: rect, uv: uv, lo: lo, hi: hi)
+        }
+        if kInt == 8 && border.y != 0.0 {
+            return Self.turnedBounds(SIMD4<Float>(lo.x, lo.y, hi.x, hi.y), angle: border.y, pivot: SIMD2<Float>(border.z, border.w))
+        }
+        return SIMD4<Float>(lo.x, lo.y, hi.x, hi.y)
+    }
+
+    /// Axis-aligned device-pixel bounds `[x0, y0, x1, y1]` of the quad drawn by `base_vs`, before clipping (`#1224`).
+    public func quadBounds() -> SIMD4<Float>? {
+        boundsCore(damage: false, glyphRotPad: 0.0)
+    }
+
+    /// Pre-clip device-pixel bounds for partial damage (`quadBounds` plus `KIND_EFFECT` and `KIND_BACKDROP_BLUR`, `#1224`).
+    public func damageQuadBounds() -> SIMD4<Float>? {
+        boundsCore(damage: true, glyphRotPad: 0.0)
+    }
+
+    /// Device-pixel bounds `[x0, y0, x1, y1]` this instance contributes to an enclosing isolated layer,
+    /// intersected with `clip` (`Instance::layer_bounds`, `#1224`).
+    public func layerBounds() -> SIMD4<Float> {
+        let kind = params.y
+        if kind == KIND_LAYER || kind == KIND_LAYER_END { return .zero }
+        let raw: SIMD4<Float>
+        if kind == KIND_GLYPH && params.x != 0.0 {
+            raw = Self.turnedGlyphBounds(rect, angle: params.x)
+        } else {
+            let grow: Float
+            if kind == KIND_GLYPH {
+                grow = 0.0
+            } else if kind == KIND_SHADOW {
+                grow = params.z * 3.0 + 1.0
+            } else if kind == KIND_EFFECT {
+                grow = max(params.z, 0.0) + 1.0
+            } else if kind == KIND_RECT || kind == KIND_GRADIENT || kind == KIND_DASHED || kind == KIND_RADIAL {
+                grow = 1.0 + params.z * 2.0
+            } else {
+                grow = 1.0
+            }
+            let lo = SIMD2<Float>(rect.x - grow, rect.y - grow)
+            let hi = SIMD2<Float>(rect.x + rect.z + grow, rect.y + rect.w + grow)
+            if kind <= KIND_SHADOW && uv.z < 0.0 {
+                raw = Self.clampBand(rect: rect, uv: uv, lo: lo, hi: hi)
+            } else {
+                raw = SIMD4<Float>(lo.x, lo.y, hi.x, hi.y)
+            }
+        }
+        return SIMD4<Float>(
+            max(raw.x, clip.x),
+            max(raw.y, clip.y),
+            min(raw.z, clip.z),
+            min(raw.w, clip.w)
+        )
+    }
+
+    /// Rasterized pixel bounds `[x0, y0, x1, y1)` within a `width × height` target (`Instance::pixel_bounds`, `#1224`).
+    public func pixelBounds(width w: Int32, height h: Int32) -> SIMD4<Int32> {
+        guard let b = boundsCore(damage: false, glyphRotPad: 1.0) else { return .zero }
+        func first(_ v: Float) -> Float { ceilf(v - 0.5) }
+        let x0 = max(0.0, max(first(b.x), floorf(clip.x - 0.5)))
+        let y0 = max(0.0, max(first(b.y), floorf(clip.y - 0.5)))
+        let x1 = min(Float(w), min(first(b.z), ceilf(clip.z + 0.5)))
+        let y1 = min(Float(h), min(first(b.w), ceilf(clip.w + 0.5)))
+        guard x1 > x0 && y1 > y0 else { return .zero }
+        return SIMD4<Int32>(Int32(x0), Int32(y0), Int32(x1), Int32(y1))
+    }
 }
 
 /// Losslessly encodes a `UInt64` across 4 `Float` lanes using 16-bit integer chunks (free of NaN hazards).

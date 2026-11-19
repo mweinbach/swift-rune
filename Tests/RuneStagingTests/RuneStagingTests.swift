@@ -356,4 +356,119 @@ struct RuneStagingTests {
         staging2.writeBuffer(dst2, offset: 8, data: [9, 10, 11, 12])
         #expect(staging2.stats.chunks == 2)
     }
+
+    @Test("paddedRowBytes aligns to 256-byte texture copy alignment")
+    func paddedRowBytesAlignsToCopyAlignment() {
+        let align = copyBytesPerRowAlignment
+        #expect(align == 256)
+        #expect(paddedRowBytes(width: 0, bytesPerPixel: 4) == 0)
+        #expect(paddedRowBytes(width: 1, bytesPerPixel: 4) == align)
+        #expect(paddedRowBytes(width: 64, bytesPerPixel: 4) == 256)
+        #expect(paddedRowBytes(width: 65, bytesPerPixel: 4) == 512)
+        #expect(paddedRowBytes(width: 37, bytesPerPixel: 4) == align)
+        #expect(paddedRowBytes(width: 2048, bytesPerPixel: 1) == 2048)
+    }
+
+    @Test("unpadRows strips trailing row padding")
+    func unpadRowsStripsTrailingPadding() {
+        let data: [UInt8] = [1, 2, 3, 4, 9, 9, 9, 9, 5, 6, 7, 8, 9, 9, 9, 9]
+        #expect(unpadRows(data, rowBytes: 4, height: 2, paddedRow: 8) == [1, 2, 3, 4, 5, 6, 7, 8])
+        #expect(unpadRows(Array(data.prefix(8)), rowBytes: 4, height: 1, paddedRow: 8) == [1, 2, 3, 4])
+        #expect(unpadRows([], rowBytes: 4, height: 0, paddedRow: 256).isEmpty)
+    }
+
+    #if canImport(Metal)
+    @Test("GrowBuffer reuses on steady ensure and doubles to power-of-two capacity on overflow")
+    func metalGrowBufferLifecycle() {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        var grow = GrowBuffer(
+            device: device,
+            label: "test grow",
+            stride: 16,
+            initialCapacity: 4,
+            minBytes: 256
+        )
+        #expect(grow.capacity == 4)
+        #expect(grow.byteLength == 256)
+        let firstID = ObjectIdentifier(grow.buffer)
+
+        let grew0 = grow.ensure(device: device, count: 0)
+        #expect(!grew0)
+        let grew4 = grow.ensure(device: device, count: 4)
+        #expect(!grew4)
+        #expect(ObjectIdentifier(grow.buffer) == firstID)
+
+        // Growing past 4 items to 20 -> next power of two is 32 -> 32 * 16 = 512 bytes.
+        let grew20 = grow.ensure(device: device, count: 20)
+        #expect(grew20)
+        #expect(grow.capacity == 32)
+        #expect(grow.byteLength == 512)
+        let secondID = ObjectIdentifier(grow.buffer)
+        #expect(secondID != firstID)
+
+        let grew32 = grow.ensure(device: device, count: 32)
+        #expect(!grew32)
+        #expect(ObjectIdentifier(grow.buffer) == secondID)
+    }
+
+    @Test("Readback copies full and sub-origin regions from a Metal texture and unpads rows")
+    func metalReadbackFullAndOrigin() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else { return }
+
+        let w = 10
+        let h = 4
+        let texDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: w,
+            height: h,
+            mipmapped: false
+        )
+        texDesc.storageMode = .shared
+        texDesc.usage = [.shaderRead]
+        let tex = try #require(device.makeTexture(descriptor: texDesc))
+
+        var src = [UInt8](repeating: 0, count: w * h * 4)
+        for y in 0..<h {
+            for x in 0..<w {
+                let i = (y * w + x) * 4
+                src[i] = UInt8(x * 20 + 1)
+                src[i + 1] = UInt8(y * 50 + 2)
+                src[i + 2] = UInt8((x + y) * 11 + 3)
+                src[i + 3] = 255
+            }
+        }
+        src.withUnsafeBytes { raw in
+            tex.replace(
+                region: MTLRegionMake2D(0, 0, w, h),
+                mipmapLevel: 0,
+                withBytes: raw.baseAddress!,
+                bytesPerRow: w * 4
+            )
+        }
+
+        // Full texture readback (non-256B row width: 40 bytes -> padded to 256).
+        let full = Readback(device: device, label: "full readback", width: UInt32(w), height: UInt32(h), bytesPerPixel: 4)
+        #expect(full.paddedRow == 256)
+        #expect(full.rowBytes == 40)
+        let cb1 = try #require(queue.makeCommandBuffer())
+        full.copyFrom(commandBuffer: cb1, texture: tex)
+        cb1.commit()
+        let fullPixels = full.read(commandBuffer: cb1)
+        #expect(fullPixels == src)
+
+        // Sub-rectangle readback from non-zero origin (3, 1), size 4x2.
+        let sub = Readback(device: device, label: "sub readback", width: 4, height: 2, bytesPerPixel: 4)
+        let cb2 = try #require(queue.makeCommandBuffer())
+        sub.copyFrom(commandBuffer: cb2, texture: tex, origin: MTLOrigin(x: 3, y: 1, z: 0))
+        cb2.commit()
+        let subPixels = try #require(sub.tryRead(commandBuffer: cb2))
+        var expectedSub: [UInt8] = []
+        for y in 1..<3 {
+            let rowStart = (y * w + 3) * 4
+            expectedSub.append(contentsOf: src[rowStart..<(rowStart + 4 * 4)])
+        }
+        #expect(subPixels == expectedSub)
+    }
+    #endif
 }

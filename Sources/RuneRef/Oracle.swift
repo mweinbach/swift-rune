@@ -667,7 +667,7 @@ public struct OracleFrame: Sendable, Equatable {
                                 let cov = alpha * OracleShader.layerClipCoverage(p, screen: (Float(x) + 0.5, Float(y) + 0.5))
                                 if cov <= 0.0 { continue }
                                 let at = Int(y * width + x)
-                                var src: (Float, Float, Float, Float)
+                                let src: (Float, Float, Float, Float)
                                 if let (sn, cs, pivot) = activeTurn {
                                     let qx = Float(x) + 0.5 - pivot[0]
                                     let qy = Float(y) + 0.5 - pivot[1]
@@ -682,7 +682,16 @@ public struct OracleFrame: Sendable, Equatable {
                                         if tx < 0.0 || ty < 0.0 || tx >= Float(width) || ty >= Float(height) {
                                             return (0, 0, 0, 0)
                                         }
-                                        return layerBuf[Int(UInt32(ty) * width + UInt32(tx))]
+                                        let c = layerBuf[Int(UInt32(ty) * width + UInt32(tx))]
+                                        if layerAdditive {
+                                            return (
+                                                min(max(c.0, 0.0), 1.0),
+                                                min(max(c.1, 0.0), 1.0),
+                                                min(max(c.2, 0.0), 1.0),
+                                                min(max(c.3, 0.0), 1.0)
+                                            )
+                                        }
+                                        return c
                                     }
                                     let a = texel(bx, by)
                                     let b = texel(bx + 1.0, by)
@@ -697,15 +706,17 @@ public struct OracleFrame: Sendable, Equatable {
                                         (a.3 * omfx + b.3 * fx) * omfy + (c.3 * omfx + d.3 * fx) * fy
                                     )
                                 } else {
-                                    src = layerBuf[at]
-                                }
-                                if layerAdditive {
-                                    src = (
-                                        min(max(src.0, 0.0), 1.0),
-                                        min(max(src.1, 0.0), 1.0),
-                                        min(max(src.2, 0.0), 1.0),
-                                        min(max(src.3, 0.0), 1.0)
-                                    )
+                                    let c = layerBuf[at]
+                                    if layerAdditive {
+                                        src = (
+                                            min(max(c.0, 0.0), 1.0),
+                                            min(max(c.1, 0.0), 1.0),
+                                            min(max(c.2, 0.0), 1.0),
+                                            min(max(c.3, 0.0), 1.0)
+                                        )
+                                    } else {
+                                        src = c
+                                    }
                                 }
                                 let col = (src.0 * cov, src.1 * cov, src.2 * cov, src.3 * cov)
                                 if col.3 <= 0.0 { continue }

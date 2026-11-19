@@ -1221,6 +1221,8 @@ final class ElColdData<State> {
     var scrollFadeStyle: ScrollFadeStyle = .smooth
     var scrollMarginPts: Float = 0
     var scrollAnchorEnabled: Bool = false
+    /// `El::wheel_scrolls`: viewport key scrolled by a wheel over this element (`#1214`).
+    var wheelScrollsTarget: String? = nil
     var stickyConfig: StickyConfig? = nil
     @ElColdOptional var growthSpec: GrowthSpec? = nil
     var isStreaming: Bool = false
@@ -1393,6 +1395,7 @@ final class ElColdData<State> {
         c.scrollFadeStyle = scrollFadeStyle
         c.scrollMarginPts = scrollMarginPts
         c.scrollAnchorEnabled = scrollAnchorEnabled
+        c.wheelScrollsTarget = wheelScrollsTarget
         c.stickyConfig = stickyConfig
         c._growthSpec = _growthSpec
         c.isStreaming = isStreaming
@@ -1697,6 +1700,8 @@ public struct El<State> {
     public var scrollFadeStyle: ScrollFadeStyle { get { _cold?.scrollFadeStyle ?? .smooth } set { ensureCold().scrollFadeStyle = newValue } }
     public var scrollMarginPts: Float { get { _cold?.scrollMarginPts ?? 0 } set { ensureCold().scrollMarginPts = newValue } }
     public var scrollAnchorEnabled: Bool { get { _cold?.scrollAnchorEnabled ?? false } set { ensureCold().scrollAnchorEnabled = newValue } }
+    /// Viewport key scrolled by a wheel over this element (`El::wheel_scrolls`, `#1214`).
+    public var wheelScrollsTarget: String? { get { _cold?.wheelScrollsTarget } set { ensureCold().wheelScrollsTarget = newValue } }
     internal var stickyConfig: StickyConfig? { get { _cold?.stickyConfig } set { ensureCold().stickyConfig = newValue } }
     public var growthSpec: GrowthSpec? { get { _cold?.growthSpec } set { ensureCold().growthSpec = newValue } }
     public var isStreaming: Bool { get { _cold?.isStreaming ?? false } set { ensureCold().isStreaming = newValue } }
@@ -2256,6 +2261,19 @@ public struct El<State> {
         copy.layout.scrollAxes = .both
         copy.layout.clipOverflow = true
         return copy
+    }
+
+    /// Routes wheel events over this element to the scroll viewport keyed `key` (or the nearest
+    /// ancestor containing it), matching Chromium's scrollbar-to-scroller ownership (`El::wheel_scrolls`, `#1214`).
+    public func wheelScrolls(_ key: String) -> Self {
+        var copy = self
+        copy.wheelScrollsTarget = key
+        return copy
+    }
+
+    /// In-place variant of `wheelScrolls(_:)` (`El::set_wheel_scrolls`, `#1214`).
+    public mutating func setWheelScrolls(_ key: String) {
+        wheelScrollsTarget = key
     }
 
     public func clip(_ enabled: Bool = true) -> Self {

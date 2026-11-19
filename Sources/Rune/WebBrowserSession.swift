@@ -18,7 +18,7 @@ final class WebBrowserSession {
         var focused: Bool?
         var deltaMode: UInt32?
         var dark, reducedMotion, contrast, hover, coarse: Bool?
-        var shift, ctrl, alt, cmd, field: Bool?
+        var shift, ctrl, alt, cmd, field, altGraph, isMac, lostCapture: Bool?
         var action: AccessibilityAction?
         var number: Double?
     }
@@ -135,9 +135,20 @@ final class WebBrowserSession {
                     ?? host.runtime.accessibilityAction(path, action, value: value, at: now)
                 if handled { host.syncField(activate: true) }
                 return handled
+            case "mods":
+                let mods = Mods(shift: event.shift == true, ctrl: event.ctrl == true,
+                                alt: event.alt == true, cmd: event.cmd == true, logo: event.cmd == true)
+                host.runtime.dispatchModifiers(mods, at: now)
+                return false
             case "key", "keyup":
                 var mods = Mods(shift: event.shift == true, ctrl: event.ctrl == true,
                                 alt: event.alt == true, cmd: event.cmd == true, logo: event.cmd == true)
+                // On Windows European layouts AltGr sets both Ctrl and Alt; let those characters type (`#1226`).
+                if event.altGraph == true {
+                    mods.ctrl = false
+                    mods.alt = false
+                }
+                host.runtime.dispatchModifiers(mods, at: now)
                 #if os(WASI)
                 // The portable editor uses Ctrl as its primary modifier. Browsers on macOS
                 // report Command as Meta; map it to the same primary editor chord.
@@ -149,13 +160,30 @@ final class WebBrowserSession {
                 return host.handleKey(code: event.code ?? "", key: key, mods: mods, fromField: event.field == true,
                                       pressed: event.kind == "key", repeated: event.repeated == true, at: now)
             case "focus":
-                host.runtime.windowFocus(event.focused ?? false, at: now)
+                let focused = event.focused ?? false
+                host.runtime.windowFocus(focused, at: now)
+                if !focused {
+                    _ = host.runtime.keysLost(at: now)
+                    host.runtime.cancelPointer(at: now)
+                    _ = host.runtime.finishComposition(at: now)
+                    host.runtime.cancelPopups()
+                }
                 return true
             case "focuslost":
                 _ = host.runtime.physicalInput(.focusLost, at: now)
+                host.runtime.cancelPointer(at: now)
+                _ = host.runtime.finishComposition(at: now)
+                host.runtime.cancelPopups()
                 return true
             case "pointerdown", "pointerup", "pointermove", "pointercancel":
+                let mods = Mods(shift: event.shift == true, ctrl: event.ctrl == true,
+                                alt: event.alt == true, cmd: event.cmd == true, logo: event.cmd == true)
+                if event.kind == "pointercancel" && (event.pointerType ?? "mouse") != "touch" {
+                    host.runtime.cancelPointer(at: now)
+                    return true
+                }
                 guard let x = event.x, let y = event.y else { return false }
+                host.runtime.dispatchModifiers(mods, at: now)
                 let phase: TouchPhase
                 switch event.kind {
                 case "pointerdown": phase = .started
@@ -163,11 +191,15 @@ final class WebBrowserSession {
                 case "pointercancel": phase = .cancelled
                 default: phase = .moved
                 }
-                host.handlePointer(phase, x: x, y: y, button: event.button ?? .primary,
+                var button = event.button ?? .primary
+                // On macOS browsers, Ctrl+left-click acts as a secondary click (`#1226`).
+                if event.isMac == true && button == .primary && event.ctrl == true && event.cmd != true && (event.pointerType ?? "mouse") != "touch" {
+                    button = .secondary
+                }
+                host.handlePointer(phase, x: x, y: y, button: button,
                                    pointerType: event.pointerType ?? "mouse",
                                    pointerID: UInt64(bitPattern: Int64(event.pointerId ?? 1)),
-                                   mods: Mods(shift: event.shift == true, ctrl: event.ctrl == true, alt: event.alt == true,
-                                              cmd: event.cmd == true, logo: event.cmd == true), at: now)
+                                   mods: mods, at: now)
                 return true
             case "preferences":
                 guard let dark = event.dark, let motion = event.reducedMotion, let contrast = event.contrast,
@@ -210,15 +242,24 @@ final class WebBrowserSession {
             case "wheel":
                 guard let x = event.x, let y = event.y, let dx = event.dx, let dy = event.dy,
                       let mode = WebMath.WheelDeltaMode(rawValue: event.deltaMode ?? 0) else { return false }
-                let delta = WebMath.normalizeWheelDelta(Vec2(dx, dy), mode: mode, pageHeightPx: host.runtime.viewport.y)
+                let mods = Mods(shift: event.shift == true, ctrl: event.ctrl == true, alt: event.alt == true,
+                                cmd: event.cmd == true, logo: event.cmd == true)
+                host.runtime.dispatchModifiers(mods, at: now)
+                var delta = WebMath.normalizeWheelDelta(Vec2(dx, dy), mode: mode, pageHeightPx: host.runtime.windowViewport().y)
+                // Non-macOS browsers that don't swap axes on Shift+wheel scroll horizontally without double-swapping on macOS (`#1226`).
+                if event.shift == true && delta.x == 0 && event.isMac != true && mode != .pixel {
+                    delta = Vec2(delta.y, 0)
+                }
                 // Native scrolling uses positive deltas towards the top of the content.
                 if event.ctrl == true { return false } // Browser pinch-zoom.
                 if (host.config.webDocument || host.config.fitContentHeight) && abs(delta.y) >= abs(delta.x) { return false }
-                let mods = Mods(shift: event.shift == true, ctrl: false, alt: event.alt == true,
-                                cmd: event.cmd == true, logo: event.cmd == true)
+                let zoom = max(0.1, host.runtime.zoom())
+                let viewPos = host.runtime.inputPoint(fromWindow: Vec2(x, y))
                 host.runtime.hostInput(.wheel) {
-                    host.runtime.wheel(WheelEvent(dx: -delta.x, dy: -delta.y, precise: mode == .pixel, mods: mods),
-                                       at: Vec2(x, y), now: now)
+                    host.runtime.wheel(
+                        WheelEvent(dx: -delta.x / zoom, dy: -delta.y / zoom, precise: mode == .pixel, notch: mode != .pixel, mods: mods),
+                        at: viewPos, now: now
+                    )
                 }
                 return true
             case "insert":
@@ -286,7 +327,7 @@ final class WebBrowserSession {
         if event.kind == "edit" || event.kind == "selection" || event.kind == "insert", fieldUpdate == nil {
             fieldUpdate = FieldUpdate(field: currentField(), activate: false)
         }
-        if handled || (event.kind != "pageScroll" && event.kind != "pageScrollX" && event.kind != "wheel") {
+        if handled || (event.kind != "pageScroll" && event.kind != "pageScrollX" && event.kind != "wheel" && event.kind != "keyup" && event.kind != "mods") {
             drawAfterInput = true
         }
         return handled

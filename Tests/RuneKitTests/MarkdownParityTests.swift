@@ -157,4 +157,117 @@ struct MarkdownParityTests {
         let scene = rt.frame(at: 0)
         #expect(!scene.primitives.isEmpty)
     }
+
+    /// Port of `crates/rune-kit/src/markdown/tests.rs::a_wheel_over_a_table_s_scroll_bar_scrolls_its_own_pane` (`#1214`).
+    /// Also verifies that a horizontal wheel over a wide Markdown table's scroll bar scrolls that
+    /// table sideways without disturbing a sibling pane or identically-keyed sibling table.
+    @Test("Wheel over a wide Markdown table scroll bar scrolls its own table horizontally and chains vertically to its own pane (#1214)")
+    @MainActor
+    func wheelOverMarkdownTableScrollBarScrollsOwnTableAndPane() throws {
+        final class Offsets: @unchecked Sendable {
+            var left: Float = 0.0
+            var right: Float = 0.0
+        }
+        let doc = """
+        | one | two | three |
+        | --- | --- | --- |
+        | alpha beta gamma delta | epsilon zeta eta theta | iota kappa lambda mu |
+        | aaaa bbbb cccc dddd | eeee ffff gggg hhhh | iiii jjjj kkkk llll |
+
+        Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor.
+
+        Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi.
+
+        Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore.
+
+        Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia.
+
+        Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium.
+
+        Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit.
+
+        Neque porro quisquam est, qui dolorem ipsum quia dolor sit amet, consectetur.
+
+        Ut enim ad minima veniam, quis nostrum exercitationem ullam corporis suscipit.
+
+        Quis autem vel eum iure reprehenderit qui in ea voluptate velit esse quam.
+        """
+
+        let offsets = Offsets()
+        let rt = Runtime<Void>(state: (), viewport: Vec2(400, 400), pixelScale: 1.0, systemDark: true) { _, _ in
+            let style = MarkdownStyle.neutral(dark: true)
+                .textWidth(120.0)
+                .tableScrollBar(thumb: .black, thumbHover: .black)
+            func pane(_ key: String, at: @escaping @Sendable (ScrollPos) -> Void) -> El<Void> {
+                col().key(key).w(200.0).h(400.0).child(
+                    col()
+                        .key("list")
+                        .wFull()
+                        .hFull()
+                        .scroll(stickBottom: false)
+                        .onScrollOffset(at)
+                        .child(Markdown(doc).scrollWide(true).view(for: Void.self).render(style))
+                )
+            }
+            return row().key("root").wFull().hFull()
+                .child(pane("left") { offsets.left = $0.offset.y })
+                .child(pane("right") { offsets.right = $0.offset.y })
+        }
+
+        var now = 0.0
+        _ = rt.frame(at: now)
+
+        func bars() -> [([Float], Float)] {
+            rt.elements()
+                .filter { !$0.exiting && $0.key == "scroll-bar" }
+                .map { ($0.rect, $0.opacity) }
+        }
+        let initialBars = bars()
+        let rightBar = try #require(
+            initialBars
+                .filter { $0.0[0] > 200.0 }
+                .max(by: { $0.0[0] < $1.0[0] })?
+                .0,
+            "Both wide tables must mount horizontal scroll bars: \(initialBars)"
+        )
+        #expect(rightBar[2] > 0.0 && rightBar[3] > 0.0, "Right table scroll bar must have non-zero geometry: \(rightBar)")
+
+        // Hover over the right table's bar so the overlay bar shows and receives wheel hits.
+        let barCenter = Vec2(rightBar[0] + rightBar[2] / 2.0, rightBar[1] + rightBar[3] / 2.0)
+        rt.pointerMove(to: barCenter, at: now)
+        for _ in 0..<30 {
+            now += 1.0 / 60.0
+            _ = rt.frame(at: now)
+        }
+        #expect(bars().allSatisfy { $0.1 > 0.9 }, "Table scroll bars should be visible under the pointer: \(bars())")
+
+        // 1. Horizontal wheel over the right table's horizontal scroll bar scrolls only the right table sideways.
+        func headerEl(rightSide: Bool) -> ElementInfo? {
+            let marker = rightSide ? "right/" : "left/"
+            return rt.elements().first { !$0.exiting && $0.key == "th" && $0.path.contains(marker) }
+        }
+        let leftHeaderBefore = try #require(headerEl(rightSide: false)).rect[0]
+        let rightHeaderBefore = try #require(headerEl(rightSide: true)).rect[0]
+
+        rt.wheelXY(barCenter.x, barCenter.y, -24.0, 0.0, now: now)
+        now += 1.0 / 60.0
+        _ = rt.frame(at: now)
+
+        let leftHeaderAfter = try #require(headerEl(rightSide: false)).rect[0]
+        let rightHeaderAfter = try #require(headerEl(rightSide: true)).rect[0]
+        #expect(rightHeaderAfter < rightHeaderBefore - 1.0, "Horizontal wheel over the right table's bar must scroll that table sideways")
+        #expect(leftHeaderAfter == leftHeaderBefore, "Identically-keyed left table must stay at x = 0")
+        #expect(offsets.left == 0.0 && offsets.right == 0.0, "Horizontal wheel must not scroll either vertical pane")
+
+        // Advance past the 0.1 s wheel-axis lock window before testing the vertical wheel.
+        now += 0.25
+        _ = rt.frame(at: now)
+
+        // 2. Vertical wheel over the right table's horizontal bar chains up through that table to its own enclosing pane.
+        rt.wheel(WheelEvent(dy: -30.0), at: barCenter, now: now)
+        now += 1.0 / 60.0
+        _ = rt.frame(at: now)
+        #expect(offsets.right == 30.0, "Vertical wheel over the right pane's table bar must chain to the right pane")
+        #expect(offsets.left == 0.0, "The identically-keyed left pane must stay where it was")
+    }
 }

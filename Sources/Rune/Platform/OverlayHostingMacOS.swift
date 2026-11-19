@@ -158,6 +158,9 @@ public final class RuneOverlayMetalView<State>: NSView {
     var onPointerUp: ((_ point: Vec2, _ button: PointerButton, _ mods: Mods, _ nowSeconds: Double) -> Void)?
     var onPointerReleaseLost: ((_ point: Vec2, _ nowSeconds: Double) -> Void)?
     var onWheel: ((_ event: WheelEvent, _ point: Vec2, _ nowSeconds: Double) -> Void)?
+    var onMagnify: ((_ delta: Float, _ point: Vec2, _ phase: GesturePhase, _ nowSeconds: Double) -> Void)?
+    var onRotate: ((_ degrees: Float, _ point: Vec2, _ phase: GesturePhase, _ nowSeconds: Double) -> Void)?
+    var onSmartMagnify: ((_ point: Vec2, _ nowSeconds: Double) -> Void)?
     var onKeyDown: ((_ event: KeyEvent, _ nowSeconds: Double) -> Bool)?
     var onAppearanceChanged: ((_ isDark: Bool) -> Void)?
     var onNeedsResyncGeometry: ((_ width: Float, _ height: Float, _ scale: Float) -> Void)?
@@ -448,7 +451,7 @@ public final class RuneOverlayMetalView<State>: NSView {
     override public func otherMouseDown(with event: NSEvent) {
         onPointerDown?(
             RuneNSEventBridge.localPoint(in: self, from: event),
-            .middle,
+            PointerButton.fromAppKit(buttonNumber: event.buttonNumber),
             RuneNSEventBridge.mods(for: event),
             nowSeconds()
         )
@@ -457,7 +460,7 @@ public final class RuneOverlayMetalView<State>: NSView {
     override public func otherMouseUp(with event: NSEvent) {
         onPointerUp?(
             RuneNSEventBridge.localPoint(in: self, from: event),
-            .middle,
+            PointerButton.fromAppKit(buttonNumber: event.buttonNumber),
             RuneNSEventBridge.mods(for: event),
             nowSeconds()
         )
@@ -466,6 +469,28 @@ public final class RuneOverlayMetalView<State>: NSView {
     override public func scrollWheel(with event: NSEvent) {
         let wev = WheelDistance.appKitEvent(event)
         onWheel?(wev, RuneNSEventBridge.localPoint(in: self, from: event), nowSeconds())
+    }
+
+    override public func magnify(with event: NSEvent) {
+        onMagnify?(
+            Float(event.magnification),
+            RuneNSEventBridge.localPoint(in: self, from: event),
+            RuneMetalHostView<State>.gesturePhase(from: event.phase),
+            nowSeconds()
+        )
+    }
+
+    override public func rotate(with event: NSEvent) {
+        onRotate?(
+            Float(event.rotation),
+            RuneNSEventBridge.localPoint(in: self, from: event),
+            RuneMetalHostView<State>.gesturePhase(from: event.phase),
+            nowSeconds()
+        )
+    }
+
+    override public func smartMagnify(with event: NSEvent) {
+        onSmartMagnify?(RuneNSEventBridge.localPoint(in: self, from: event), nowSeconds())
     }
 
     override public func keyDown(with event: NSEvent) {

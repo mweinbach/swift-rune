@@ -7782,7 +7782,17 @@ public final class Runtime<State> {
                     }
                 case .rect:
                     if let v = liveStore.get(lnid, Props.RECT) {
-                        baseRect = v
+                        // `El::live_rect` is bound in parent points (`el.rs:359`); offset into
+                        // world space by the parent's laid-out origin.
+                        let parentOrigin = p.parent.flatMap { nodeByFrameId[$0]?.rect.origin }
+                            ?? snap.parentIndex.flatMap { flatNodes.indices.contains($0) ? flatNodes[$0].targetRect.origin : nil }
+                            ?? .zero
+                        baseRect = MotionRect(
+                            left: parentOrigin.x + v.left,
+                            top: parentOrigin.y + v.top,
+                            right: parentOrigin.x + v.right,
+                            bottom: parentOrigin.y + v.bottom
+                        )
                         hasLiveTransform = true
                         hasLiveRect = true
                         if liveStore.isMoving(lnid, Props.RECT) || isLinearTweenActive(b.source) {

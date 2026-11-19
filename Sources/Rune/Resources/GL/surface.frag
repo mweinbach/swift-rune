@@ -8,12 +8,11 @@ float cornerRadius(vec2 p, vec4 r) {
     return p.x > 0.0 ? (p.y > 0.0 ? r.z : r.y) : (p.y > 0.0 ? r.w : r.x);
 }
 
-float boxDistance(vec2 p, vec2 extent, vec4 radii, bool clipShape) {
+float boxDistance(vec2 p, vec2 extent, vec4 radii) {
     float signedRadius = cornerRadius(p, radii);
     float r = min(abs(signedRadius), min(extent.x, extent.y));
     vec2 q = abs(p) - extent + r;
     if (signedRadius >= 0.0) return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
-    if (!clipShape) return max(max(q.x, q.y), (q.x + q.y + 0.41421356 * r) * 0.70710678);
     float e = 1.52866483 * r;
     vec2 d = abs(p) - extent;
     vec2 v = d + e;
@@ -43,7 +42,7 @@ float maskAt(vec2 p) {
     }
     if (any(notEqual(uSurface[12], vec4(0.0)))) {
         vec2 extent = (clip.zw - clip.xy) * 0.5;
-        mask *= clamp(0.5 - boxDistance(p - clip.xy - extent, extent, uSurface[12], true), 0.0, 1.0);
+        mask *= clamp(0.5 - boxDistance(p - clip.xy - extent, extent, uSurface[12]), 0.0, 1.0);
     }
     vec4 fade = uSurface[5];
     if (fade.z != 0.0) {
@@ -52,7 +51,7 @@ float maskAt(vec2 p) {
     }
     vec4 node = uSurface[1];
     vec2 extent = node.zw * 0.5;
-    return mask * clamp(0.5 - boxDistance(p - node.xy - extent, extent, uSurface[3], false), 0.0, 1.0);
+    return mask * clamp(0.5 - boxDistance(p - node.xy - extent, extent, uSurface[3]), 0.0, 1.0);
 }
 
 vec3 linearRGB(vec3 rgb, float transfer) {

@@ -1578,7 +1578,18 @@ extension Runtime {
                 else if b.target == .shadowColor { liveShadowColor = presentedLiveColor(lnid) }
                 else if b.target == .gradientTop { liveGradientTop = presentedLiveColor(lnid) }
                 else if b.target == .gradientBottom { liveGradientBottom = presentedLiveColor(lnid) }
-                else if b.target == .rect, let r = paintLiveStore.get(lnid, Props.RECT) { liveRect = r }
+                else if b.target == .rect, let r = paintLiveStore.get(lnid, Props.RECT) {
+                    // `El::live_rect` is in parent points (`el.rs:359`); offset into world space by parent's origin.
+                    let parentOrigin = presented?.parent.flatMap { presentedById[$0]?.rect.origin }
+                        ?? node.parentIndex.flatMap { flatNodes.indices.contains($0) ? flatNodes[$0].targetRect.origin : nil }
+                        ?? .zero
+                    liveRect = MotionRect(
+                        left: parentOrigin.x + r.left,
+                        top: parentOrigin.y + r.top,
+                        right: parentOrigin.x + r.right,
+                        bottom: parentOrigin.y + r.bottom
+                    )
+                }
             }
 
             let presentedBorder = presented?.border.map(Color.init)

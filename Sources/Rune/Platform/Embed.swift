@@ -193,18 +193,33 @@ public final class LayerHost<State> {
         #endif
     }
 
-    /// Evaluates one frame at `now` seconds and presents to the attached `CAMetalLayer` when needed.
+    /// Evaluates one frame at `now` seconds and presents to the attached `CAMetalLayer` when needed
+    /// (`platform/embed.rs`, `#1222`, `#1236`).
     @discardableResult
     public func frame(at now: Double) -> EmbedFrame {
         evaluateFrame(at: now, presenter: self, forceRedraw: false) { customScene in
             #if canImport(Metal) && canImport(QuartzCore)
             if let layer {
-                guard let renderer, let drawable = layer.nextDrawable() else { return false }
+                guard let renderer else { return false }
+                // Sync layer pixel format with `runtime.srgbBlend` before acquiring a drawable.
+                let preFormat: MTLPixelFormat = runtime.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
+                if layer.pixelFormat != preFormat {
+                    layer.pixelFormat = preFormat
+                }
+                guard var drawable = layer.nextDrawable() else { return false }
                 let result: Result<Void, Error>
                 if let customScene {
                     result = renderer.render(scene: customScene, to: drawable)
                 } else {
-                    result = renderer.draw(frame: renderer.frame(runtime, at: now), to: drawable)
+                    let renderFrame = renderer.frame(runtime, at: now)
+                    // A handler switched blending (`Tx.setSRGBBlend`): re-acquire in the new format.
+                    let postFormat: MTLPixelFormat = runtime.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
+                    if layer.pixelFormat != postFormat {
+                        layer.pixelFormat = postFormat
+                        guard let replacement = layer.nextDrawable() else { return false }
+                        drawable = replacement
+                    }
+                    result = renderer.draw(frame: renderFrame, to: drawable)
                 }
                 if case let .failure(error) = result {
                     lastPresentationError = error
@@ -241,9 +256,10 @@ public final class LayerHost<State> {
         scheduledWake = runtime.nextWakeDeadline(after: now)
         let wakeAfterSecs = scheduledWake.map { max(0.0, $0 - now) }
         let elapsedNs = RuneExecutionContext.uptimeNanoseconds &- startNs
+        let keepTicking = runtime.isAnimating || runtime.hasPendingCommit || runtime.livePending || (shouldDraw && !drew)
         return EmbedFrame(
             drew: drew,
-            animating: runtime.isAnimating,
+            animating: keepTicking,
             wakeAfterSecs: wakeAfterSecs,
             cpuUs: elapsedNs / 1000
         )

@@ -111,39 +111,7 @@ public enum CpuBootBin {
     }
 
     public static func pixelBounds(_ i: RenderInstance, width w: Int32, height h: Int32) -> SIMD4<Int32> {
-        let kind = i.params.y
-        if kind > 11.5 || kind == KIND_LAYER_END { return .zero }
-        let kInt = Int(max(0, Int(kind.rounded())))
-        let grow: Float
-        switch kInt {
-        case 1: grow = i.params.z * 3.0 + 1.0
-        case 2: grow = 0.0
-        case 3, 5...9: grow = 1.0
-        default: grow = 1.0 + i.params.z * 2.0
-        }
-
-        var rect = i.rect
-        if kind == KIND_GLYPH && i.params.x != 0.0 {
-            let s = sinf(i.params.x)
-            let c = cosf(i.params.x)
-            let rw = abs(c) * rect.z + abs(s) * rect.w
-            let rh = abs(s) * rect.z + abs(c) * rect.w
-            rect = SIMD4<Float>(rect.x + (rect.z - rw) * 0.5 - 1.0, rect.y + (rect.w - rh) * 0.5 - 1.0, rw + 2.0, rh + 2.0)
-        }
-        var lo = SIMD2<Float>(rect.x - grow, rect.y - grow)
-        var hi = SIMD2<Float>(lo.x + rect.z + 2.0 * grow, lo.y + rect.w + 2.0 * grow)
-        if kind < 1.5 && i.uv.z < 0.0 {
-            lo = SIMD2<Float>(max(lo.x, i.rect.x + i.uv.x), max(lo.y, i.rect.y + i.uv.y))
-            hi = SIMD2<Float>(max(lo.x, min(hi.x, i.rect.x - i.uv.z)), max(lo.y, min(hi.y, i.rect.y + i.uv.w)))
-        }
-        func first(_ v: Float) -> Float { ceilf(v - 0.5) }
-        let c = i.clip
-        let x0 = max(0.0, max(first(lo.x), floorf(c.x - 0.5)))
-        let y0 = max(0.0, max(first(lo.y), floorf(c.y - 0.5)))
-        let x1 = min(Float(w), min(first(hi.x), ceilf(c.z + 0.5)))
-        let y1 = min(Float(h), min(first(hi.y), ceilf(c.w + 0.5)))
-        guard x1 > x0 && y1 > y0 else { return .zero }
-        return SIMD4<Int32>(Int32(x0), Int32(y0), Int32(x1), Int32(y1))
+        i.pixelBounds(width: w, height: h)
     }
 
     public struct Bins: Sendable {
