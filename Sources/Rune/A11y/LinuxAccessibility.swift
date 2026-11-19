@@ -252,8 +252,11 @@ final class LinuxAccessibilityHost {
         properties.state = UInt32(state | (offscreen ? RUNE_AX_OFFSCREEN : 0))
         properties.anchor = -1
         properties.caret = -1
+        // `#1174`: empty fields count as short and on Linux AT-SPI a runless/empty field must not
+        // publish an out-of-range selection on itself.
         if !node.isSecure, actions & RUNE_AX_SET_TEXT != 0, let selection = node.textSelection,
-           selection.count == 4, selection[0] == 0, selection[2] == 0, let value = node.value {
+           selection.count == 4, selection[0] == 0, selection[2] == 0, let value = node.value,
+           !value.isEmpty {
             properties.anchor = scalarOffset(selection[1], in: value)
             properties.caret = scalarOffset(selection[3], in: value)
             actions |= RUNE_AX_SELECT_TEXT | RUNE_AX_REPLACE_TEXT
@@ -288,7 +291,7 @@ final class LinuxAccessibilityHost {
             hasAnnouncements = true
         }
         let mayReplace = old?.semantics.role != semantics.role || old?.semantics.actions != semantics.actions
-        if !node.isSecure, node.role == .textInput || node.role == .multilineTextInput, let path = node.runtimePath {
+        if !node.isSecure, node.role == .textInput || node.role == .multilineTextInput || node.role == .searchbox, let path = node.runtimePath {
             nextFields[key] = Field(key: key.source, target: path, clip: visible, geometry: mayReplace ? nil : fields[key]?.geometry)
         }
         // A changed ATK interface can recreate the parent. Insertions and removals can

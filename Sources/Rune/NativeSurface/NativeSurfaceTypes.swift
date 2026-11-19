@@ -398,6 +398,7 @@ public struct ByteFrame: Sendable, Equatable {
 /// Source backing a `NativeSurfaceVideoFrame`.
 public enum FrameSource: Sendable {
     case bytes(ByteFrame)
+    case dmabuf(Dmabuf)
     #if os(Windows)
     case shared(WindowsSharedFrame)
     #if canImport(CRuneMedia)

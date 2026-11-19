@@ -37,7 +37,7 @@ struct Phase3DiffTests {
             #expect(header.visible[3] > 0)
         }
         #expect(rt.elements().contains {
-            $0.text == "Binary file changed — diff preview unavailable" && $0.visible[3] > 0
+            $0.text == "Binary file not shown" && $0.visible[3] > 0
         })
 
         let splitRect = try #require(rt.element(byKey: "modes-1")?.rect)

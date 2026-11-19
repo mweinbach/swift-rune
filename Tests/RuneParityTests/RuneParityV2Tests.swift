@@ -17,7 +17,7 @@ struct RuneParityV2Tests {
 
         #expect(decoded.version == 2)
         #expect(decoded.upstreamBranch == "dev")
-        #expect(decoded.crates.count == 18)
+        #expect(decoded.crates.count == 25)
         #expect((decoded.themes ?? []).count == 1)
         #expect(decoded.examples.count == 31)
         #expect((decoded.crateExamples ?? []).count == 66)

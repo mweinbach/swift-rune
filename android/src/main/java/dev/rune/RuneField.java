@@ -6,6 +6,7 @@ import android.text.InputType;
 import android.text.Selection;
 import android.text.SpannableStringBuilder;
 import android.view.KeyEvent;
+import android.view.View;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -15,14 +16,29 @@ import org.json.JSONObject;
 
 /** Android IMEs use document-relative UTF-16 indices. Password editors publish no model text. */
 final class RuneField {
-    private final RuneActivity.RuneView view;
+    private final RuneHostBridge host;
+    private final View view;
     private String key, text = "";
     private int anchor, focus;
     private boolean secure, multiline;
     private Connection connection;
 
-    RuneField(RuneActivity.RuneView view) { this.view = view; }
+    RuneField(RuneHostBridge host) {
+        this.host = host;
+        this.view = host.hostView();
+    }
     boolean active() { return key != null; }
+
+    void deactivate() {
+        if (connection != null) {
+            connection.retire();
+            connection = null;
+        }
+        InputMethodManager ime = host.ime();
+        if (ime != null && view.getWindowToken() != null) {
+            ime.hideSoftInputFromWindow(view.getWindowToken(), 0);
+        }
+    }
 
     void update(JSONObject packet) {
         JSONObject next = packet.optJSONObject("mirror");
@@ -37,23 +53,27 @@ final class RuneField {
         anchor = next == null ? 0 : next.optInt("anchor");
         focus = next == null ? 0 : next.optInt("focus");
 
-        InputMethodManager ime = view.ime();
+        InputMethodManager ime = host.ime();
         if (changed) {
             if (connection != null) connection.retire();
             connection = null;
             if (!active()) {
-                ime.hideSoftInputFromWindow(view.getWindowToken(), 0);
-                ime.restartInput(view);
-                view.clearFocus();
+                if (ime != null) {
+                    if (view.getWindowToken() != null) ime.hideSoftInputFromWindow(view.getWindowToken(), 0);
+                    ime.restartInput(view);
+                }
+                if (host.clearFocusOnEditorBlur()) view.clearFocus();
             } else {
                 view.requestFocus();
-                ime.restartInput(view);
-                ime.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT);
+                if (ime != null) {
+                    ime.restartInput(view);
+                    ime.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT);
+                }
             }
         } else if (connection != null) {
             if (connection.model.equals(text) && anchor == connection.modelAnchor && focus == connection.modelFocus && connection.composing()) return;
             connection.reset();
-            ime.updateSelection(view, anchor, focus, -1, -1);
+            if (ime != null) ime.updateSelection(view, anchor, focus, -1, -1);
         }
     }
 
@@ -105,8 +125,8 @@ final class RuneField {
         }
         private boolean send(String op, JSONObject payload) {
             if (connection != this || !active()) return false;
-            boolean handled = view.activity.runeAction(op, -1, payload);
-            if (!handled) view.activity.runeAction("refresh", -1, null);
+            boolean handled = host.runeAction(op, -1, payload);
+            if (!handled) host.runeAction("refresh", -1, null);
             return handled;
         }
         private boolean mirror(String op) {

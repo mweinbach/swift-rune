@@ -17,8 +17,9 @@ extension Runtime {
         guard let focusedPath, let index = nodeByPath[focusedPath],
               let selector = flatNodes[index].el.a11yActiveDescendant, !selector.isEmpty else { return nil }
 
-        func matches(_ index: Int) -> Bool {
-            let node = flatNodes[index]
+        func matches(_ i: Int) -> Bool {
+            guard i != index, !subtreeExiting(i) else { return false }
+            let node = flatNodes[i]
             return selectsElementSelector(selector, path: node.path, key: node.key)
         }
 
@@ -27,8 +28,7 @@ extension Runtime {
         let descendants = flatNodes.indices.suffix(from: index + 1).lazy.prefix {
             (self.flatNodes[$0].parentIndex ?? -1) >= index
         }
-        guard let targetIndex = descendants.first(where: matches) ?? flatNodes.indices.first(where: matches),
-              targetIndex != index, !subtreeExiting(targetIndex) else { return nil }
+        guard let targetIndex = descendants.first(where: matches) ?? flatNodes.indices.first(where: matches) else { return nil }
         return (focusedPath, flatNodes[targetIndex].path)
     }
 }

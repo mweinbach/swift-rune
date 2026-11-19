@@ -2962,9 +2962,24 @@ public struct DiffView<State>: Sendable {
                                       fixedWidth: width > 0 ? width : nil, stickyLeft: true)
                 }
             case .binary, .empty:
-                let message = diff.isBinary ? "Binary file changed — diff preview unavailable" : "No changes"
+                let message: String = if diff.isBinary {
+                    "Binary file not shown"
+                } else if case .renamed = diff.status {
+                    "File moved without changes"
+                } else if diff.status == .copied {
+                    "File moved without changes"
+                } else if diff.oldMode != diff.newMode {
+                    "File mode changed"
+                } else if diff.status == .added || diff.status == .deleted {
+                    "Empty file"
+                } else {
+                    "No changes"
+                }
                 row = El<State>(direction: .row).key("\(prefix)-\(diff.isBinary ? "binary" : "empty")")
-                    .px(12).py(diff.isBinary ? 12 : 10)
+                    .wFull().h(DiffLayout.noteHeight).itemsCenter()
+                    .px(12)
+                    .bg(k.c.bgBase)
+                    .role(.group).label(message)
                     .child(text(message).font(k.ty.caption()).color(k.c.textMuted))
             case .line(let local):
                 let model = section.rows[local]
@@ -3191,11 +3206,15 @@ public struct DiffView<State>: Sendable {
         let section = st.files.indices.contains(fileIndex) ? st.rowIndex.sections[fileIndex] : nil
         let additions = section?.additions ?? 0
         let deletions = section?.deletions ?? 0
-        let stats = El<State>(direction: .row)
+        var stats = El<State>(direction: .row)
             .gap(6)
             .itemsCenter()
-            .child(text("+\(additions)").font(k.ty.mono).color(addColor))
-            .child(text("-\(deletions)").font(k.ty.mono).color(delColor))
+        if additions > 0 {
+            stats = stats.child(text("+\(additions)").key("\(prefix)-adds").font(k.ty.mono).color(addColor))
+        }
+        if deletions > 0 {
+            stats = stats.child(text("−\(deletions)").key("\(prefix)-dels").font(k.ty.mono).color(delColor))
+        }
 
         let modeLabel = (st.mode == .unified) ? "Split" : "Unified"
         let modeBtn = El<State>(direction: .row)
@@ -3268,7 +3287,21 @@ public struct DiffView<State>: Sendable {
             )
         }
 
-        let headerLabel = "\(diff.path), \(additions) added, \(deletions) removed"
+        var headerLabel = diff.path
+        if case .renamed(let from) = diff.status {
+            headerLabel += ", renamed from \(from)"
+        }
+        headerLabel += ", \(additions) added, \(deletions) removed"
+        var leftHeader = El<State>(direction: .row)
+            .gap(8)
+            .itemsCenter()
+            .child(foldBtn)
+            .child(statusBadge)
+        if let oldMode = diff.oldMode, let newMode = diff.newMode, oldMode != newMode {
+            leftHeader = leftHeader.child(
+                text("\(oldMode) → \(newMode)").key("\(prefix)-mode-change").font(k.ty.caption()).color(k.c.textFaint)
+            )
+        }
         var hdr = El<State>(direction: .row)
             .key("\(prefix)-header")
             .role(.heading)
@@ -3279,13 +3312,7 @@ public struct DiffView<State>: Sendable {
             .itemsCenter()
             .justifyBetween()
             .bg(k.c.layer01)
-            .child(
-                El<State>(direction: .row)
-                    .gap(8)
-                    .itemsCenter()
-                    .child(foldBtn)
-                    .child(statusBadge)
-            )
+            .child(leftHeader)
             .child(actionsRow)
         let divider = El<State>(direction: .column).h(1).bg(k.c.borderWeak).a11yHidden()
         if fileIndex > 0 && st.stickyFile != fileIndex {
@@ -3619,13 +3646,14 @@ public struct DiffView<State>: Sendable {
         case .deletion: kit.c.danger.icon
         case .context, nil: .transparent
         }
-        return El<State>(direction: .row).w(DiffLayout.barWidth).h(height).shrink(0).bg(color).a11yHidden()
+        return El<State>(direction: .column).w(DiffLayout.barWidth).minH(height).selfStretch().shrink(0).bg(color).a11yHidden()
     }
 
     private func noNewlineNote() -> El<State> {
         El<State>(direction: .row)
+            .key("eof")
             .pb(2)
-            .child(text("No newline at end of file").font(kit.ty.caption()).color(kit.c.textFaint))
+            .child(text("No newline at end of file").font(kit.ty.caption()).color(kit.c.textMuted).opacity(0.6))
     }
 
     private struct CodeAppearance: Equatable {
@@ -3725,7 +3753,7 @@ public struct DiffView<State>: Sendable {
             .minH(lineH)
             .selfStretch()
             .bg(colors.gutter)
-            .itemsStart()
+            .itemsStretch()
             .shrink(0)
         if line.kind == .context {
             gutter = gutter.pl(DiffLayout.barWidth)
@@ -3799,6 +3827,7 @@ public struct DiffView<State>: Sendable {
         let leftPane = El<State>(direction: .row)
             .wFrac(0.5).minW(0)
             .minH(lineH)
+            .selfStretch()
             .bg(oldColors.line)
             .itemsStart()
             .child(gutterBar(.deletion, height: lineH))
@@ -3808,6 +3837,7 @@ public struct DiffView<State>: Sendable {
         let rightPane = El<State>(direction: .row)
             .wFrac(0.5).minW(0)
             .minH(lineH)
+            .selfStretch()
             .bg(newColors.line)
             .itemsStart()
             .child(gutterBar(.addition, height: lineH))
@@ -3817,6 +3847,8 @@ public struct DiffView<State>: Sendable {
         return El<State>(direction: .row)
             .key("\(prefix)-srow-\(rowIdx)")
             .wFull()
+            .minH(lineH)
+            .itemsStretch()
             .child(splitPane(leftPane, numberKey: "\(prefix)-so-\(rowIdx)", side: .old, line: oldLine,
                                 file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers))
             .child(splitDivider("\(prefix)-srow-\(rowIdx)"))
@@ -3841,6 +3873,7 @@ public struct DiffView<State>: Sendable {
                 .key(sideKey)
                 .wFrac(0.5).minW(0)
                 .minH(lineH)
+                .selfStretch()
                 .bg(bg)
         }
 
@@ -3851,16 +3884,16 @@ public struct DiffView<State>: Sendable {
             let leftCode = codeBlock(cellKey: "\(prefix)-ccode-o-\(rowIdx)", state: st, file: file, side: .old, line: line, changed: [], wordBg: .transparent, syntaxTheme: syntaxTheme, wrap: st.wraps)
             let rightCode = codeBlock(cellKey: "\(prefix)-ccode-n-\(rowIdx)", state: st, file: file, side: .new, line: line, changed: [], wordBg: .transparent, syntaxTheme: syntaxTheme, wrap: st.wraps)
             let leftPane = El<State>(direction: .row)
-                .wFrac(0.5).minW(0).minH(lineH).bg(oldColors.line).itemsStart()
+                .wFrac(0.5).minW(0).minH(lineH).selfStretch().bg(oldColors.line).itemsStart()
                 .pl(DiffLayout.barWidth)
                 .child(numberCell(cellKey: "\(prefix)-co-\(rowIdx)", number: line.oldNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, colors: oldColors))
                 .child(leftCode)
             let rightPane = El<State>(direction: .row)
-                .wFrac(0.5).minW(0).minH(lineH).bg(newColors.line).itemsStart()
+                .wFrac(0.5).minW(0).minH(lineH).selfStretch().bg(newColors.line).itemsStart()
                 .pl(DiffLayout.barWidth)
                 .child(numberCell(cellKey: "\(prefix)-cn-\(rowIdx)", number: line.newNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, colors: newColors))
                 .child(rightCode)
-            return El<State>(direction: .row).key("\(prefix)-crow-\(rowIdx)").wFull()
+            return El<State>(direction: .row).key("\(prefix)-crow-\(rowIdx)").wFull().minH(lineH).itemsStretch()
                 .child(splitPane(leftPane, numberKey: "\(prefix)-co-\(rowIdx)", side: .old, line: line,
                                 file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers))
                 .child(splitDivider("\(prefix)-crow-\(rowIdx)"))
@@ -3871,11 +3904,11 @@ public struct DiffView<State>: Sendable {
             let colors = palette.row(line.kind, selected: st.rowSelected(rowIdx, file: file, side: .old))
             let code = codeBlock(cellKey: "\(prefix)-dcode-\(rowIdx)", state: st, file: file, side: .old, line: line, changed: [], wordBg: .transparent, syntaxTheme: syntaxTheme, wrap: st.wraps)
             let leftPane = El<State>(direction: .row)
-                .wFrac(0.5).minW(0).minH(lineH).bg(colors.line).itemsStart()
+                .wFrac(0.5).minW(0).minH(lineH).selfStretch().bg(colors.line).itemsStart()
                 .child(gutterBar(.deletion, height: lineH))
                 .child(numberCell(cellKey: "\(prefix)-do-\(rowIdx)", number: line.oldNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, colors: colors))
                 .child(code)
-            let row = El<State>(direction: .row).key("\(prefix)-drow-\(rowIdx)").wFull()
+            let row = El<State>(direction: .row).key("\(prefix)-drow-\(rowIdx)").wFull().minH(lineH).itemsStretch()
             let content = splitPane(leftPane, numberKey: "\(prefix)-do-\(rowIdx)", side: .old, line: line,
                                     file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers)
             if st.singleColumn(file: file) == .old { return row.child(content.wFull()) }
@@ -3886,11 +3919,11 @@ public struct DiffView<State>: Sendable {
             let colors = palette.row(line.kind, selected: st.rowSelected(rowIdx, file: file, side: .new))
             let code = codeBlock(cellKey: "\(prefix)-acode-\(rowIdx)", state: st, file: file, side: .new, line: line, changed: [], wordBg: .transparent, syntaxTheme: syntaxTheme, wrap: st.wraps)
             let rightPane = El<State>(direction: .row)
-                .wFrac(0.5).minW(0).minH(lineH).bg(colors.line).itemsStart()
+                .wFrac(0.5).minW(0).minH(lineH).selfStretch().bg(colors.line).itemsStart()
                 .child(gutterBar(.addition, height: lineH))
                 .child(numberCell(cellKey: "\(prefix)-an-\(rowIdx)", number: line.newNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, colors: colors))
                 .child(code)
-            let row = El<State>(direction: .row).key("\(prefix)-arow-\(rowIdx)").wFull()
+            let row = El<State>(direction: .row).key("\(prefix)-arow-\(rowIdx)").wFull().minH(lineH).itemsStretch()
             let content = splitPane(rightPane, numberKey: "\(prefix)-an-\(rowIdx)", side: .new, line: line,
                                     file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers)
             if st.singleColumn(file: file) == .new { return row.child(content.wFull()) }

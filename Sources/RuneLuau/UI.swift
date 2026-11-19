@@ -506,25 +506,25 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
             throw LuauRuntimeError(value: .string("ui.each needs items, key, version, build"))
         }
         let keyBy = args[1]
-        switch keyBy {
-        case .string, .closure, .nativeFunction:
+        switch LuauUIBridge.readPropValue(keyBy) {
+        case .str, .funcValue:
             break
-        default:
-            throw LuauRuntimeError(value: .string("ui.each: key must be a string or function, got \(keyBy.typeName)"))
+        case let other:
+            throw LuauRuntimeError(value: .string("ui.each: key must be a string or function, got \(other.typeName)"))
         }
         let versionBy = args[2]
-        switch versionBy {
-        case .string, .closure, .nativeFunction:
+        switch LuauUIBridge.readPropValue(versionBy) {
+        case .str, .funcValue:
             break
-        default:
-            throw LuauRuntimeError(value: .string("ui.each: version must be a string or function, got \(versionBy.typeName)"))
+        case let other:
+            throw LuauRuntimeError(value: .string("ui.each: version must be a string or function, got \(other.typeName)"))
         }
         let buildFn = args[3]
-        switch buildFn {
-        case .closure, .nativeFunction:
+        switch LuauUIBridge.readPropValue(buildFn) {
+        case .funcValue:
             break
-        default:
-            throw LuauRuntimeError(value: .string("ui.each: build must be a function, got \(buildFn.typeName)"))
+        case let other:
+            throw LuauRuntimeError(value: .string("ui.each: build must be a function, got \(other.typeName)"))
         }
         let len = items.rawLength
         let out = LuauTable(arrayCapacity: len)
@@ -533,36 +533,39 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
             if i > len { break }
             let item = items.rawGet(i)
             let keyVal: LuauValue
-            if case .string(let field) = keyBy {
+            if case .str = LuauUIBridge.readPropValue(keyBy) {
                 guard case .table(let it) = item else {
-                    throw LuauRuntimeError(value: .string("ui.each: item \(i) is not a table"))
+                    throw LuauRuntimeError(value: .string("ui.each: item \(i) is a \(item.typeName), not a table with fields"))
                 }
-                keyVal = it.rawGet(field)
+                keyVal = it.rawGet(keyBy)
             } else {
                 keyVal = try vm.call(value: keyBy, args: [item, .number(Double(i))]).first ?? .nil
             }
             let itemKey: String
-            switch keyVal {
-            case .string(let s):
+            switch LuauUIBridge.readPropValue(keyVal) {
+            case .str(let s):
                 itemKey = s
-            case .number(let n):
-                itemKey = LuauValue.number(n).displayString
-            case .nil:
-                throw LuauRuntimeError(value: .string("ui.each: key for item \(i) is nil"))
-            default:
-                throw LuauRuntimeError(value: .string("ui.each: key for item \(i) must be a string or number, got \(keyVal.typeName)"))
+            case .num(let n):
+                itemKey = LuauValue.formatNumber(n)
+            case let other:
+                throw LuauRuntimeError(value: .string("ui.each: item \(i)'s key must be a string or a number, got \(other.typeName)"))
             }
 
             let verVal: LuauValue
-            if case .string(let field) = versionBy {
+            if case .str = LuauUIBridge.readPropValue(versionBy) {
                 guard case .table(let it) = item else {
-                    throw LuauRuntimeError(value: .string("ui.each: item \(i) is not a table"))
+                    throw LuauRuntimeError(value: .string("ui.each: item \(i) is a \(item.typeName), not a table with fields"))
                 }
-                verVal = it.rawGet(field)
+                verVal = it.rawGet(versionBy)
             } else {
                 verVal = try vm.call(value: versionBy, args: [item, .number(Double(i))]).first ?? .nil
             }
-            let verHash = try LuauUIBridge.mixHash(LuauUIBridge.versionHash(verVal), env.salt)
+            let verHash: UInt64
+            do {
+                verHash = try LuauUIBridge.mixHash(LuauUIBridge.versionHash(verVal), env.salt)
+            } catch let error as LuauRuntimeError {
+                throw LuauRuntimeError(value: .string("ui.each: item \(i): \(error.value.displayString)"))
+            }
             var capturedError: Error?
             let built = Rune.memo("\(env.prefix)\(itemKey)", deps: verHash) { () -> El<State> in
                 do {
@@ -652,7 +655,18 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
         default:
             throw LuauRuntimeError(value: .string("ui.virtualList gap must be a number, got \(gapVal.typeName)"))
         }
-        let keyStr = props.rawGet("key").isNil ? "list" : props.rawGet("key").displayString
+        let keyVal = props.rawGet("key")
+        let keyStr: String
+        switch LuauUIBridge.readPropValue(keyVal) {
+        case .nil:
+            keyStr = "list"
+        case .str(let s):
+            keyStr = s
+        case .num(let n):
+            keyStr = LuauValue.formatNumber(n)
+        case let other:
+            throw LuauRuntimeError(value: .string("key must be a string, got \(other.typeName)"))
+        }
         let containerKey = "\(env.prefix)\(keyStr)"
 
         let listVersionVal = props.rawGet("version")
@@ -924,33 +938,22 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
     }
 
     func viewMemo(vm: LuauVM, args: [LuauValue]) throws -> LuauValue {
-        guard args.count >= 4 else {
-            throw LuauRuntimeError(value: .string("view:Memo needs (key, version, build)"))
-        }
+        let keyArg = args.count > 1 ? args[1] : .nil
         let keyStr: String
-        switch args[1] {
-        case .string(let s):
+        switch LuauUIBridge.readPropValue(keyArg) {
+        case .str(let s):
             keyStr = s
-        case .number(let n):
-            keyStr = LuauValue.number(n).displayString
-        default:
-            throw LuauRuntimeError(value: .string("view:Memo key must be a string or number, got \(args[1].typeName)"))
+        case .num(let n):
+            keyStr = LuauValue.formatNumber(n)
+        case let other:
+            throw LuauRuntimeError(value: .string("view:Memo key must be a string or number, got \(other.typeName)"))
         }
-        let verArg = args[2]
-        switch verArg {
-        case .nil, .bool, .number, .string, .byteString:
-            break
-        default:
-            throw LuauRuntimeError(value: .string("view:Memo version cannot be a \(verArg.typeName)"))
-        }
-        let buildFn = args[3]
-        switch buildFn {
-        case .closure, .nativeFunction:
-            break
-        default:
-            throw LuauRuntimeError(value: .string("view:Memo build must be a function, got \(buildFn.typeName)"))
-        }
+        let verArg = args.count > 2 ? args[2] : .nil
         let ver = try LuauUIBridge.mixHash(LuauUIBridge.versionHash(verArg), env.salt)
+        let buildFn = args.count > 3 ? args[3] : .nil
+        guard case .funcValue = LuauUIBridge.readPropValue(buildFn) else {
+            throw LuauRuntimeError(value: .string("view:Memo needs a build function"))
+        }
         let memoID = "\(env.prefix)\(keyStr)"
         var capturedError: Error?
         let el = Rune.memo(memoID, deps: ver) { () -> El<State> in
@@ -1306,35 +1309,81 @@ internal enum LuauUIBridge {
         var fadeOut = false
     }
 
+    /// Mirrors `crates/rune-luau/src/ui/props.rs::Value`.
+    internal enum PropValue: Sendable, Equatable {
+        case `nil`
+        case bool(Bool)
+        case num(Double)
+        case str(String)
+        case funcValue
+        case other(String)
+
+        var typeName: String {
+            switch self {
+            case .nil: return "nil"
+            case .bool: return "boolean"
+            case .num: return "number"
+            case .str: return "string"
+            case .funcValue: return "function"
+            case .other(let t): return t
+            }
+        }
+    }
+
+    /// Mirrors `crates/rune-luau/src/ui/props.rs::read`.
+    internal static func readPropValue(_ val: LuauValue) -> PropValue {
+        switch val {
+        case .nil:
+            return .nil
+        case .bool(let b):
+            return .bool(b)
+        case .number(let n):
+            return .num(n)
+        case .string(let s):
+            return .str(s)
+        case .byteString(let bytes):
+            // Matches `std::str::from_utf8(...).unwrap_or("")` in upstream `props.rs::read`.
+            return .str(String(bytes: bytes, encoding: .utf8) ?? "")
+        case .closure, .nativeFunction:
+            return .funcValue
+        default:
+            return .other(val.typeName)
+        }
+    }
+
     private static func propNum(_ v: LuauValue, _ name: String) throws -> Float {
-        guard case .number(let d) = v else {
-            throw LuauRuntimeError(value: .string("\(name) must be a number, got \(v.typeName)"))
+        let value = readPropValue(v)
+        guard case .num(let d) = value else {
+            throw LuauRuntimeError(value: .string("\(name) must be a number, got \(value.typeName)"))
         }
         return Float(d)
     }
 
     private static func propFlag(_ v: LuauValue, _ name: String) throws -> Bool {
-        guard case .bool(let b) = v else {
-            throw LuauRuntimeError(value: .string("\(name) must be a boolean, got \(v.typeName)"))
+        switch readPropValue(v) {
+        case .bool(let b): return b
+        case .nil: return false
+        case let other:
+            throw LuauRuntimeError(value: .string("\(name) must be a boolean, got \(other.typeName)"))
         }
-        return b
     }
 
     private static func propStr(_ v: LuauValue, _ name: String) throws -> String {
-        guard case .string(let s) = v else {
-            throw LuauRuntimeError(value: .string("\(name) must be a string, got \(v.typeName)"))
+        let value = readPropValue(v)
+        guard case .str(let s) = value else {
+            throw LuauRuntimeError(value: .string("\(name) must be a string, got \(value.typeName)"))
         }
         return s
     }
 
     private static func propSize(_ v: LuauValue, _ name: String) throws -> LuauSizeSpec {
-        switch v {
-        case .number(let n):
+        switch readPropValue(v) {
+        case .num(let n):
             return .px(Float(n))
-        case .string("full"):
+        case .str("full"):
             return .full
-        default:
-            throw LuauRuntimeError(value: .string("\(name) must be a number or \"full\", got \(v.typeName)"))
+        case let other:
+            throw LuauRuntimeError(value: .string("\(name) must be a number or \"full\", got \(other.typeName)"))
         }
     }
 
@@ -1393,20 +1442,20 @@ internal enum LuauUIBridge {
         case "ml": el = el.ml(try propNum(v, k))
         case "gap": el = el.gap(try propNum(v, k))
         case "align":
-            switch v.asString {
-            case "start": el = el.itemsStart()
-            case "center": el = el.itemsCenter()
-            case "end": el = el.itemsEnd()
-            case "stretch": el = el.itemsStretch()
-            default: throw LuauRuntimeError(value: .string("align must be start, center, end or stretch, got \(v.typeName)"))
+            switch readPropValue(v) {
+            case .str("start"): el = el.itemsStart()
+            case .str("center"): el = el.itemsCenter()
+            case .str("end"): el = el.itemsEnd()
+            case .str("stretch"): el = el.itemsStretch()
+            case let other: throw LuauRuntimeError(value: .string("align must be start, center, end or stretch, got \(other.typeName)"))
             }
         case "justify":
-            switch v.asString {
-            case "start": el = el.justifyStart()
-            case "center": el = el.justifyCenter()
-            case "end": el = el.justifyEnd()
-            case "between": el = el.justifyBetween()
-            default: throw LuauRuntimeError(value: .string("justify must be start, center, end or between, got \(v.typeName)"))
+            switch readPropValue(v) {
+            case .str("start"): el = el.justifyStart()
+            case .str("center"): el = el.justifyCenter()
+            case .str("end"): el = el.justifyEnd()
+            case .str("between"): el = el.justifyBetween()
+            case let other: throw LuauRuntimeError(value: .string("justify must be start, center, end or between, got \(other.typeName)"))
             }
         case "center":
             state.center = try propFlag(v, k)
@@ -1427,11 +1476,11 @@ internal enum LuauUIBridge {
     private static func applyVisualProp<State>(_ k: String, _ v: LuauValue, el: inout El<State>, state: inout ApplyPropState, env: UIRenderEnv) throws -> Bool {
         switch k {
         case "key":
-            switch v {
-            case .string(let s): state.keyStr = s
-            case .number(let n): state.keyStr = LuauValue.number(n).displayString
-            default:
-                throw LuauRuntimeError(value: .string("key must be a string or number, got \(v.typeName)"))
+            switch readPropValue(v) {
+            case .str(let s): state.keyStr = s
+            case .num(let n): state.keyStr = LuauValue.formatNumber(n)
+            case let other:
+                throw LuauRuntimeError(value: .string("key must be a string, got \(other.typeName)"))
             }
         case "opacity": el = el.opacity(try propNum(v, k))
         case "label": el = el.label(try propStr(v, k))
@@ -1489,14 +1538,14 @@ internal enum LuauUIBridge {
         case "color": state.textColor = try env.resolveColor(try propStr(v, k))
         case "size": state.textStyle.size = try propNum(v, k)
         case "weight":
-            switch v {
-            case .string("regular"): state.textStyle.weight = env.weights[0]
-            case .string("medium"): state.textStyle.weight = env.weights[1]
-            case .string("semibold"): state.textStyle.weight = env.weights[2]
-            case .string("bold"): state.textStyle.weight = env.weights[3]
-            case .number(let n): state.textStyle.weight = Float(n)
-            default:
-                throw LuauRuntimeError(value: .string("weight must be regular, medium, semibold, bold or a number, got \(v.typeName)"))
+            switch readPropValue(v) {
+            case .str("regular"): state.textStyle.weight = env.weights[0]
+            case .str("medium"): state.textStyle.weight = env.weights[1]
+            case .str("semibold"): state.textStyle.weight = env.weights[2]
+            case .str("bold"): state.textStyle.weight = env.weights[3]
+            case .num(let n): state.textStyle.weight = Float(n)
+            case let other:
+                throw LuauRuntimeError(value: .string("weight must be regular, medium, semibold or bold, got \(other.typeName)"))
             }
         case "lineHeight": state.textStyle.lineHeight = try propNum(v, k)
         case "tracking": state.textStyle.letterSpacing = try propNum(v, k)
@@ -1514,12 +1563,12 @@ internal enum LuauUIBridge {
         case "truncate":
             state.truncate = try propFlag(v, k)
         case "textAlign":
-            switch v.asString {
-            case "start": state.textStyle.align = .leading
-            case "center": state.textStyle.align = .center
-            case "end": state.textStyle.align = .trailing
-            default:
-                throw LuauRuntimeError(value: .string("textAlign must be start, center or end, got \(v.typeName)"))
+            switch readPropValue(v) {
+            case .str("start"): state.textStyle.align = .leading
+            case .str("center"): state.textStyle.align = .center
+            case .str("end"): state.textStyle.align = .trailing
+            case let other:
+                throw LuauRuntimeError(value: .string("textAlign must be start, center or end, got \(other.typeName)"))
             }
         case "focusable":
             if try propFlag(v, k) { el = el.focusable(true) }
@@ -1555,10 +1604,10 @@ internal enum LuauUIBridge {
         case "revealOnHover":
             if try propFlag(v, k) { el = el.groupOpacity(0, 1) }
         case "helpSide":
-            switch v.asString {
-            case "top": el = el.helpSide(.top)
-            case "right": el = el.helpSide(.right)
-            case "left": el = el.helpSide(.left)
+            switch readPropValue(v) {
+            case .str("top"): el = el.helpSide(.top)
+            case .str("right"): el = el.helpSide(.right)
+            case .str("left"): el = el.helpSide(.left)
             default: break
             }
         case "onPress": state.onPressVal = v
@@ -1793,25 +1842,23 @@ internal enum LuauUIBridge {
         return el
     }
 
-    fileprivate static func versionHash(_ val: LuauValue) throws -> UInt64 {
+    internal static func versionHash(_ val: LuauValue) throws -> UInt64 {
         var h = Hasher()
-        switch val {
-        case .nil: h.combine(UInt8(0))
-        case .bool(let b): h.combine(UInt8(1)); h.combine(b)
-        case .number(let n): h.combine(UInt8(2)); h.combine(n.bitPattern)
-        case .string, .byteString:
-            // Rune's property reader treats a non-UTF-8 Luau string as empty.
-            let string: String
-            if case .byteString(let bytes) = val {
-                string = String(bytes: bytes, encoding: .utf8) ?? ""
-            } else {
-                string = val.asString ?? ""
-            }
+        switch readPropValue(val) {
+        case .nil:
+            h.combine(UInt8(0))
+        case .bool(let b):
+            h.combine(UInt8(1))
+            h.combine(b)
+        case .num(let n):
+            h.combine(UInt8(2))
+            h.combine(n.bitPattern)
+        case .str(let s):
             h.combine(UInt8(3))
-            h.combine(string.utf8.count)
-            for byte in string.utf8 { h.combine(byte) }
-        default:
-            throw LuauRuntimeError(value: .string("a memo version must be nil, a boolean, a number or a string, got \(val.typeName)"))
+            h.combine(s.utf8.count)
+            for byte in s.utf8 { h.combine(byte) }
+        case let other:
+            throw LuauRuntimeError(value: .string("a memo version must be nil, a boolean, a number or a string, got \(other.typeName)"))
         }
         return UInt64(bitPattern: Int64(h.finalize()))
     }

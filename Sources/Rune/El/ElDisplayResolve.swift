@@ -316,7 +316,9 @@ internal enum ElDisplayResolver {
         inputStyle.byParagraphStart = nil
         // A wrapping field wraps at `w * scale + FIT_SLACK` device px, as every text lays out (#948).
         let wrapsAt: Float? = pxScale.flatMap { TextBoxGeometry.wrapWidth(innerWidth, scale: $0) } ?? innerWidth
-        let shapeMaxW: Float? = (!isSingle && inputStyle.wrap != .noWrap) ? wrapsAt : (inputStyle.direction == .rtl ? innerWidth : nil)
+        let shapeMaxW: Float? = (!isSingle && inputStyle.wrap != .noWrap)
+            ? wrapsAt
+            : ((inputStyle.direction == .rtl || inputStyle.align != .leading) ? innerWidth : nil)
         let isSecureHidden = edit.isSecure && !edit.isRevealed
         if isSecureHidden {
             inputStyle.wrap = .noWrap
@@ -348,7 +350,9 @@ internal enum ElDisplayResolver {
                 isRich: false,
                 isSecure: edit.isSecure,
                 richStyle: richStyle,
-                maxWidthForShape: (!isSingle && placeholderStyle.wrap != .noWrap) ? wrapsAt : (placeholderStyle.direction == .rtl ? innerWidth : nil),
+                maxWidthForShape: (!isSingle && placeholderStyle.wrap != .noWrap)
+                    ? wrapsAt
+                    : ((placeholderStyle.direction == .rtl || placeholderStyle.align != .leading) ? innerWidth : nil),
                 blocks: blocks
             )
         }

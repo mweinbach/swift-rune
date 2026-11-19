@@ -1903,7 +1903,6 @@ extension Runtime {
                let sIdx = flatNodes[ri].enclosingVScrollIndex {
                 let vpPath = flatNodes[sIdx].path
                 if !wasPinnedToBottom.contains(vpPath) {
-                    let scale = flatNodes[sIdx].inheritedScale
                     let cur = scrollOffsets[vpPath] ?? .zero
                     let next = Vec2(cur.x, cur.y + r)
                     scrollOffsets[vpPath] = next
@@ -1913,7 +1912,7 @@ extension Runtime {
                     scrollStore.snap(vpNid, Props.SCROLL, to: next)
                     for idx in scrollRequestsState.keeps.indices where scrollRequestsState.keeps[idx].viewport == vpPath {
                         if let kIdx = nodeByPath[scrollRequestsState.keeps[idx].path], kIdx <= ri {
-                            scrollRequestsState.keeps[idx].was -= r * scale
+                            scrollRequestsState.keeps[idx].was -= r
                         }
                     }
                 }
@@ -1922,9 +1921,7 @@ extension Runtime {
         for (gKey, d) in gave {
             if let headerPath = headers[gKey] {
                 for idx in scrollRequestsState.keeps.indices where scrollRequestsState.keeps[idx].hold?.path == headerPath {
-                    let vpPath = scrollRequestsState.keeps[idx].viewport
-                    let scale = nodeByPath[vpPath].map { flatNodes[$0].inheritedScale } ?? 1.0
-                    scrollRequestsState.keeps[idx].was += d * scale
+                    scrollRequestsState.keeps[idx].was += d
                 }
             }
         }
@@ -2482,7 +2479,10 @@ extension Runtime {
         guard !allKeepKeys.isEmpty, !flatNodes.isEmpty else { return }
 
         for key in allKeepKeys {
-            guard let tIdx = flatNodes.firstIndex(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) else {
+            guard let tIdx = flatNodes.indices.first(where: { i in
+                let n = flatNodes[i]
+                return selectsElementSelector(key, path: n.path, key: n.key) && !subtreeExiting(i)
+            }) else {
                 continue
             }
             // Find enclosing vertical viewport.
@@ -2498,6 +2498,7 @@ extension Runtime {
             guard let vIdx = vIdxOpt else { continue }
             let vpRect = drawnRect(flatNodes[vIdx])
             let tRect = drawnRect(flatNodes[tIdx])
+            let vpScale = max(1e-4, presentedScales[flatNodes[vIdx].path]?.y ?? flatNodes[vIdx].inheritedScale)
 
             var hold: ScrollKeepHold? = nil
             var anc = flatNodes[tIdx].parentIndex ?? tIdx
@@ -2510,7 +2511,7 @@ extension Runtime {
                 }()
                 if isTopSticky, abs(stuckShiftsByPath[hNode.path]?.y ?? 0) > 0.01 {
                     let hRect = drawnRect(hNode)
-                    hold = ScrollKeepHold(path: hNode.path, inset: hRect.top - vpRect.top)
+                    hold = ScrollKeepHold(path: hNode.path, inset: (hRect.top - vpRect.top) / vpScale)
                     break
                 }
                 checkIdx = hNode.parentIndex
@@ -2537,7 +2538,7 @@ extension Runtime {
             scrollRequestsState.arriveCapture(ScrollKeep(
                 path: flatNodes[tIdx].path,
                 viewport: flatNodes[vIdx].path,
-                was: tRect.top - vpRect.top,
+                was: (tRect.top - vpRect.top) / vpScale,
                 virtualRow: virtualRow,
                 hold: hold
             ))
@@ -2640,8 +2641,8 @@ extension Runtime {
                 continue
             }
             let sNode = flatNodes[vIdx]
-            let scale = max(1e-4, presentedScales[k.viewport]?.x ?? sNode.inheritedScale)
-            let delta = (drawnI.top - drawnS.top - k.was) / scale
+            let scale = max(1e-4, presentedScales[k.viewport]?.y ?? sNode.inheritedScale)
+            let delta = (drawnI.top - drawnS.top) / scale - k.was
             if abs(delta) < (1.0 / 64.0) { continue }
             let cur = scrollOffsets[k.viewport] ?? .zero
             let maxExt = scrollMaxExtents[k.viewport] ?? .zero
@@ -2762,7 +2763,8 @@ extension Runtime {
             if !wasPinnedToBottom.contains(vPath) { return .free }
             let tRect = scrollKeepBounds(k.path) ?? flatNodes[tIdx].targetRect
             let vRect = scrollKeepBounds(vPath) ?? flatNodes[vIdx].targetRect
-            return .pinned(tRect.top - vRect.top)
+            let scale = max(1e-4, presentedScales[vPath]?.y ?? flatNodes[vIdx].inheritedScale)
+            return .pinned((tRect.top - vRect.top) / scale)
         }
 
         let isRevealTargetMounted: (ScrollRevealTarget) -> Bool = { target in
@@ -2902,6 +2904,7 @@ extension Runtime {
             if let tIdx = flatNodes.indices.first(where: {
                 let node = flatNodes[$0]
                 return selectsElementSelector(req.key, path: node.path, key: node.key)
+                    && !subtreeExiting($0)
                     && (node.parentIndex.map { Self.inScrollRevealScope(req.scope, path: flatNodes[$0].path) } ?? true)
             }),
                let foundVIdx = findScrollViewportIndex(forNode: tIdx, verticalOnly: true) {

@@ -129,7 +129,10 @@ enum RuneRefCLI {
                 params: [0.0, 2.0, 0.0, 0.85],
                 uv: [u0, v0, 0.0, 0.0],
                 clip: oracleNoClip,
-                fade: [0, 0, 0, 0]
+                fade: [0, 0, 0, 0],
+                fadeOrigin: nil,
+                turn: nil,
+                clipRadii: nil
             ))
         }
         scene.atlas = OracleAtlas(width: UInt32(atlas.width), height: UInt32(atlas.height), data: atlasBytes)
@@ -384,7 +387,8 @@ enum RuneRefCLI {
             var packedFade = packFade(width: fadeWidth, origin: fadeOrigin, clip: clip)
             let border: SIMD4<Float>
             if kind == 8.0 {
-                let clipRadii = SIMD4<Float>(p.border[0], p.border[1], p.border[2], p.border[3])
+                let r = p.clipRadii ?? p.border
+                let clipRadii = SIMD4<Float>(r[0], r[1], r[2], r[3])
                 packedFade.w = packClipRadii(clip: clip, radii: clipRadii)
                 if let t = p.turn, t.count >= 3 {
                     border = SIMD4<Float>(0, t[0], t[1], t[2])
@@ -393,6 +397,9 @@ enum RuneRefCLI {
                 }
             } else {
                 border = SIMD4<Float>(p.border[0], p.border[1], p.border[2], p.border[3])
+                if let r = p.clipRadii, r.count == 4 {
+                    packedFade.w = packClipRadii(clip: clip, radii: SIMD4<Float>(r[0], r[1], r[2], r[3]))
+                }
             }
             instances.append(RenderInstance(
                 rect: rect,

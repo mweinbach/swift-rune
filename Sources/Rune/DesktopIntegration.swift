@@ -2591,7 +2591,95 @@ public enum QuitMachine {
     }
 }
 
+/// Per-thread idle-tidy schedule (`task::Tidy`, upstream `#1114`): explicit two-state machine so a
+/// thread never arms a timer before work or without a hook, and never purges after every close burst.
+public struct RuneTaskTidy: Sendable, Equatable {
+    public enum State: Sendable, Equatable {
+        /// Waiting with no tidy timer; `last` is when this thread last ran the hook.
+        case parked(last: Double?)
+        /// Work ran while a hook was set; run the hook once nothing arrives before `due`.
+        case armed(last: Double?, due: Double)
+    }
+
+    public var state: State
+
+    public init() {
+        self.state = .parked(last: nil)
+    }
+
+    public mutating func onWork(
+        now: Double,
+        hasHook: Bool = RuneTask.hasIdleHook,
+        idleDelay: Double = RuneTask.idleTimeout,
+        minGap: Double = RuneTask.idleMinGap
+    ) {
+        let last: Double?
+        switch state {
+        case .parked(let l), .armed(let l, _):
+            last = l
+        }
+        guard hasHook else {
+            state = .parked(last: last)
+            return
+        }
+        let due = last.map { max($0 + minGap, now + idleDelay) } ?? (now + idleDelay)
+        state = .armed(last: last, due: due)
+    }
+
+    public func waitSeconds(now: Double) -> Double? {
+        switch state {
+        case .parked:
+            return nil
+        case .armed(_, let due):
+            return max(0.0, due - now)
+        }
+    }
+
+    @discardableResult
+    public mutating func takeDue(now: Double) -> Bool {
+        if case .armed(_, let due) = state, now >= due {
+            state = .parked(last: now)
+            return true
+        }
+        return false
+    }
+}
+
 public enum RuneTask {
+    /// How long a thread waits with nothing to do before tidying up (`task::IDLE`, `#1114`).
+    public static let idleTimeout: Double = 10.0
+
+    /// Minimum gap between two idle tidies on one thread (`task::IDLE_MIN_GAP`, `#1114`).
+    public static let idleMinGap: Double = 180.0
+
+    private static let idleLock = NSLock()
+    nonisolated(unsafe) private static var idleHook: (@Sendable () -> Void)?
+
+    /// Sets what an idle task/service thread runs once per idle spell (`task::on_idle`, `#1114`).
+    /// The first call wins.
+    public static func onIdle(_ tidy: @escaping @Sendable () -> Void) {
+        idleLock.withLock {
+            if idleHook == nil {
+                idleHook = tidy
+            }
+        }
+    }
+
+    /// Runs the registered idle hook on the calling thread (`task::idle`, `#1114`).
+    public static func idle() {
+        let hook = idleLock.withLock { idleHook }
+        hook?()
+    }
+
+    public static var hasIdleHook: Bool {
+        idleLock.withLock { idleHook != nil }
+    }
+
+    /// Test-only reset for `RuneTask.onIdle`.
+    internal static func resetIdleHookForTesting() {
+        idleLock.withLock { idleHook = nil }
+    }
+
     @discardableResult
     public static func spawn(name: String, work: @escaping @Sendable () -> Void) -> Task<Void, Never> {
         Task.detached(priority: .userInitiated) {
@@ -2611,6 +2699,51 @@ public enum RuneTask {
         }
     }
 
+    private final class IdleWatcher: @unchecked Sendable {
+        private let lock = NSLock()
+        private var tidy = RuneTaskTidy()
+        private var generation: UInt64 = 0
+        private var timerTask: Task<Void, Never>?
+
+        func didWork() {
+            let now = Double(RuneExecutionContext.uptimeNanoseconds) / 1_000_000_000.0
+            let scheduled: (UInt64, Double)? = lock.withLock {
+                generation &+= 1
+                timerTask?.cancel()
+                timerTask = nil
+                tidy.onWork(now: now)
+                guard let wait = tidy.waitSeconds(now: now) else { return nil }
+                return (generation, wait)
+            }
+            guard let (gen, wait) = scheduled else { return }
+            let task = Task.detached(priority: .utility) { [weak self] in
+                if wait > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                }
+                guard !Task.isCancelled, let self else { return }
+                let shouldFire = self.lock.withLock { () -> Bool in
+                    guard self.generation == gen else { return false }
+                    let firedAt = Double(RuneExecutionContext.uptimeNanoseconds) / 1_000_000_000.0
+                    return self.tidy.takeDue(now: firedAt)
+                }
+                if shouldFire { RuneTask.idle() }
+            }
+            lock.withLock {
+                if generation == gen { timerTask = task } else { task.cancel() }
+            }
+        }
+
+        func stop() {
+            let old = lock.withLock { () -> Task<Void, Never>? in
+                generation &+= 1
+                let t = timerTask
+                timerTask = nil
+                return t
+            }
+            old?.cancel()
+        }
+    }
+
     /// Consumes messages from `stream` in order until `each` returns `false` or the stream finishes (`task::serve`).
     @discardableResult
     public static func serve<T: Sendable>(
@@ -2618,11 +2751,14 @@ public enum RuneTask {
         stream: AsyncStream<T>,
         each: @escaping @Sendable (T) -> Bool
     ) -> Task<Void, Never> {
-        Task.detached(priority: .userInitiated) {
+        return Task.detached(priority: .userInitiated) {
+            let watcher = IdleWatcher()
+            defer { watcher.stop() }
             for await msg in stream {
                 if Task.isCancelled || !each(msg) {
                     break
                 }
+                watcher.didWork()
             }
         }
     }

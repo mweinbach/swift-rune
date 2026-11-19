@@ -87,9 +87,57 @@ public enum IOSApp {
     }
 }
 
+/// `UITextPosition` backed by a UTF-16 code unit offset within the focused Rune text field.
+public final class RuneTextPosition: UITextPosition {
+    public let offset: Int
+
+    public init(offset: Int) {
+        self.offset = max(0, offset)
+        super.init()
+    }
+}
+
+/// `UITextRange` backed by a half-open UTF-16 range `[startOffset, endOffset)`.
+public final class RuneTextRange: UITextRange {
+    public let range: Range<Int>
+
+    public init(range: Range<Int>) {
+        let lo = max(0, range.lowerBound)
+        let hi = max(lo, range.upperBound)
+        self.range = lo..<hi
+        super.init()
+    }
+
+    public override var isEmpty: Bool { range.isEmpty }
+    public override var start: UITextPosition { RuneTextPosition(offset: range.lowerBound) }
+    public override var end: UITextPosition { RuneTextPosition(offset: range.upperBound) }
+}
+
+/// `UITextSelectionRect` exposing shaped line selection geometry to UIKit text interaction.
+private final class RuneTextSelectionRect: UITextSelectionRect {
+    private let boundsRect: CGRect
+    private let startsSelection: Bool
+    private let endsSelection: Bool
+    private let direction: NSWritingDirection
+
+    init(rect: CGRect, containsStart: Bool, containsEnd: Bool, writingDirection: NSWritingDirection = .leftToRight) {
+        self.boundsRect = rect
+        self.startsSelection = containsStart
+        self.endsSelection = containsEnd
+        self.direction = writingDirection
+        super.init()
+    }
+
+    override var rect: CGRect { boundsRect }
+    override var writingDirection: NSWritingDirection { direction }
+    override var containsStart: Bool { startsSelection }
+    override var containsEnd: Bool { endsSelection }
+    override var isVertical: Bool { false }
+}
+
 /// UIKit view hosting a `Rune` runtime via `CAMetalLayer` (`MetalRenderer`) with `RuneRef` fallback.
 @MainActor
-public final class RuneIOSView<State>: UIView, UIKeyInput {
+public final class RuneIOSView<State>: UIView, UITextInput {
     public let runtime: Runtime<State>
     fileprivate let timeScale: Double
     private let respectSystemAppearance: Bool
@@ -107,6 +155,7 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
     fileprivate var loopActivity: AppleSurfaceLoopObserver?
     private var previousFrameTime: Double?
     fileprivate var lastSubmission: CFTimeInterval?
+    private var observedRefreshHz: Double?
     private var rendering = false
     fileprivate lazy var windowRest = AppleWindowRest { [weak self] all in
         guard let self else { return }
@@ -118,6 +167,9 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
     private var textIdleObserver: AppleTextIdleObserver?
     fileprivate var frameRequested = false
     private var editing = false
+    public weak var inputDelegate: (any UITextInputDelegate)?
+    public var markedTextStyle: [NSAttributedString.Key: Any]?
+    private lazy var textTokenizer = UITextInputStringTokenizer(textInput: self)
     private var announcementCount: UInt32 = 0
     private var accessibilityCommit: Int?
     private var accessibleElements: [AccessibilityIdentity: RuneUIAccessibilityElement] = [:]
@@ -222,6 +274,16 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
 
     public override var canBecomeFirstResponder: Bool { true }
 
+    #if os(tvOS)
+    public override var canBecomeFocused: Bool { true }
+
+    public override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        runtime.dispatchFocus(context.nextFocusedView === self, at: nowSeconds())
+        invalidateFrame()
+    }
+    #endif
+
     public override func didMoveToWindow() {
         super.didMoveToWindow()
         if window == nil {
@@ -232,10 +294,8 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
     }
 
     public var hasText: Bool {
-        guard let path = runtime.focusedPath,
-              let index = runtime.nodeByPath[path],
-              let lens = runtime.flatNodes[index].el.handlers.editLens else { return runtime.hasImeTarget }
-        return !lens.get(runtime.state).text.isEmpty
+        guard let snap = IOSTextInputBridge.snapshot(of: runtime) else { return runtime.hasImeTarget }
+        return snap.isSecure ? true : snap.utf16Length > 0
     }
     public var isSecureTextEntry = false
 
@@ -246,18 +306,195 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
 
     public func insertText(_ text: String) {
         let now = nowSeconds()
+        inputDelegate?.textWillChange(self)
         runtime.hostInput(.keyPress) {
-            for scalar in text {
-                let key: Key = (scalar == "\n" || scalar == "\r") ? .enter : (scalar == "\t" ? .tab : .text(String(scalar)))
-                _ = runtime.keyDown(KeyEvent(key: key), at: now)
+            if !runtime.hasSecureFocus && runtime.hasImeTarget && text != "\n" && text != "\r" && text != "\t" {
+                if !runtime.dispatchImeEvent(.commit(text), at: now) {
+                    for scalar in text {
+                        _ = runtime.keyDown(KeyEvent(key: .text(String(scalar))), at: now)
+                    }
+                }
+            } else {
+                for scalar in text {
+                    let key: Key = (scalar == "\n" || scalar == "\r") ? .enter : (scalar == "\t" ? .tab : .text(String(scalar)))
+                    _ = runtime.keyDown(KeyEvent(key: key), at: now)
+                }
             }
         }
+        inputDelegate?.textDidChange(self)
         invalidateFrame()
     }
 
     public func deleteBackward() {
+        inputDelegate?.textWillChange(self)
         _ = runtime.hostInput(.keyPress) { runtime.keyDown(KeyEvent(key: .backspace), at: nowSeconds()) }
+        inputDelegate?.textDidChange(self)
         invalidateFrame()
+    }
+
+    // MARK: - UITextInput (full IME / marked-text / selection / geometry support)
+
+    public var beginningOfDocument: UITextPosition { RuneTextPosition(offset: 0) }
+
+    public var endOfDocument: UITextPosition {
+        RuneTextPosition(offset: IOSTextInputBridge.snapshot(of: runtime)?.utf16Length ?? 0)
+    }
+
+    public var selectedTextRange: UITextRange? {
+        get {
+            guard let snap = IOSTextInputBridge.snapshot(of: runtime) else { return nil }
+            return RuneTextRange(range: snap.selectedUTF16)
+        }
+        set {
+            guard let range = newValue as? RuneTextRange else { return }
+            inputDelegate?.selectionWillChange(self)
+            _ = runtime.hostInput(.keyPress) {
+                IOSTextInputBridge.setSelection(in: runtime, utf16Range: range.range, at: nowSeconds())
+            }
+            inputDelegate?.selectionDidChange(self)
+            invalidateFrame()
+        }
+    }
+
+    public var markedTextRange: UITextRange? {
+        guard let marked = IOSTextInputBridge.snapshot(of: runtime)?.markedUTF16 else { return nil }
+        return RuneTextRange(range: marked)
+    }
+
+    public var tokenizer: any UITextInputTokenizer { textTokenizer }
+
+    public func text(in range: UITextRange) -> String? {
+        guard let runeRange = range as? RuneTextRange else { return nil }
+        return IOSTextInputBridge.text(in: runtime, utf16Range: runeRange.range)
+    }
+
+    public func replace(_ range: UITextRange, withText text: String) {
+        guard let runeRange = range as? RuneTextRange else { return }
+        inputDelegate?.textWillChange(self)
+        _ = runtime.hostInput(.keyPress) {
+            IOSTextInputBridge.replace(in: runtime, utf16Range: runeRange.range, with: text, at: nowSeconds())
+        }
+        inputDelegate?.textDidChange(self)
+        invalidateFrame()
+    }
+
+    public func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
+        inputDelegate?.textWillChange(self)
+        _ = runtime.hostInput(.keyPress) {
+            IOSTextInputBridge.setMarkedText(in: runtime, markedText, selectedUTF16Range: selectedRange, at: nowSeconds())
+        }
+        inputDelegate?.textDidChange(self)
+        invalidateFrame()
+    }
+
+    public func unmarkText() {
+        inputDelegate?.textWillChange(self)
+        _ = runtime.hostInput(.keyPress) {
+            IOSTextInputBridge.unmarkText(in: runtime, at: nowSeconds())
+        }
+        inputDelegate?.textDidChange(self)
+        invalidateFrame()
+    }
+
+    public func textRange(from fromPosition: UITextPosition, to toPosition: UITextPosition) -> UITextRange? {
+        guard let a = fromPosition as? RuneTextPosition, let b = toPosition as? RuneTextPosition else { return nil }
+        return RuneTextRange(range: min(a.offset, b.offset)..<max(a.offset, b.offset))
+    }
+
+    public func position(from position: UITextPosition, offset: Int) -> UITextPosition? {
+        guard let pos = position as? RuneTextPosition else { return nil }
+        let len = IOSTextInputBridge.snapshot(of: runtime)?.utf16Length ?? 0
+        let target = pos.offset + offset
+        guard target >= 0 && target <= len else { return nil }
+        return RuneTextPosition(offset: target)
+    }
+
+    public func position(from position: UITextPosition, in direction: UITextLayoutDirection, offset: Int) -> UITextPosition? {
+        switch direction {
+        case .left, .up: return self.position(from: position, offset: -offset)
+        case .right, .down: return self.position(from: position, offset: offset)
+        @unknown default: return self.position(from: position, offset: offset)
+        }
+    }
+
+    public func compare(_ position: UITextPosition, to other: UITextPosition) -> ComparisonResult {
+        guard let a = position as? RuneTextPosition, let b = other as? RuneTextPosition else { return .orderedSame }
+        if a.offset < b.offset { return .orderedAscending }
+        if a.offset > b.offset { return .orderedDescending }
+        return .orderedSame
+    }
+
+    public func offset(from: UITextPosition, to toPosition: UITextPosition) -> Int {
+        guard let a = from as? RuneTextPosition, let b = toPosition as? RuneTextPosition else { return 0 }
+        return b.offset - a.offset
+    }
+
+    public func position(within range: UITextRange, farthestIn direction: UITextLayoutDirection) -> UITextPosition? {
+        guard let runeRange = range as? RuneTextRange else { return nil }
+        switch direction {
+        case .left, .up: return RuneTextPosition(offset: runeRange.range.lowerBound)
+        case .right, .down: return RuneTextPosition(offset: runeRange.range.upperBound)
+        @unknown default: return RuneTextPosition(offset: runeRange.range.upperBound)
+        }
+    }
+
+    public func characterRange(byExtending position: UITextPosition, in direction: UITextLayoutDirection) -> UITextRange? {
+        guard let pos = position as? RuneTextPosition else { return nil }
+        let len = IOSTextInputBridge.snapshot(of: runtime)?.utf16Length ?? 0
+        switch direction {
+        case .left, .up: return RuneTextRange(range: 0..<min(pos.offset, len))
+        case .right, .down: return RuneTextRange(range: min(pos.offset, len)..<len)
+        @unknown default: return RuneTextRange(range: min(pos.offset, len)..<len)
+        }
+    }
+
+    public func baseWritingDirection(for position: UITextPosition, in direction: UITextStorageDirection) -> NSWritingDirection {
+        .natural
+    }
+
+    public func setBaseWritingDirection(_ writingDirection: NSWritingDirection, for range: UITextRange) {}
+
+    public func firstRect(for range: UITextRange) -> CGRect {
+        guard let runeRange = range as? RuneTextRange else { return .zero }
+        let rects = IOSTextInputBridge.selectionRects(in: runtime, forUTF16Range: runeRange.range)
+        guard let first = rects.first else { return .zero }
+        return CGRect(x: CGFloat(first.x), y: CGFloat(first.y), width: CGFloat(first.width), height: CGFloat(first.height))
+    }
+
+    public func caretRect(for position: UITextPosition) -> CGRect {
+        let offset = (position as? RuneTextPosition)?.offset ?? 0
+        let r = IOSTextInputBridge.caretRect(in: runtime, atUTF16Offset: offset)
+        return CGRect(x: CGFloat(r.x), y: CGFloat(r.y), width: CGFloat(r.width), height: CGFloat(r.height))
+    }
+
+    public func selectionRects(for range: UITextRange) -> [UITextSelectionRect] {
+        guard let runeRange = range as? RuneTextRange else { return [] }
+        let rects = IOSTextInputBridge.selectionRects(in: runtime, forUTF16Range: runeRange.range)
+        return rects.enumerated().map { index, r in
+            RuneTextSelectionRect(
+                rect: CGRect(x: CGFloat(r.x), y: CGFloat(r.y), width: CGFloat(r.width), height: CGFloat(r.height)),
+                containsStart: index == 0,
+                containsEnd: index == rects.count - 1
+            )
+        }
+    }
+
+    public func closestPosition(to point: CGPoint) -> UITextPosition? {
+        let offset = IOSTextInputBridge.closestUTF16Offset(in: runtime, to: Vec2(Float(point.x), Float(point.y)))
+        return RuneTextPosition(offset: offset)
+    }
+
+    public func closestPosition(to point: CGPoint, within range: UITextRange) -> UITextPosition? {
+        let raw = IOSTextInputBridge.closestUTF16Offset(in: runtime, to: Vec2(Float(point.x), Float(point.y)))
+        guard let runeRange = range as? RuneTextRange else { return RuneTextPosition(offset: raw) }
+        return RuneTextPosition(offset: min(max(raw, runeRange.range.lowerBound), runeRange.range.upperBound))
+    }
+
+    public func characterRange(at point: CGPoint) -> UITextRange? {
+        let offset = IOSTextInputBridge.closestUTF16Offset(in: runtime, to: Vec2(Float(point.x), Float(point.y)))
+        let len = IOSTextInputBridge.snapshot(of: runtime)?.utf16Length ?? 0
+        let end = min(offset + 1, len)
+        return RuneTextRange(range: offset..<end)
     }
 
     public override func layoutSubviews() {
@@ -337,8 +574,11 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
     }
 
     private var screenRefreshHz: Double {
+        if let observedRefreshHz, observedRefreshHz.isFinite, observedRefreshHz > 0 {
+            return observedRefreshHz
+        }
         #if os(visionOS)
-        return 60
+        return 90
         #else
         return Double(window?.windowScene?.screen.maximumFramesPerSecond ?? 60)
         #endif
@@ -346,6 +586,7 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
 
     fileprivate func renderTick(target: CFTimeInterval?, refreshHz: Double?) {
         guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
+        if let refreshHz, refreshHz.isFinite, refreshHz > 0 { observedRefreshHz = refreshHz }
         guard !rendering else { frameRequested = true; return }
         rendering = true
         defer { rendering = false }

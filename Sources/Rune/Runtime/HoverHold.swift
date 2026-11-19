@@ -172,9 +172,7 @@ extension Runtime {
     }
 
     internal func hoverIsExiting(_ i: Int) -> Bool {
-        let id = flatNodes.withUnsafeBufferPointer { $0[i].nodeId }
-        if case .exiting = scene.phase(id) { return true }
-        return false
+        subtreeExiting(i)
     }
 
     /// Keyboard focus shows on node `i` or inside it (CSS `:has(:focus-visible)`): a hover group

@@ -43,6 +43,7 @@ public typealias SimpleMeasureFunc = @Sendable (_ availableSpace: Size<Available
 // MARK: - Internal LayoutTree Abstraction
 
 internal protocol LayoutTree: AnyObject {
+    var containerDepth: Int { get set }
     func childCount(_ node: NodeId) -> Int
     func childId(_ node: NodeId, at index: Int) -> NodeId
     func style(_ node: NodeId) -> TaffyStyle
@@ -181,26 +182,38 @@ internal func computeNodeLayout(
     let style = tree.style(node)
     let hasChildren = tree.childCount(node) > 0
 
-    var output: LayoutOutput
+    let output: LayoutOutput
     switch (style.display, hasChildren) {
     case (.none, _):
         let hidden = computeHiddenLayout(tree: tree, node: node)
         tree.cacheStore(node, input, hidden)
         return hidden
-    case (.block, true):
-        output = computeBlockLayout(tree: tree, node: node, input: input, blockContext: blockContext)
-    case (.flowRoot, true):
-        output = computeBlockLayout(tree: tree, node: node, input: input, blockContext: nil)
-    case (.flex, true):
-        output = computeFlexboxLayout(tree: tree, node: node, input: input)
-    case (.grid, true):
-        output = computeGridLayout(tree: tree, node: node, input: input)
+    case (.block, true), (.flowRoot, true), (.flex, true), (.grid, true):
+        let previousDepth = tree.containerDepth
+        let nextDepth = previousDepth + 1
+        output = maybeGrowContainerStack(depth: nextDepth) { grew in
+            tree.containerDepth = grew ? 1 : nextDepth
+            defer { tree.containerDepth = previousDepth }
+            var out: LayoutOutput
+            switch style.display {
+            case .block:
+                out = computeBlockLayout(tree: tree, node: node, input: input, blockContext: blockContext)
+            case .flowRoot:
+                out = computeBlockLayout(tree: tree, node: node, input: input, blockContext: nil)
+            case .flex:
+                out = computeFlexboxLayout(tree: tree, node: node, input: input)
+            case .grid:
+                out = computeGridLayout(tree: tree, node: node, input: input)
+            case .none:
+                out = .hidden
+            }
+            if input.runMode == .performLayout {
+                computeOutOfFlowLayout(tree: tree, node: node, containerOutput: &out)
+            }
+            return out
+        }
     case (_, false):
         output = computeLeafLayout(tree: tree, node: node, input: input)
-    }
-
-    if hasChildren && input.runMode == .performLayout {
-        computeOutOfFlowLayout(tree: tree, node: node, containerOutput: &output)
     }
 
     tree.cacheStore(node, input, output)
@@ -312,6 +325,8 @@ internal func computeLeafLayout(
         size: size,
         contentSize: measuredTotal,
         firstBaselines: measured.firstBaselines,
+        lastBaselines: measured.lastBaselines,
+        scrollOverflowOrigin: measured.scrollOverflowOrigin,
         topMargin: topMargin,
         bottomMargin: bottomMargin,
         marginsCanCollapseThrough: canCollapseThrough

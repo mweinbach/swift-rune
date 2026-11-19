@@ -551,12 +551,14 @@ extension Runtime {
 
     internal func revealRowX(scope: String?, key: String) -> (path: String, nextX: Float)? {
         let target: (idx: Int, x: Float, w: Float)?
-        if let tIdx = flatNodes.firstIndex(where: {
-            selectsElementSelector(key, path: $0.path, key: $0.key)
-                && ($0.parentIndex.map { Self.inScrollRevealScope(scope, path: flatNodes[$0].path) } ?? true)
+        if let tIdx = flatNodes.indices.first(where: { i in
+            let node = flatNodes[i]
+            return selectsElementSelector(key, path: node.path, key: node.key)
+                && !subtreeExiting(i)
+                && (node.parentIndex.map { Self.inScrollRevealScope(scope, path: flatNodes[$0].path) } ?? true)
         }) {
             target = (tIdx, flatNodes[tIdx].targetRect.x, flatNodes[tIdx].targetRect.width)
-        } else if let hl = resolveTextHighlightRevealTarget(scope: scope, key: key) {
+        } else if let hl = resolveTextHighlightRevealTarget(scope: scope, key: key), !subtreeExiting(hl.nodeIndex) {
             target = (hl.nodeIndex, hl.rect.x, hl.rect.width)
         } else {
             target = nil

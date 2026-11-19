@@ -76,7 +76,11 @@ struct WebAccessibilityDocument<State> {
         for (i, node) in nodes.enumerated() {
             let parentX = node.parentIndex.map { childShift[$0] } ?? 0
             let ownsHorizontalScroll = node.el.layout.scrollAxes == [.horizontal]
-            childShift[i] = parentX + Double(ownsHorizontalScroll ? runtime.scrollOffsets[node.path]?.x ?? 0 : 0)
+            let rawScrollX = ownsHorizontalScroll ? (runtime.scrollOffsets[node.path]?.x ?? 0) : 0
+            let visualShiftX: Float = ownsHorizontalScroll && node.flow == .rtl
+                ? ((runtime.scrollMaxExtents[node.path]?.x ?? 0) - rawScrollX)
+                : rawScrollX
+            childShift[i] = parentX + Double(visualShiftX)
             let selects = node.parentIndex.map { inheritedSelection[$0] } ?? true
             inheritedSelection[i] = selects && webPageTextSelects(node.el)
         }

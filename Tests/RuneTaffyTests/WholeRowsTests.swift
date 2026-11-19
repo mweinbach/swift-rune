@@ -100,4 +100,16 @@ struct WholeRowsTests {
         style.display = .grid
         #expect(!style.isWholeRowsColumn)
     }
+
+    @Test func extendedDimensionWidthStillRoundsAbsoluteRowHeight() throws {
+        var tree = TaffyTree()
+        // Width uses a cold keyword (minContent) so `size` spills to ExtendedStyle; height is a length that must still round.
+        let child = tree.newLeaf(TaffyStyle(size: Size(width: .minContent, height: .length(6.375))))
+        let root = try tree.newWithChildren(
+            TaffyStyle(flexDirection: .column, wholeRows: true),
+            children: [child]
+        )
+        try tree.computeLayout(root, availableSpace: .maxContent)
+        #expect(try tree.unroundedLayout(child).size.height == 6)
+    }
 }

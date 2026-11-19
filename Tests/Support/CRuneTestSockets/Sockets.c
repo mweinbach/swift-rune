@@ -87,3 +87,52 @@ int rune_test_socket_write(intptr_t client, const void *bytes, size_t count) {
     return (int)send((NativeSocket)client, bytes, size, 0);
 #endif
 }
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#include <CoreFoundation/CoreFoundation.h>
+#include <dlfcn.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef void (*rune_async_main_original_t)(void);
+typedef void (*rune_async_main_hook_t)(rune_async_main_original_t original);
+
+static void rune_test_keep_alive_source_perform(void *info) { (void)info; }
+
+static void rune_test_async_main_drain_queue(rune_async_main_original_t original) {
+    (void)original;
+    /* Swift 6.4's default CFMainExecutor calls CFRunLoopRun() once and immediately
+     * exits with status 0 if it ever returns. When macOS tests create NSWindow or
+     * NSPanel instances, AppKit/HIToolbox's SignalMainThread() asynchronously calls
+     * CFRunLoopStop(CFRunLoopGetMain()), prematurely terminating swiftpm-testing-helper
+     * mid-suite. Re-entering CFRunLoopRun() keeps MainActor and RunLoop.main alive
+     * until Swift Testing finishes all tests and calls exit(status) directly. */
+    CFRunLoopRef main_loop = CFRunLoopGetMain();
+    CFRunLoopSourceContext ctx = {0};
+    ctx.perform = rune_test_keep_alive_source_perform;
+    CFRunLoopSourceRef keep_alive = CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &ctx);
+    if (keep_alive) {
+        CFRunLoopAddSource(main_loop, keep_alive, kCFRunLoopCommonModes);
+    }
+    for (;;) {
+        CFRunLoopRun();
+    }
+}
+
+__attribute__((constructor))
+static void rune_test_guard_cf_main_executor(void) {
+    const char *prog = getprogname();
+    if (!prog || strcmp(prog, "swiftpm-testing-helper") != 0) {
+        return;
+    }
+    rune_async_main_hook_t *hook_slot =
+        (rune_async_main_hook_t *)dlsym(RTLD_DEFAULT, "swift_task_asyncMainDrainQueue_hook");
+    if (!hook_slot || *hook_slot != NULL) {
+        return;
+    }
+    *hook_slot = rune_test_async_main_drain_queue;
+}
+#endif
+#endif

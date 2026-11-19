@@ -107,7 +107,6 @@ internal struct AccessibilityFieldTextLayout {
     }
 }
 
-#if os(Windows) || os(Linux)
 extension Runtime {
     internal func accessibilityTextLayout(target: String, clip: MotionRect) -> AccessibilityFieldTextLayout? {
         guard let index = a11yTargetIndex(target) else { return nil }
@@ -128,4 +127,3 @@ extension Runtime {
                                             usesPlaceholder: placeholder)
     }
 }
-#endif

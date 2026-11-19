@@ -76,6 +76,13 @@ public struct PerfConfig: Sendable {
     public var incidentChannel: PerfIncidentChannel?
     /// Bounded notification queue capacity when using `incidentHandler` (`nil` = unbounded / direct).
     public var incidentQueueCapacity: Int?
+    /// Runs once per idle spell (at least `PerfFileRecorder.idleMinGapSeconds` after the previous
+    /// tidy) on the recorder's thread after `PerfFileRecorder.idleSeconds` with no new samples or
+    /// pending writes, then the thread waits with no timer (`Config::on_idle`).
+    public var idleHandler: (@Sendable () -> Void)?
+    internal var idleDelaySeconds: TimeInterval = PerfFileRecorder.idleSeconds
+    internal var idleMinGapSeconds: TimeInterval = PerfFileRecorder.idleMinGapSeconds
+    internal var quietFlushDelaySeconds: TimeInterval = PerfFileRecorder.quietFlushSeconds
 
     public init(
         directory: URL,
@@ -83,7 +90,8 @@ public struct PerfConfig: Sendable {
         build: String = "",
         incidentQueueCapacity: Int? = nil,
         incidentHandler: (@Sendable (URL) -> Void)? = nil,
-        incidentChannel: PerfIncidentChannel? = nil
+        incidentChannel: PerfIncidentChannel? = nil,
+        idleHandler: (@Sendable () -> Void)? = nil
     ) {
         self.directory = directory
         self.app = app
@@ -91,11 +99,21 @@ public struct PerfConfig: Sendable {
         self.incidentQueueCapacity = incidentQueueCapacity
         self.incidentHandler = incidentHandler
         self.incidentChannel = incidentChannel
+        self.idleHandler = idleHandler
     }
 
     public func build(_ build: String) -> PerfConfig {
         var copy = self
         copy.build = build
+        return copy
+    }
+
+    /// Runs once per idle spell (at least `PerfFileRecorder.idleMinGapSeconds` after the previous
+    /// tidy) on the recorder's thread after `PerfFileRecorder.idleSeconds` with no new samples or
+    /// pending writes, then the thread waits with no timer (`Config::on_idle`).
+    public func onIdle(_ idle: @escaping @Sendable () -> Void) -> PerfConfig {
+        var copy = self
+        copy.idleHandler = idle
         return copy
     }
 
@@ -110,6 +128,62 @@ public struct PerfConfig: Sendable {
         var copy = self
         copy.incidentChannel = channel
         return copy
+    }
+}
+
+/// Two-state idle-tidy scheduler matching `crates/rune-perf/src/store.rs::IdleTidy`.
+///
+/// Never arms a timer before work has arrived or when no idle hook is set. When armed, runs at
+/// most once per idle spell after `idleSeconds` with nothing pending, separated by at least
+/// `minGapSeconds` from the previous tidy, then returns to `.parked` so the thread waits untimed.
+internal struct PerfIdleTidy: Sendable, Equatable {
+    enum State: Sendable, Equatable {
+        case parked(last: TimeInterval?)
+        case armed(last: TimeInterval?, due: TimeInterval)
+    }
+
+    let idleSeconds: TimeInterval
+    let minGapSeconds: TimeInterval
+    private(set) var state: State
+
+    init(
+        idleSeconds: TimeInterval = PerfFileRecorder.idleSeconds,
+        minGapSeconds: TimeInterval = PerfFileRecorder.idleMinGapSeconds
+    ) {
+        self.idleSeconds = max(0, idleSeconds)
+        self.minGapSeconds = max(0, minGapSeconds)
+        self.state = .parked(last: nil)
+    }
+
+    func onWork(now: TimeInterval, hooked: Bool) -> PerfIdleTidy {
+        var next = self
+        let last: TimeInterval? = switch state {
+        case .parked(let last), .armed(let last, _): last
+        }
+        guard hooked else {
+            next.state = .parked(last: last)
+            return next
+        }
+        let due = last.map { max($0 + minGapSeconds, now + idleSeconds) } ?? (now + idleSeconds)
+        next.state = .armed(last: last, due: due)
+        return next
+    }
+
+    func wait(now: TimeInterval) -> TimeInterval? {
+        switch state {
+        case .parked:
+            return nil
+        case .armed(_, let due):
+            return max(0, due - now)
+        }
+    }
+
+    mutating func takeDue(now: TimeInterval) -> Bool {
+        if case .armed(_, let due) = state, now >= due {
+            state = .parked(last: now)
+            return true
+        }
+        return false
     }
 }
 
@@ -144,6 +218,10 @@ public final class PerfFileRecorder: @unchecked Sendable {
     public static let memoryLogIntervalMs: UInt64 = 30_000
     public static let maxBufferedMemoryLines = 20
     public static let incidentSlots = 16
+    /// How long the recorder waits with nothing to write before `PerfConfig.onIdle(_:)` runs (`IDLE`).
+    public static let idleSeconds: TimeInterval = 10.0
+    /// Minimum gap between two `PerfConfig.onIdle(_:)` runs on the recorder thread (`IDLE_MIN_GAP`).
+    public static let idleMinGapSeconds: TimeInterval = 180.0
 
     #if os(WASI)
     private init() {}
@@ -198,10 +276,18 @@ public final class PerfFileRecorder: @unchecked Sendable {
         private var buffer: [FrameSample] = []
         private var closed = false
         private let capacity: Int
+        private var timedWaits = 0
+        private var untimedWaits = 0
 
         init(capacity: Int) {
             self.capacity = capacity
             self.buffer.reserveCapacity(capacity)
+        }
+
+        var waitCounts: (timed: Int, untimed: Int) {
+            condition.lock()
+            defer { condition.unlock() }
+            return (timedWaits, untimedWaits)
         }
 
         func trySend(_ sample: FrameSample) -> Bool {
@@ -234,10 +320,12 @@ public final class PerfFileRecorder: @unchecked Sendable {
                     return .disconnected
                 }
                 if let deadline {
+                    timedWaits += 1
                     if !condition.wait(until: deadline) && buffer.isEmpty {
                         return closed ? .disconnected : .timeout
                     }
                 } else {
+                    untimedWaits += 1
                     condition.wait()
                 }
             }
@@ -303,6 +391,7 @@ public final class PerfFileRecorder: @unchecked Sendable {
     public func record(_ frame: FrameSample) -> Bool { false }
     public var droppedSamples: UInt64 { 0 }
     public var writeErrors: UInt64 { 0 }
+    internal var waitCounts: (timed: Int, untimed: Int) { (0, 0) }
     public func shutdown() {}
     #else
     /// Nonblocking bounded send (`recorder.rs::record`). Returns `false` when full or stopped.
@@ -325,6 +414,10 @@ public final class PerfFileRecorder: @unchecked Sendable {
 
     public var writeErrors: UInt64 {
         health.errorCount
+    }
+
+    internal var waitCounts: (timed: Int, untimed: Int) {
+        queue.waitCounts
     }
 
     /// Cancels lock waits, drains queued frames if active, and waits for the writer thread.
@@ -362,10 +455,33 @@ public final class PerfFileRecorder: @unchecked Sendable {
 
             let writer = PerfStoreWriter(config: config, startNanos: startNanos, health: health)
             var lastChecked: Date?
+            var tidy = PerfIdleTidy(
+                idleSeconds: config.idleDelaySeconds,
+                minGapSeconds: config.idleMinGapSeconds
+            )
             while true {
-                switch queue.receive(deadline: writer.flushDue) {
+                let got: BoundedSampleQueue.RecvResult
+                if let flushDue = writer.flushDue {
+                    got = queue.receive(deadline: flushDue)
+                } else if let idle = config.idleHandler, let wait = tidy.wait(now: Self.monotonicSeconds()) {
+                    // Nothing due to flush: when a hook is armed after samples, tidy once per idle
+                    // spell (at least `idleMinGapSeconds` apart), then wait with no timer.
+                    let result = queue.receive(deadline: Date().addingTimeInterval(wait))
+                    if case .timeout = result {
+                        if tidy.takeDue(now: Self.monotonicSeconds()) {
+                            idle()
+                        }
+                        continue
+                    }
+                    got = result
+                } else {
+                    got = queue.receive(deadline: nil)
+                }
+
+                switch got {
                 case .sample(let sample):
                     writer.accept(sample)
+                    tidy = tidy.onWork(now: Self.monotonicSeconds(), hooked: config.idleHandler != nil)
                     let now = Date()
                     if lastChecked == nil || now.timeIntervalSince(lastChecked!) >= checkEverySeconds {
                         writer.check()
@@ -385,6 +501,10 @@ public final class PerfFileRecorder: @unchecked Sendable {
         } catch {
             _ = health.incrementErrors()
         }
+    }
+
+    private static func monotonicSeconds() -> TimeInterval {
+        TimeInterval(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000.0
     }
 
     static func openFileLock(at url: URL) throws -> Int32 {
@@ -569,7 +689,7 @@ final class PerfStoreWriter {
                 "launch": launch,
                 "frame": Self.sampleDictionary(sample),
             ])
-            flushDue = Date().addingTimeInterval(PerfFileRecorder.quietFlushSeconds)
+            flushDue = Date().addingTimeInterval(config.quietFlushDelaySeconds)
         }
         let recent = stats.recentFrames
         if let incident = detector.detectFrame(
@@ -720,7 +840,7 @@ final class PerfStoreWriter {
             "dropped_samples": health.droppedCount,
         ]
         pendingIncidents.append((name: name, payload: payload))
-        flushDue = Date().addingTimeInterval(PerfFileRecorder.quietFlushSeconds)
+        flushDue = Date().addingTimeInterval(config.quietFlushDelaySeconds)
     }
 
     internal static func structuredEvidence(for incident: Incident, frameSample: FrameSample?) -> [String: Any] {

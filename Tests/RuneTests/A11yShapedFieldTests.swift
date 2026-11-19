@@ -35,14 +35,18 @@ struct A11yShapedFieldTests {
         retained.box = retained.box.clone()
         try #require(retained.box.shaped.lineStrings.count >= 3)
         // Waiting paragraphs have an estimated position but no Core Text line yet.
+        // Under `#1121`, drawn lines (such as line 0) still expose wrapped visual geometry, while
+        // the waiting row (line 1, `ctLine == nil`) falls back with empty bounds.
         retained.box.shaped.lineStrings[1].ctLine = nil
         runtime.nodeTextLayouts[node.nodeId] = retained
         host.update(tree: runtime.accessibilitySnapshot(), parentView: view, onAction: { _, _ in })
         #expect(field.accessibilityValue() as? String == text)
         #expect(field.accessibilitySelectedText() == "🦀")
-        #expect(field.accessibilityRange(forLine: 0) == NSRange(location: 0, length: start))
-        #expect(field.accessibilityRange(forLine: 1) == NSRange(location: start, length: "🦀 tail".utf16.count))
-        #expect(field.accessibilityFrame(for: firstLetter) == .zero)
+        let drawnFirstLine = field.accessibilityRange(forLine: 0)
+        #expect(drawnFirstLine.location == 0 && drawnFirstLine.length > 0 && drawnFirstLine.length <= start)
+        #expect(field.accessibilityFrame(for: firstLetter).height > 0)
+        let waitingLineStart = ImeUTF16Bridge.utf16Offset(in: text, fromUTF8Offset: retained.box.shaped.lineStrings[1].utf8Start)
+        #expect(field.accessibilityFrame(for: NSRange(location: waitingLineStart, length: 1)) == .zero)
     }
 
     @Test func aRetainedFieldUsesScreenGeometryForWrappedLinesAndFallsBackForLongValues() throws {
@@ -110,7 +114,12 @@ struct A11yShapedFieldTests {
         #expect(field.accessibilityNumberOfCharacters() == long.utf16.count)
         #expect(field.accessibilityRange(forLine: 0) == NSRange(location: 0, length: paragraph.utf16.count))
         #expect(field.accessibilityRange(forLine: 257) == NSRange(location: 257 * paragraph.utf16.count, length: 3))
-        #expect(field.accessibilityFrame(for: firstLetter) == .zero)
+        // Under `#1121`, drawn visual lines of a >64 KiB field expose screen bounds while
+        // off-screen unshaped rows far below the viewport return `.zero`.
+        let longFirst = field.accessibilityFrame(for: firstLetter)
+        #expect(longFirst.width > 0 && longFirst.height > 0 && screen.contains(longFirst))
+        let offscreenTail = NSRange(location: 257 * paragraph.utf16.count, length: 1)
+        #expect(field.accessibilityFrame(for: offscreenTail) == .zero)
 
         runtime.update(at: 0.05) { state, _ in state.draft = TextEdit(short, multiline: true) }
         refresh(at: 0.06)

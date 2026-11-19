@@ -154,7 +154,7 @@ internal final class WindowsAccessibilityHost {
                         if native.toggle < 0 { native.toggle = selected ? 1 : 0 }
                     } else if selected {
                         native.selected = 1
-                    } else if let parent = item.parentIndex, runtime.findFocusGroupAncestor(of: parent) != nil {
+                    } else if runtime.findFocusGroupAncestor(of: index) != nil {
                         native.selected = 0
                     }
                 }
@@ -179,7 +179,7 @@ internal final class WindowsAccessibilityHost {
             let name = AccessibilityDump.resolvedName(for: node) ?? ""
             rune_uia_add(host, native, node.id, node.role.rawValue, name, node.help ?? node.placeholder ?? "",
                          secure ? "" : node.value ?? "", node.keyboardShortcut ?? "")
-            if !secure, node.role == .textInput || node.role == .multilineTextInput,
+            if !secure, node.role == .textInput || node.role == .multilineTextInput || node.role == .searchbox,
                let selection = node.textSelection, selection.count == 4, let value = node.value,
                let target = node.runtimePath {
                 let utf16 = Array(value.utf16)

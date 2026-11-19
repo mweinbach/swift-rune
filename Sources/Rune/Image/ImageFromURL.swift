@@ -548,6 +548,68 @@ public final class ImageCache: @unchecked Sendable {
         return try buildMipDecoded(id: id, width: w, height: h, data: rgba)
     }
 
+    /// Rasterizes an SVG centre-cropped to fill a `px × px` square (`object-fit: cover`),
+    /// returning straight-alpha sRGB RGBA8 bytes (`rune::image::svg_rgba_cover`, `#1162`).
+    public static func svgRgbaCover(_ bytes: Data, px: UInt32) throws -> [UInt8] {
+        guard px >= 1 && px <= 4096 else {
+            throw ImageLoadError("invalid SVG raster size")
+        }
+        guard bytes.count <= 32 << 20 else { throw ImageLoadError("SVG is too large") }
+        let data: Data
+        if bytes.starts(with: [0x1f, 0x8b]) {
+            do {
+                data = try PortablePNG.gunzip(bytes, maximumSize: LinearMipGenerator.maxDecodedBytes)
+            } catch {
+                throw ImageLoadError("invalid SVGZ: \(error)")
+            }
+        } else {
+            data = bytes
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw ImageLoadError("SVG is not valid UTF-8")
+        }
+        guard let rootStart = text.range(of: "<svg"),
+              let tagEnd = text[rootStart.upperBound...].firstIndex(of: ">"),
+              text[rootStart.lowerBound...tagEnd].hasSuffix("/>") || text[tagEnd...].contains("</svg>") else {
+            throw ImageLoadError("malformed SVG document")
+        }
+        let tag = String(text[rootStart.lowerBound...tagEnd])
+        func attribute(_ key: String) -> String? { SVGIconRenderer.attribute(in: tag, named: key) }
+
+        var viewBox: (x: Double, y: Double, width: Double, height: Double)?
+        if let raw = attribute("viewBox") {
+            let parts = raw.split { $0.isWhitespace || $0 == "," }
+            guard parts.count == 4, let x = Double(parts[0]), let y = Double(parts[1]),
+                  let w = Double(parts[2]), let h = Double(parts[3]),
+                  x.isFinite, y.isFinite, w.isFinite, h.isFinite, w > 0, h > 0 else {
+                throw ImageLoadError("invalid SVG viewBox")
+            }
+            viewBox = (x, y, w, h)
+        }
+        var width = svgLength(attribute("width")), height = svgLength(attribute("height"))
+        if let viewBox {
+            let ratio = viewBox.width / viewBox.height
+            if let height, width == nil { width = height * ratio }
+            if let width, height == nil { height = width / ratio }
+        }
+        let viewportWidth = width ?? viewBox?.width ?? 16
+        let viewportHeight = height ?? viewBox?.height ?? 16
+        guard viewportWidth.isFinite, viewportHeight.isFinite, viewportWidth > 0, viewportHeight > 0 else {
+            throw ImageLoadError("invalid SVG dimensions")
+        }
+        let box = viewBox ?? (0, 0, viewportWidth, viewportHeight)
+        let side = Double(px)
+        let k = side / min(box.width, box.height)
+        let tx = (side - box.width * k) / 2.0 - box.x * k
+        let ty = (side - box.height * k) / 2.0 - box.y * k
+        let transform = GTransform(xx: Float(k), xy: 0, yx: 0, yy: Float(k), tx: Float(tx), ty: Float(ty))
+        guard transform.xx.isFinite, transform.yy.isFinite, transform.tx.isFinite, transform.ty.isFinite else {
+            throw ImageLoadError("invalid SVG transform")
+        }
+        let drawing = SVGIconRenderer.parseBody(String(text[rootStart.lowerBound...]), defaultFill: "black")
+        return SVGIconRenderer.rasterize(drawing, width: Int(px), height: Int(px), transform: transform, currentColor: .black)
+    }
+
     private static func rasterizeSVG(_ encoded: Data, targetMaxSide: UInt32,
                                      intrinsicScale: Double = 2, intrinsicLimit: Int = 4096) throws -> (UInt32, UInt32, Data) {
         guard encoded.count <= 32 << 20 else { throw ImageLoadError("SVG is too large") }

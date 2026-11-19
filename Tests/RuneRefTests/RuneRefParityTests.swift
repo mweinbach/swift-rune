@@ -373,7 +373,8 @@ struct RuneRefParityTests {
             clip: oracleNoClip,
             fade: [0, 0, 0, 0],
             fadeOrigin: nil,
-            turn: nil
+            turn: nil,
+            clipRadii: nil
         )
     }
 
@@ -581,5 +582,122 @@ struct RuneRefParityTests {
             db.render(disjoint)
             #expect(da.rgba == db.rgba, "seed \(seed)")
         }
+    }
+
+    @Test("reference.rs:215 OracleScene.validate accepts continuous corners and rejects unimplemented kinds")
+    func validateAcceptsContinuousCornersAndRejectsUnimplementedKinds() throws {
+        let base = OracleGenerator.scene(records: [])
+        var rect = OracleGenerator.scene(records: [[UInt8](repeating: 0, count: 32)]).primitives[0]
+        rect.params = [0.0, 0.0, 0.0, 1.0]
+        rect.rect = [4.0, 4.0, 24.0, 24.0]
+        rect.radii = [-6.0, -6.0, -6.0, -6.0]
+        rect.fill = [0.8, 0.2, 0.1, 1.0]
+        rect.border = [0.0, 0.0, 0.0, 0.0]
+        rect.clip = [2.0, 2.0, 30.0, 30.0]
+        rect.clipRadii = [-4.0, -4.0, 0.0, -4.0]
+        let validScene = OracleScene(
+            width: base.width,
+            height: base.height,
+            clear: base.clear,
+            primitives: [rect],
+            atlas: base.atlas
+        )
+        try validScene.validate()
+
+        // JSON replay round-trip preserves `clip_radii` and omits it when nil.
+        let encoded = try JSONEncoder().encode(validScene)
+        let jsonString = String(decoding: encoded, as: UTF8.self)
+        #expect(jsonString.contains("\"clip_radii\""))
+        let decoded = try JSONDecoder().decode(OracleScene.self, from: encoded)
+        #expect(decoded == validScene)
+
+        var withoutClipRadii = rect
+        withoutClipRadii.clipRadii = nil
+        let encodedNil = try JSONEncoder().encode(withoutClipRadii)
+        #expect(!String(decoding: encodedNil, as: UTF8.self).contains("clip_radii"))
+
+        // Mixed positive and negative clip radii cannot be packed and are rejected.
+        var mixedSignClip = rect
+        mixedSignClip.clipRadii = [-4.0, 4.0, 0.0, 0.0]
+        #expect(throws: (any Error).self) {
+            try OracleScene(
+                width: base.width,
+                height: base.height,
+                clear: base.clear,
+                primitives: [mixedSignClip],
+                atlas: base.atlas
+            ).validate()
+        }
+
+        // Kinds 5 (segment), 6 (triangle), 7 (image) and 13 (backdrop blur) are not implemented here.
+        for kind: Float in [5.0, 6.0, 7.0, 13.0] {
+            var unsupported = rect
+            unsupported.params[1] = kind
+            #expect(throws: (any Error).self, "kind \(kind) must be rejected") {
+                try OracleScene(
+                    width: base.width,
+                    height: base.height,
+                    clear: base.clear,
+                    primitives: [unsupported],
+                    atlas: base.atlas
+                ).validate()
+            }
+        }
+    }
+
+    @Test("reference.rs:241 PlusLighter blends additively inside, saturates, and composites source-over")
+    func plusLighterBlendsAdditivelyInsideSaturatesAndCompositesSourceOver() throws {
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = 16
+        scene.height = 16
+        scene.clear = [0.0, 0.0, 0.5, 1.0]
+        var open = makeOracleLayer(kind: 8.0, blur: 0.0)
+        open.rect = [0.0, 0.0, 16.0, 16.0]
+        open.params[0] = 1.0 // PlusLighter
+        open.fill = [0.0, 0.0, 0.0, 0.5] // 50% layer opacity
+        var child = OracleGenerator.scene(records: [[UInt8](repeating: 0, count: 32)]).primitives[0]
+        child.rect = [0.0, 0.0, 16.0, 16.0]
+        child.radii = [0.0, 0.0, 0.0, 0.0]
+        child.params = [0.0, 0.0, 0.0, 1.0]
+        child.border = [0.0, 0.0, 0.0, 0.0]
+        child.clip = oracleNoClip
+        child.fade = [0.0, 0.0, 0.0, 0.0]
+        child.fill = [0.6, 0.0, 0.0, 0.6]
+        // Two identical children sum to [1.2, 0, 0, 1.2], saturate to [1, 0, 0, 1], then multiply by
+        // opacity 0.5 -> [0.5, 0, 0, 0.5], composited source-over [0, 0, 0.5, 1] -> [0.5, 0, 0.25, 1].
+        scene.primitives = [open, child, child, makeOracleLayer(kind: 9.0, blur: 0.0)]
+        try scene.validate()
+        var frame = OracleFrame(width: scene.width, height: scene.height, provenance: true)
+        frame.render(scene)
+        let base = (8 * 16 + 8) * 4
+        let px = Array(frame.rgba[base..<(base + 4)])
+        // srgb_encode(0.5) * 255 = 188, srgb_encode(0.25) * 255 = 137.
+        #expect(abs(Int(px[0]) - 188) <= 1 && px[1] == 0 && abs(Int(px[2]) - 137) <= 1 && px[3] == 255, "got \(px)")
+    }
+
+    @Test("reference.rs:268 rounded clip clips ordinary primitive corners")
+    func roundedClipClipsOrdinaryPrimitiveCorners() throws {
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = 32
+        scene.height = 32
+        scene.clear = [0.0, 0.0, 0.0, 1.0]
+        var rect = OracleGenerator.scene(records: [[UInt8](repeating: 0, count: 32)]).primitives[0]
+        rect.rect = [0.0, 0.0, 32.0, 32.0]
+        rect.radii = [0.0, 0.0, 0.0, 0.0]
+        rect.fill = [1.0, 1.0, 1.0, 1.0]
+        rect.border = [0.0, 0.0, 0.0, 0.0]
+        rect.params = [0.0, 0.0, 0.0, 1.0]
+        rect.clip = [0.0, 0.0, 32.0, 32.0]
+        rect.fade = [0.0, 0.0, 0.0, 0.0]
+        rect.clipRadii = [12.0, 12.0, 12.0, 12.0]
+        scene.primitives = [rect]
+        try scene.validate()
+        var frame = OracleFrame(width: scene.width, height: scene.height, provenance: true)
+        frame.render(scene)
+        let corner = Array(frame.rgba[0..<4])
+        let centerBase = (16 * 32 + 16) * 4
+        let center = Array(frame.rgba[centerBase..<(centerBase + 4)])
+        #expect(corner == [0, 0, 0, 255], "rounded clip must cut the corner")
+        #expect(center == [255, 255, 255, 255], "centre stays filled")
     }
 }

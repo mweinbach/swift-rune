@@ -16,7 +16,7 @@ function isLayoutGroup(node) {
         Object.keys(node).every(key => layoutFields.has(key));
 }
 
-const fieldRoles = new Set(['textbox', 'password-input', 'multiline-text-input']);
+const fieldRoles = new Set(['textbox', 'searchbox', 'password-input', 'multiline-text-input']);
 const checkedRoles = new Set(['checkbox', 'switch', 'radio', 'menuitemcheckbox', 'menuitemradio']);
 const selectedRoles = new Set(['tab', 'option', 'row', 'treeitem', 'gridcell']);
 const isEditor = node => fieldRoles.has(node.role) || (node.role === 'combobox' && node.chars != null);
@@ -78,7 +78,7 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
 
     function create(node) {
         const field = isEditor(node);
-        const range = node.role === 'slider' && !!node.range;
+        const range = (node.role === 'slider' || node.role === 'spinbutton') && !!node.range;
         const box = doc.createElement(documentTag(node));
         box.style.cssText = 'box-sizing:border-box;position:absolute;pointer-events:none;margin:0;padding:0;border:0';
         if (box.localName === 'button') box.type = 'button';
@@ -90,7 +90,11 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
             // An unfocused editor can be found by reading, tabbing or touch. The active
             // editor occupies the same slot with its real native selection and IME.
             control = doc.createElement(node.role === 'multiline-text-input' ? 'textarea' : 'input');
-            if (control.tagName === 'INPUT') control.type = range ? 'range' : node.role === 'password-input' ? 'password' : 'text';
+            if (control.tagName === 'INPUT') {
+                control.type = range ? (node.role === 'spinbutton' ? 'number' : 'range')
+                    : node.role === 'password-input' ? 'password'
+                    : node.role === 'searchbox' ? 'search' : 'text';
+            }
             control.style.cssText = 'box-sizing:border-box;width:100%;height:100%;margin:0;padding:0;border:0;pointer-events:none';
             box.append(control);
         }

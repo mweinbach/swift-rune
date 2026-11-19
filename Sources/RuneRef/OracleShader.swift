@@ -396,11 +396,7 @@ public enum OracleShader {
     }
 
     public static func layerClipCoverage(_ i: OraclePrimitive, screen: (Float, Float)) -> Float {
-        let clip = clipCoverage(i, screen: screen) * (i.params[3] == 0.0 ? holeAlpha(screen, i.radii) : 1.0)
-        if i.border == [0, 0, 0, 0] { return clip }
-        let half = ((i.clip[2] - i.clip[0]) * 0.5, (i.clip[3] - i.clip[1]) * 0.5)
-        let p = (screen.0 - i.clip[0] - half.0, screen.1 - i.clip[1] - half.1)
-        return clip * clamp(0.5 - sd(p, half, i.border))
+        clipCoverage(i, screen: screen) * (i.params[3] == 0.0 ? holeAlpha(screen, i.radii) : 1.0)
     }
 
     private static func holeAlpha(_ p: (Float, Float), _ h: [Float]) -> Float {
@@ -418,7 +414,7 @@ public enum OracleShader {
             i.clip[2] - screen.0,
             i.clip[3] - screen.1,
         ]
-        var prod: Float = 1.0
+        var alpha: Float = 1.0
         for edge in 0..<4 {
             let f = min(max(i.fade[edge], -65504.0), 65504.0)
             let width = OraclePrimitive.float16BitsTo32(OraclePrimitive.float32To16Bits(f))
@@ -434,8 +430,14 @@ public enum OracleShader {
             } else {
                 edgeCov = ramp(hard[edge], width)
             }
-            prod *= edgeCov
+            alpha *= edgeCov
         }
-        return prod
+        let radii = i.params[1] == 8.0 ? (i.clipRadii ?? i.border) : (i.clipRadii ?? [0, 0, 0, 0])
+        if radii != [0, 0, 0, 0] {
+            let half = ((i.clip[2] - i.clip[0]) * 0.5, (i.clip[3] - i.clip[1]) * 0.5)
+            let q = (screen.0 - i.clip[0] - half.0, screen.1 - i.clip[1] - half.1)
+            alpha *= clamp(0.5 - sd(q, half, radii))
+        }
+        return alpha
     }
 }

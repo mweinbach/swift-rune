@@ -152,34 +152,86 @@ public struct TabTearOut: Sendable, Equatable {
     public var id: String
     public var index: Int
     public var windowPoint: Vec2
+    /// Pointer travel `[dx, dy]` since press, in points (`TabTearOut::offset`).
+    public var offset: Vec2
+    /// Pointer on the desktop in physical pixels when hosted (`TabTearOut::screen_point`).
+    public var screenPoint: (Int32, Int32)?
 
-    public init(id: String, index: Int, windowPoint: Vec2) {
+    public init(
+        id: String,
+        index: Int,
+        windowPoint: Vec2,
+        offset: Vec2 = .zero,
+        screenPoint: (Int32, Int32)? = nil
+    ) {
         self.id = id
         self.index = index
         self.windowPoint = windowPoint
+        self.offset = offset
+        self.screenPoint = screenPoint
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id && lhs.index == rhs.index && lhs.windowPoint == rhs.windowPoint
     }
 }
 
 public struct TabTearMove: Sendable, Equatable {
     public var id: String
+    public var index: Int
     public var windowPoint: Vec2
     public var insideStrip: Bool
+    /// Off the strip; false once the tab returns within `reattachDistance` (`TabTearMove::torn`).
+    public var torn: Bool { !insideStrip }
+    /// Where the press landed in the tab, in points from its top-left (`TabTearMove::grab`).
+    public var grab: Vec2
+    /// Pointer on the desktop in physical pixels when hosted (`TabTearMove::screen_point`).
+    public var screenPoint: (Int32, Int32)?
 
-    public init(id: String, windowPoint: Vec2, insideStrip: Bool) {
+    public init(
+        id: String,
+        index: Int = 0,
+        windowPoint: Vec2,
+        insideStrip: Bool,
+        grab: Vec2 = .zero,
+        screenPoint: (Int32, Int32)? = nil
+    ) {
         self.id = id
+        self.index = index
         self.windowPoint = windowPoint
         self.insideStrip = insideStrip
+        self.grab = grab
+        self.screenPoint = screenPoint
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id && lhs.windowPoint == rhs.windowPoint && lhs.insideStrip == rhs.insideStrip
     }
 }
 
 public struct TearOutSpec: Sendable, Equatable {
+    /// Points across the strip before a drag detaches (`detach_distance`, default 36).
     public var threshold: Float
+    /// Points across the strip within which a torn-out tab rejoins reorder (`reattach_distance`, default 24).
+    public var reattachDistance: Float
     public var allowPinned: Bool
     public var lone: Bool
     public var stripBounds: MotionRect?
 
-    public init(threshold: Float = 36.0, allowPinned: Bool = false, lone: Bool = false, stripBounds: MotionRect? = nil) {
+    public var detachDistance: Float {
+        get { threshold }
+        set { threshold = max(4.0, newValue) }
+    }
+
+    public init(
+        threshold: Float = 36.0,
+        reattachDistance: Float = 24.0,
+        allowPinned: Bool = false,
+        lone: Bool = false,
+        stripBounds: MotionRect? = nil
+    ) {
         self.threshold = max(4.0, threshold)
+        self.reattachDistance = max(0.0, reattachDistance)
         self.allowPinned = allowPinned
         self.lone = lone
         self.stripBounds = stripBounds
@@ -197,8 +249,26 @@ public enum TabDragPhase: Sendable, Equatable {
     case tornOut(id: String, originIndex: Int, windowPoint: Vec2)
 }
 
-/// Drag, width-lock, separator suppression, and tear-out state machine for `TabStrip`
-/// (`rune_kit::shell::tab_strip::drag::TabDragState`).
+/// Shared cell for the incoming tab's resolved slot, matching upstream `Rc<Cell<Option<usize>>>`.
+private final class IncomingSlotBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Int? = nil
+
+    func get() -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ newValue: Int?) {
+        lock.lock()
+        value = newValue
+        lock.unlock()
+    }
+}
+
+/// Drag, width-lock, separator suppression, tear-out, reattachment, and cross-window incoming-tab
+/// state machine for `TabStrip` (`rune_kit::shell::tab_strip::drag::TabDragState`).
 public struct TabDragState: Sendable, Equatable {
     public static let slop: Float = 4.0
 
@@ -209,6 +279,14 @@ public struct TabDragState: Sendable, Equatable {
         case tearMoved(TabTearMove)
     }
 
+    private struct HandedOffTearOut: Sendable, Equatable {
+        var id: String
+        var originIndex: Int
+        var anchor: Vec2
+        var pitch: Float
+        var grab: Vec2
+    }
+
     public private(set) var phase: TabDragPhase = .idle
     public private(set) var widthLock: Float? = nil
 
@@ -217,7 +295,18 @@ public struct TabDragState: Sendable, Equatable {
     }
     public private(set) var hoveredId: String? = nil
     public private(set) var incomingIndex: Int? = nil
+    /// Window-point location of a tab dragged in from another strip/window (`set_incoming`).
+    public private(set) var incomingPoint: Vec2? = nil
+    private var incomingSlotBox: IncomingSlotBox? = nil
+    fileprivate var incomingGap: (slot: Int, pitch: Float)? = nil
     public private(set) var handedOff: Bool = false
+    /// Layout rect of the torn-out tab in window points once reported (`TabDragState::lifted_rect`).
+    public private(set) var liftedRect: MotionRect? = nil
+    /// Unclamped pointer travel `[dx, dy]` while torn out (`TabDragMode::TearOut::offset`).
+    public private(set) var tearOffset: Vec2 = .zero
+    /// Local press origin inside the grabbed tab (`TabDragState::grab`).
+    public private(set) var grabPoint: Vec2 = .zero
+    private var handedOffTearOut: HandedOffTearOut? = nil
     fileprivate var swallowNextClick = false
     private var pressAnchor: Vec2? = nil
     private var pressScrollOffset: Float = 0
@@ -225,6 +314,27 @@ public struct TabDragState: Sendable, Equatable {
     private var tabRects: [String: MotionRect] = [:]
 
     public init() {}
+
+    public static func == (lhs: TabDragState, rhs: TabDragState) -> Bool {
+        lhs.phase == rhs.phase
+            && lhs.widthLock == rhs.widthLock
+            && lhs.hoveredId == rhs.hoveredId
+            && lhs.incomingIndex == rhs.incomingIndex
+            && lhs.incomingPoint == rhs.incomingPoint
+            && lhs.incomingSlotBox?.get() == rhs.incomingSlotBox?.get()
+            && lhs.incomingGap?.slot == rhs.incomingGap?.slot
+            && lhs.incomingGap?.pitch == rhs.incomingGap?.pitch
+            && lhs.handedOff == rhs.handedOff
+            && lhs.liftedRect == rhs.liftedRect
+            && lhs.tearOffset == rhs.tearOffset
+            && lhs.grabPoint == rhs.grabPoint
+            && lhs.handedOffTearOut == rhs.handedOffTearOut
+            && lhs.swallowNextClick == rhs.swallowNextClick
+            && lhs.pressAnchor == rhs.pressAnchor
+            && lhs.pressScrollOffset == rhs.pressScrollOffset
+            && lhs.draggedPitch == rhs.draggedPitch
+            && lhs.tabRects == rhs.tabRects
+    }
 
     public var isDragging: Bool {
         if case .dragging = phase { return true }
@@ -234,6 +344,19 @@ public struct TabDragState: Sendable, Equatable {
     public var isTornOut: Bool {
         if case .tornOut = phase { return true }
         return false
+    }
+
+    /// True after `handOff()` while the torn-out tab's cross-window gesture is still live.
+    public var isHandedOffTearOut: Bool {
+        handedOff && handedOffTearOut != nil
+    }
+
+    public var handedOffId: String? {
+        handedOffTearOut?.id
+    }
+
+    public var handedOffOriginIndex: Int? {
+        handedOffTearOut?.originIndex
     }
 
     public var draggingId: String? {
@@ -247,7 +370,7 @@ public struct TabDragState: Sendable, Equatable {
     public var draggingIndex: Int? {
         switch phase {
         case .dragging(_, let from, _, _), .tornOut(_, let from, _): return from
-        case .idle, .pressing: return nil
+        case .idle, .pressing: return handedOffTearOut?.originIndex
         }
     }
 
@@ -256,7 +379,7 @@ public struct TabDragState: Sendable, Equatable {
         case .pressing(let id, _, _, _), .dragging(let id, _, _, _), .tornOut(let id, _, _):
             return id
         case .idle:
-            return nil
+            return handedOffTearOut?.id
         }
     }
 
@@ -277,24 +400,85 @@ public struct TabDragState: Sendable, Equatable {
 
     public mutating func setIncoming(index: Int?) {
         incomingIndex = index
+        if index != nil {
+            incomingPoint = nil
+            incomingSlotBox?.set(nil)
+            incomingSlotBox = nil
+            incomingGap = nil
+        }
+    }
+
+    /// A tab dragged in from another strip/window hovers over this strip at `point` in this
+    /// window's coordinates, or has left it (`nil`) (`TabDragState::set_incoming`).
+    public mutating func setIncoming(point: Vec2?) {
+        if let point {
+            incomingIndex = nil
+            if incomingSlotBox == nil {
+                incomingSlotBox = IncomingSlotBox()
+            }
+            incomingPoint = point
+        } else {
+            incomingSlotBox?.set(nil)
+            incomingSlotBox = nil
+            incomingPoint = nil
+            incomingGap = nil
+            incomingIndex = nil
+        }
+    }
+
+    /// Where an incoming tab lands as the strip last built (`TabDragState::incoming_slot`).
+    public func incomingSlot() -> Int? {
+        incomingSlotBox?.get() ?? incomingIndex
     }
 
     public func incomingSlot(count: Int) -> Int? {
-        guard let idx = incomingIndex, count >= 0 else { return nil }
+        guard let idx = incomingSlot(), count >= 0 else { return nil }
         return idx.clamped(to: 0...count)
+    }
+
+    internal var activeIncomingPoint: Vec2? {
+        guard case .idle = phase, handedOffTearOut == nil else { return nil }
+        return incomingPoint
+    }
+
+    internal var isGapOpen: Bool {
+        incomingGap != nil || incomingIndex != nil
+    }
+
+    internal mutating func openGap(slot: Int, pitch: Float) {
+        incomingSlotBox?.set(slot)
+        incomingGap = (slot, pitch)
     }
 
     public mutating func reportRect(_ rect: MotionRect, for id: String) {
         tabRects[id] = rect
     }
 
+    /// Records the torn-out tab's layout rect in window points (`TabDragState::report_rect`).
+    public mutating func reportLiftedRect(_ rect: MotionRect) {
+        if isTornOut || isHandedOffTearOut {
+            liftedRect = rect
+        }
+    }
+
     public func rect(for id: String) -> MotionRect? {
         tabRects[id]
     }
 
-    public mutating func press(id: String, index: Int, at windowPoint: Vec2, tabWidth: Float? = nil, scrollOffset: Float = 0) {
+    public mutating func press(
+        id: String,
+        index: Int,
+        at windowPoint: Vec2,
+        tabWidth: Float? = nil,
+        scrollOffset: Float = 0,
+        grab: Vec2 = .zero
+    ) {
         swallowNextClick = false
         handedOff = false
+        handedOffTearOut = nil
+        liftedRect = nil
+        tearOffset = .zero
+        grabPoint = grab
         pressAnchor = windowPoint
         pressScrollOffset = scrollOffset
         draggedPitch = nil
@@ -321,7 +505,7 @@ public struct TabDragState: Sendable, Equatable {
     }
 
     /// Advances the pointer gesture, transitioning across slop -> `.dragging` -> `.tornOut`
-    /// as needed.
+    /// and reattaching back into `.dragging` when brought within `reattachDistance` over the strip.
     @discardableResult
     public mutating func follow(
         to windowPoint: Vec2,
@@ -344,7 +528,21 @@ public struct TabDragState: Sendable, Equatable {
         let scrolled = scrollOffset - pressScrollOffset
         switch phase {
         case .idle:
-            return .none
+            guard let handed = handedOffTearOut else { return .none }
+            return followTornOut(
+                id: handed.id,
+                originIndex: handed.originIndex,
+                anchor: handed.anchor,
+                windowPoint: windowPoint,
+                orientation: orientation,
+                tabCenters: tabCenters,
+                tabSize: tabSize,
+                count: count,
+                scrolled: scrolled,
+                tearOut: tearOut,
+                partition: partition,
+                wasHandedOff: true
+            )
 
         case .pressing(let id, let idx, let start, _):
             let primary = alongDelta(start, windowPoint) + scrolled
@@ -367,8 +565,10 @@ public struct TabDragState: Sendable, Equatable {
                     outsideStrip = cross >= tearOut.threshold
                 }
                 if outsideStrip {
+                    tearOffset = Vec2(windowPoint.x - start.x, windowPoint.y - start.y)
+                    draggedPitch = max(1, tabSize)
                     phase = .tornOut(id: id, originIndex: idx, windowPoint: windowPoint)
-                    return .tornOut(TabTearOut(id: id, index: idx, windowPoint: windowPoint))
+                    return .tornOut(TabTearOut(id: id, index: idx, windowPoint: windowPoint, offset: tearOffset))
                 }
             }
             phase = .dragging(id: id, fromIndex: idx, toIndex: idx, offset: primary)
@@ -407,10 +607,90 @@ public struct TabDragState: Sendable, Equatable {
             )
 
         case .tornOut(let id, let originIndex, _):
-            phase = .tornOut(id: id, originIndex: originIndex, windowPoint: windowPoint)
-            let inside = tearOut?.stripBounds.map { motionRectContains($0, windowPoint) } ?? false
-            return .tearMoved(TabTearMove(id: id, windowPoint: windowPoint, insideStrip: inside))
+            return followTornOut(
+                id: id,
+                originIndex: originIndex,
+                anchor: pressAnchor ?? windowPoint,
+                windowPoint: windowPoint,
+                orientation: orientation,
+                tabCenters: tabCenters,
+                tabSize: tabSize,
+                count: count,
+                scrolled: scrolled,
+                tearOut: tearOut,
+                partition: partition,
+                wasHandedOff: false
+            )
         }
+    }
+
+    private mutating func followTornOut(
+        id: String,
+        originIndex: Int,
+        anchor: Vec2,
+        windowPoint: Vec2,
+        orientation: TabOrientation,
+        tabCenters: [Float],
+        tabSize: Float,
+        count: Int,
+        scrolled: Float,
+        tearOut: TearOutSpec?,
+        partition: Range<Int>?,
+        wasHandedOff: Bool
+    ) -> DragOutcome {
+        let along = (orientation == .horizontal ? (windowPoint.x - anchor.x) : (windowPoint.y - anchor.y)) + scrolled
+        let across = orientation == .horizontal ? abs(windowPoint.y - anchor.y) : abs(windowPoint.x - anchor.x)
+        let pitch = max(1, tabSize)
+        let range = partition ?? 0..<max(1, count)
+        let minAlong = Float(range.lowerBound - originIndex - 1) * pitch
+        let maxAlong = Float(range.upperBound - originIndex) * pitch
+        let overAlong = along >= minAlong && along <= maxAlong
+        tearOffset = Vec2(windowPoint.x - anchor.x, windowPoint.y - anchor.y)
+        draggedPitch = pitch
+
+        let shouldReattach: Bool
+        if let tearOut {
+            if let bounds = tearOut.stripBounds {
+                let reattachBox = MotionRect(
+                    left: bounds.left - tearOut.reattachDistance,
+                    top: bounds.top - tearOut.reattachDistance,
+                    right: bounds.right + tearOut.reattachDistance,
+                    bottom: bounds.bottom + tearOut.reattachDistance
+                )
+                shouldReattach = motionRectContains(reattachBox, windowPoint) && overAlong
+            } else {
+                shouldReattach = across <= tearOut.reattachDistance && overAlong
+            }
+        } else {
+            shouldReattach = true
+        }
+
+        if shouldReattach && count > 0 && range.contains(originIndex) {
+            handedOff = false
+            handedOffTearOut = nil
+            liftedRect = nil
+            pressAnchor = anchor
+            let minOffset = Float(range.lowerBound - originIndex) * pitch
+            let maxOffset = Float(range.upperBound - 1 - originIndex) * pitch
+            let delta = along.clamped(to: min(minOffset, 0)...max(maxOffset, 0))
+            let target: Int
+            if !tabCenters.isEmpty {
+                let extents = tabCenters.map { (start: $0 - tabSize * 0.5, size: tabSize) }
+                let ptr = orientation == .horizontal ? windowPoint.x : windowPoint.y
+                target = Self.landingSlot(pointerAlong: ptr, itemExtents: extents, fromIndex: originIndex)
+                    .clamped(to: range.lowerBound...(range.upperBound - 1))
+            } else {
+                target = max(0, originIndex + Int((delta / pitch).rounded()))
+                    .clamped(to: range.lowerBound...(range.upperBound - 1))
+            }
+            phase = .dragging(id: id, fromIndex: originIndex, toIndex: target, offset: delta)
+            return .tearMoved(TabTearMove(id: id, index: originIndex, windowPoint: windowPoint, insideStrip: true, grab: grabPoint))
+        }
+
+        if !wasHandedOff {
+            phase = .tornOut(id: id, originIndex: originIndex, windowPoint: windowPoint)
+        }
+        return .tearMoved(TabTearMove(id: id, index: originIndex, windowPoint: windowPoint, insideStrip: false, grab: grabPoint))
     }
 
     private mutating func followDragging(
@@ -444,8 +724,11 @@ public struct TabDragState: Sendable, Equatable {
                 outsideStrip = false
             }
             if outsideStrip {
+                let anchor = pressAnchor ?? windowPoint
+                tearOffset = Vec2(windowPoint.x - anchor.x, windowPoint.y - anchor.y)
+                draggedPitch = max(1, tabSize)
                 phase = .tornOut(id: id, originIndex: from, windowPoint: windowPoint)
-                return .tornOut(TabTearOut(id: id, index: from, windowPoint: windowPoint))
+                return .tornOut(TabTearOut(id: id, index: from, windowPoint: windowPoint, offset: tearOffset))
             }
         }
         guard count > 0 else {
@@ -475,31 +758,57 @@ public struct TabDragState: Sendable, Equatable {
         return .none
     }
 
-    /// Shift amount for non-dragged sibling at `index` when an item is dragged from `from` to `to`.
+    /// Shift amount for non-dragged sibling at `index` during reorder or tear-out (closing the gap).
     public func shift(forIndex index: Int, itemExtent: Float) -> Float {
-        guard case .dragging(_, let from, let to, _) = phase, from != to else { return 0 }
-        if from < to && index > from && index <= to {
-            return -itemExtent
+        switch phase {
+        case .dragging(_, let from, let to, _) where from != to:
+            if from < to && index > from && index <= to {
+                return -itemExtent
+            }
+            if from > to && index >= to && index < from {
+                return itemExtent
+            }
+            return 0
+        case .tornOut(_, let from, _):
+            return index > from ? -itemExtent : 0
+        case .idle:
+            if let handed = handedOffTearOut, index > handed.originIndex {
+                return -itemExtent
+            }
+            return 0
+        default:
+            return 0
         }
-        if from > to && index >= to && index < from {
-            return itemExtent
-        }
-        return 0
     }
 
     public mutating func handOff() {
+        if case let .tornOut(id, originIndex, _) = phase {
+            handedOffTearOut = HandedOffTearOut(
+                id: id,
+                originIndex: originIndex,
+                anchor: pressAnchor ?? .zero,
+                pitch: draggedPitch ?? 120.0,
+                grab: grabPoint
+            )
+        }
         handedOff = true
         phase = .idle
         widthLock = nil
         pressAnchor = nil
         pressScrollOffset = 0
         draggedPitch = nil
+        liftedRect = nil
     }
 
     @discardableResult
     public mutating func release() -> TabReorder? {
         defer {
             phase = .idle
+            handedOff = false
+            handedOffTearOut = nil
+            liftedRect = nil
+            tearOffset = .zero
+            grabPoint = .zero
             pressAnchor = nil
             pressScrollOffset = 0
             draggedPitch = nil
@@ -514,7 +823,16 @@ public struct TabDragState: Sendable, Equatable {
 
     public mutating func cancel() {
         phase = .idle
+        handedOff = false
+        handedOffTearOut = nil
+        liftedRect = nil
+        tearOffset = .zero
+        grabPoint = .zero
         incomingIndex = nil
+        incomingPoint = nil
+        incomingSlotBox?.set(nil)
+        incomingSlotBox = nil
+        incomingGap = nil
         pressAnchor = nil
         pressScrollOffset = 0
         draggedPitch = nil
@@ -828,7 +1146,54 @@ public struct TabStrip<State> {
         return (slots, { ordered[$0] })
     }
 
+    /// The strip, with a torn-out tab floating over the window in `layer` (`TabStrip::build_layered`).
+    public func buildLayered(_ state: State, kit k: Kit, layer: inout [El<State>]) -> El<State> {
+        var collected: [El<State>] = []
+        let strip = assembleStrip(state, kit: k, elevateDragged: true, collectLayer: true, layerOut: &collected)
+        layer.append(contentsOf: collected)
+        return strip
+    }
+
     public func buildLayered(_ state: State, kit k: Kit, elevateDragged: Bool = true) -> El<State> {
+        var ignored: [El<State>] = []
+        return assembleStrip(state, kit: k, elevateDragged: elevateDragged, collectLayer: false, layerOut: &ignored)
+    }
+
+    private static func incomingLandingSlot(
+        pitches: [Float],
+        pinned: Int,
+        point: Vec2,
+        viewport: TabAutoScroll.Viewport?,
+        vertical: Bool
+    ) -> Int {
+        let origin: Float
+        let scrolled: Float
+        if let viewport {
+            let r = viewport.rect.get()
+            origin = vertical ? r.top : r.left
+            scrolled = viewport.offset(vertical: vertical)
+        } else {
+            origin = 0
+            scrolled = 0
+        }
+        let along = (vertical ? point.y : point.x) - origin + scrolled
+        var start: Float = 0
+        for (i, p) in pitches.enumerated() {
+            if i >= pinned && along < start + p * 0.5 {
+                return i
+            }
+            start += p
+        }
+        return pitches.count
+    }
+
+    private func assembleStrip(
+        _ state: State,
+        kit k: Kit,
+        elevateDragged: Bool,
+        collectLayer: Bool,
+        layerOut: inout [El<State>]
+    ) -> El<State> {
         let dens = effectiveDensity
         let tabH = dens.height
         let overflowMode = effectiveOverflow
@@ -837,17 +1202,19 @@ public struct TabStrip<State> {
         let (slots, buildTab) = resolvedSlots()
         let count = slots.count
         let pinnedCount = slots.filter(\.pinned).count
+        var workingDrag = dragStateValue
 
         let effectiveGap = gapOverride ?? 2.0
+        let incomingReserve = (workingDrag.activeIncomingPoint != nil || workingDrag.incomingIndex != nil) ? 1 : 0
         let computedUnpinnedWidth: Float? = {
-            if let locked = dragStateValue.widthLock, locked > 0 {
+            if let locked = workingDrag.widthLock, locked > 0 {
                 return locked
             }
             if let avail = availableWidth {
                 let trailingReserve = trailingEl != nil ? (trailingWidthValue + effectiveGap) : 0.0
                 return overflowMode.tabWidth(
                     available: max(0, avail - trailingReserve),
-                    unpinnedCount: count - pinnedCount,
+                    unpinnedCount: count - pinnedCount + incomingReserve,
                     pinnedCount: pinnedCount,
                     gap: effectiveGap
                 )
@@ -857,15 +1224,13 @@ public struct TabStrip<State> {
 
         // A separator stands after tab `i` unless it or the next is active, hovered or dragged.
         let quiet: (String) -> Bool = { id in
-            id == selectedId || id == dragStateValue.hoveredId || id == dragStateValue.draggingId
+            id == selectedId || id == workingDrag.hoveredId || id == workingDrag.draggingId || id == workingDrag.handedOffId
         }
         let separatorAfter: (Int) -> Bool = { i in
             !vertical && i + 1 < count && !quiet(slots[i].id) && !quiet(slots[i + 1].id)
         }
         // Each tab's length along the strip with the gap after it: its width across (and the
         // separator after it), its row down.
-        // Every horizontal tab is drawn this wide (`width: Some(tab_w)`), so a run of unbuilt
-        // tabs is exactly as long as they would be.
         let tabW = computedUnpinnedWidth ?? Self.defaultTabWidth(overflowMode)
         let unpinnedDensity = density ?? (vertical ? dens : TabOverflow.densityFor(tabW))
         let pinnedW = overflowMode.pinnedTabWidth
@@ -878,10 +1243,17 @@ public struct TabStrip<State> {
         let pitches: [Float] = slots.indices.map { i in
             pitch(slots[i].pinned, slots[i].twoLine) + (separatorAfter(i) ? Self.separatorWidth + effectiveGap : 0)
         }
-        let landing = dragStateValue.incomingSlot(count: count)
         let listKey = "\(keyId)-list"
         let scrollKey = "\(keyId)-scroll"
-        let viewport = dragKeyPath.map { _ in TabAutoScroll.viewport(for: keyId) }
+        let viewport = (dragKeyPath != nil || workingDrag.activeIncomingPoint != nil) ? TabAutoScroll.viewport(for: keyId) : nil
+        let landing: Int?
+        if let incomingPt = workingDrag.activeIncomingPoint {
+            let slot = Self.incomingLandingSlot(pitches: pitches, pinned: pinnedCount, point: incomingPt, viewport: viewport, vertical: vertical)
+            workingDrag.openGap(slot: slot, pitch: pitch(false, false))
+            landing = slot
+        } else {
+            landing = workingDrag.incomingSlot(count: count)
+        }
 
         // Which tabs are built: past `BAND_PAST`, those near what the strip shows, and the ones a
         // gesture, a key or a menu is on wherever they are.
@@ -902,7 +1274,7 @@ public struct TabStrip<State> {
                 pitches: pitches,
                 band: band,
                 active: selectedId,
-                dragging: dragStateValue.draggingIndex,
+                dragging: workingDrag.draggingIndex,
                 landing: landing
             )
         }() : nil
@@ -932,22 +1304,26 @@ public struct TabStrip<State> {
             space()
             let item = buildTab(i)
             atChild[i] = stripChildren.count
-            stripChildren.append(
-                buildSingleTab(
-                    item: item,
-                    index: i,
-                    tabBarCount: count,
-                    partition: item.isPinned ? 0..<pinnedCount : pinnedCount..<count,
-                    pitch: pitches[i],
-                    viewport: viewport,
-                    dens: item.isPinned ? .iconOnly : unpinnedDensity,
-                    tabH: tabH,
-                    computedUnpinnedWidth: tabWidth,
-                    dragStateValue: dragStateValue,
-                    elevateDragged: elevateDragged,
-                    kit: k
-                )
+            let built = buildSingleTab(
+                item: item,
+                index: i,
+                tabBarCount: count,
+                partition: item.isPinned ? 0..<pinnedCount : pinnedCount..<count,
+                pitch: pitches[i],
+                listKey: listKey,
+                viewport: viewport,
+                dens: item.isPinned ? .iconOnly : unpinnedDensity,
+                tabH: tabH,
+                computedUnpinnedWidth: tabWidth,
+                dragStateValue: workingDrag,
+                elevateDragged: elevateDragged,
+                layered: collectLayer,
+                kit: k
             )
+            if let ghost = built.ghost {
+                layerOut.append(ghost)
+            }
+            stripChildren.append(built.tab)
             if separatorAfter(i) {
                 stripChildren.append(
                     el()
@@ -962,9 +1338,9 @@ public struct TabStrip<State> {
         // The incoming tab's place: an empty slot its own length, which the tab takes when it's
         // let go.
         if let slot = landing {
-            let incomingPitch = pitch(false, false)
+            let incomingPitch = workingDrag.incomingGap?.pitch ?? pitch(false, false)
             let place: El<State> = el().key("\(listKey)-incoming").a11yHidden()
-            let sized = vertical ? place.wFull().h(incomingPitch) : place.w(incomingPitch - effectiveGap).h(tabH)
+            let sized = vertical ? place.wFull().h(incomingPitch) : place.w(max(0, incomingPitch - effectiveGap)).h(tabH)
             let child = (slot < count ? atChild[slot] : nil) ?? stripChildren.count
             stripChildren.insert(sized, at: child)
         }
@@ -1054,17 +1430,21 @@ public struct TabStrip<State> {
         tabBarCount: Int,
         partition: Range<Int>,
         pitch: Float,
+        listKey: String,
         viewport: TabAutoScroll.Viewport?,
         dens: TabDensity,
         tabH: Float,
         computedUnpinnedWidth: Float?,
         dragStateValue: TabDragState,
         elevateDragged: Bool,
+        layered: Bool,
         kit k: Kit
-    ) -> El<State> {
+    ) -> (tab: El<State>, ghost: El<State>?) {
         let isSelected = (item.id == selectedId)
         let isHovered = (dragStateValue.hoveredId == item.id)
         let isDragged = (dragStateValue.draggingId == item.id)
+        let isTorn = isDragged && dragStateValue.isTornOut
+        let isHandedOff = (dragStateValue.handedOffId == item.id && dragStateValue.isHandedOffTearOut)
         let isEditing = item.editorEl != nil
 
         var tab = buildTabShell(
@@ -1073,7 +1453,7 @@ public struct TabStrip<State> {
             tabBarCount: tabBarCount,
             tabH: tabH,
             computedUnpinnedWidth: computedUnpinnedWidth,
-            isSelected: isSelected,
+            isSelected: isSelected || isDragged,
             isHovered: isHovered,
             isEditing: isEditing,
             kit: k
@@ -1083,10 +1463,11 @@ public struct TabStrip<State> {
             item: item,
             dens: dens,
             tabH: tabH,
-            isSelected: isSelected,
+            isSelected: isSelected || isDragged,
             isEditing: isEditing,
             kit: k
         )
+        let pillSnapshot: El<State>? = (isTorn && layered && !isHandedOff) ? tab : nil
         if !item.isDisabled && !isEditing {
             tab = attachTabHandlers(
                 to: tab,
@@ -1103,13 +1484,19 @@ public struct TabStrip<State> {
         }
         return applyTabDragAndDecoration(
             to: tab,
+            pillSnapshot: pillSnapshot,
             item: item,
             index: index,
+            listKey: listKey,
+            tabH: tabH,
             dens: dens,
             computedUnpinnedWidth: computedUnpinnedWidth,
             dragStateValue: dragStateValue,
             isDragged: isDragged,
+            isTorn: isTorn,
+            isHandedOff: isHandedOff,
             elevateDragged: elevateDragged,
+            layered: layered,
             kit: k
         )
     }
@@ -1370,7 +1757,8 @@ public struct TabStrip<State> {
                     id: idCopy,
                     index: index,
                     at: press.window,
-                    scrollOffset: viewport?.offset(vertical: orientation == .vertical) ?? 0
+                    scrollOffset: viewport?.offset(vertical: orientation == .vertical) ?? 0,
+                    grab: press.local
                 )
                 if selectEarly, let onSelectFn {
                     if isSelected {
@@ -1431,11 +1819,20 @@ public struct TabStrip<State> {
                             wasClick = false
                             tx.animated()
                         }
-                        let torn = s[keyPath: dragKeyPath].isTornOut
+                        let torn = s[keyPath: dragKeyPath].isTornOut || s[keyPath: dragKeyPath].isHandedOffTearOut
+                        let finalOffset = s[keyPath: dragKeyPath].tearOffset
                         let reorder = s[keyPath: dragKeyPath].release()
                         s[keyPath: dragKeyPath].swallowNextClick = inside && (selectEarly || !wasClick)
                         if let reorder { onReorder?(&s, reorder, &tx) }
-                        if torn { onTear?(&s, TabTearOut(id: idCopy, index: index, windowPoint: drag.window), &tx) }
+                        if torn {
+                            onTear?(&s, TabTearOut(
+                                id: idCopy,
+                                index: index,
+                                windowPoint: drag.window,
+                                offset: finalOffset,
+                                screenPoint: drag.screen
+                            ), &tx)
+                        }
                         return
                     case .move:
                         guard onReorder != nil || tearSpec != nil else {
@@ -1446,6 +1843,7 @@ public struct TabStrip<State> {
                     if s[keyPath: dragKeyPath].isDragging {
                         viewport?.step(at: drag.window, vertical: vertical, key: scrollKey, tx: &tx)
                     }
+                    let wasTorn = s[keyPath: dragKeyPath].isTornOut || s[keyPath: dragKeyPath].isHandedOffTearOut
                     let outcome = s[keyPath: dragKeyPath].follow(
                         to: drag.window,
                         orientation: orientation,
@@ -1456,13 +1854,22 @@ public struct TabStrip<State> {
                         scrollOffset: viewport?.offset(vertical: vertical) ?? 0,
                         partition: partition
                     )
-                    if s[keyPath: dragKeyPath].isDragging || s[keyPath: dragKeyPath].isTornOut {
+                    let nowTorn = s[keyPath: dragKeyPath].isTornOut || s[keyPath: dragKeyPath].isHandedOffTearOut
+                    if s[keyPath: dragKeyPath].isDragging || nowTorn || wasTorn {
                         tx.animated()
                     }
                     switch outcome {
                     case .tornOut:
-                        onTearMove?(&s, TabTearMove(id: idCopy, windowPoint: drag.window, insideStrip: false), &tx)
-                    case .tearMoved(let move):
+                        onTearMove?(&s, TabTearMove(
+                            id: idCopy,
+                            index: index,
+                            windowPoint: drag.window,
+                            insideStrip: false,
+                            grab: s[keyPath: dragKeyPath].grabPoint,
+                            screenPoint: drag.screen
+                        ), &tx)
+                    case .tearMoved(var move):
+                        move.screenPoint = drag.screen
                         onTearMove?(&s, move, &tx)
                     case .moved, .none:
                         break
@@ -1475,17 +1882,78 @@ public struct TabStrip<State> {
     @inline(never)
     private func applyTabDragAndDecoration(
         to initialTab: El<State>,
+        pillSnapshot: El<State>?,
         item: StripTabItem<State>,
         index: Int,
+        listKey: String,
+        tabH: Float,
         dens: TabDensity,
         computedUnpinnedWidth: Float?,
         dragStateValue: TabDragState,
         isDragged: Bool,
+        isTorn: Bool,
+        isHandedOff: Bool,
         elevateDragged: Bool,
+        layered: Bool,
         kit k: Kit
-    ) -> El<State> {
+    ) -> (tab: El<State>, ghost: El<State>?) {
         var tab = initialTab
-        if isDragged {
+        var ghost: El<State>? = nil
+        let vertical = orientation == .vertical
+
+        // Lifted off the strip: a touch larger, floating (`tab.rs:lift`).
+        func lift(_ e: El<State>) -> El<State> {
+            k.elevate(
+                e.rounded(StripTabItem<State>.cornerRadius)
+                    .scale(1.03)
+                    .scaleMotion(MotionTokens.MORPH)
+                    .motionIntent(.overshoot),
+                k.elevation.floating
+            )
+        }
+
+        if isTorn || isHandedOff {
+            let tabHeight: Float = (vertical && item.subtitle != nil) ? TabStripBand.twoLineHeight : tabH
+            if isTorn && layered && !isHandedOff, let pill = pillSnapshot {
+                let w = computedUnpinnedWidth ?? dragStateValue.liftedRect?.width ?? 224.0
+                let floatEl: El<State> = el()
+                    .key("\(listKey)-ghost")
+                    .size(w, tabHeight)
+                    .child(pill.key("\(listKey)-ghost-pill"))
+                    .a11yHidden()
+                    .anchored("\(listKey)-anchor", side: .bottom, align: .start, gap: -tabHeight)
+                    .offset(dragStateValue.tearOffset.x, dragStateValue.tearOffset.y)
+                    .offsetMotion(.instant)
+                ghost = lift(floatEl)
+            }
+            if isTorn, let dragKeyPath {
+                let anchor: El<State> = el()
+                    .key("\(listKey)-anchor")
+                    .pin(top: 0, right: 0, bottom: nil, left: 0)
+                    .h(tabHeight)
+                    .a11yHidden()
+                    .onLayoutTx { s, r, tx in
+                        if r.count >= 4 {
+                            s[keyPath: dragKeyPath].reportLiftedRect(MotionRect.fromXYWH(r[0], r[1], r[2], r[3]))
+                        }
+                        tx.liveOnly()
+                    }
+                tab = tab.child(anchor)
+            }
+            if isHandedOff {
+                // Its own window shows it now under the pointer: strip hides it while keeping the gesture.
+                tab = tab.opacity(0.0).opacityMotion(Anim<Float>.instant).motionIntent(.cut)
+            } else if ghost != nil {
+                // The floating ghost flies in `layer`; the tab itself waits unseen in place.
+                tab = tab.opacity(0.0).opacityMotion(Anim<Float>.instant).offset(0, 0).motionIntent(.cut)
+            } else {
+                tab = lift(
+                    tab.offset(dragStateValue.tearOffset.x, dragStateValue.tearOffset.y)
+                        .raise()
+                        .offsetMotion(.instant)
+                )
+            }
+        } else if isDragged {
             if case .dragging(_, _, _, let offset) = dragStateValue.phase {
                 tab = orientation == .horizontal
                     ? tab.offset(offset, 0)
@@ -1495,7 +1963,7 @@ public struct TabStrip<State> {
             if elevateDragged {
                 tab = tab.z(20).shadows(k.shadowLayers(k.elevation.raised))
             }
-        } else if dragStateValue.isDragging {
+        } else if dragStateValue.isDragging || dragStateValue.isTornOut || dragStateValue.isHandedOffTearOut {
             let shift = dragStateValue.shift(forIndex: index, itemExtent: dragStateValue.draggedPitch ?? computedUnpinnedWidth ?? 120.0)
             if shift != 0 {
                 tab = orientation == .horizontal
@@ -1510,6 +1978,6 @@ public struct TabStrip<State> {
         if let wrap = item.decorateFn {
             tab = wrap(tab, dens)
         }
-        return tab.role(.tab)
+        return (tab.role(.tab), ghost)
     }
 }

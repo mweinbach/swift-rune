@@ -110,7 +110,13 @@ public struct LayoutInput: Sendable, Equatable, Hashable {
 public struct LayoutOutput: Sendable, Equatable {
     public var size: Size<Float>
     public var contentSize: Size<Float>
+    /// Top-left origin of the scrollable overflow rect (matching `overflow_lt` in
+    /// `rune_taffy::cache` / `scrollable_overflow_rect.left, .top` in Taffy 0.15).
+    /// Non-zero (typically negative) when content overflows above or to the left of the border box.
+    public var scrollOverflowOrigin: Point<Float>
     public var firstBaselines: Point<Float?>
+    /// Last baselines along each axis (matching `baselines.last` in Taffy 0.15 / `rune_taffy::cache`).
+    public var lastBaselines: Point<Float?>
     public var topMargin: CollapsibleMarginSet
     public var bottomMargin: CollapsibleMarginSet
     public var marginsCanCollapseThrough: Bool
@@ -119,6 +125,8 @@ public struct LayoutOutput: Sendable, Equatable {
         size: .zero,
         contentSize: .zero,
         firstBaselines: Point(x: nil, y: nil),
+        lastBaselines: Point(x: nil, y: nil),
+        scrollOverflowOrigin: .zero,
         topMargin: .zero,
         bottomMargin: .zero,
         marginsCanCollapseThrough: false
@@ -128,16 +136,38 @@ public struct LayoutOutput: Sendable, Equatable {
         size: Size<Float>,
         contentSize: Size<Float> = .zero,
         firstBaselines: Point<Float?> = Point(x: nil, y: nil),
+        lastBaselines: Point<Float?> = Point(x: nil, y: nil),
+        scrollOverflowOrigin: Point<Float> = .zero,
         topMargin: CollapsibleMarginSet = .zero,
         bottomMargin: CollapsibleMarginSet = .zero,
         marginsCanCollapseThrough: Bool = false
     ) {
         self.size = size
         self.contentSize = contentSize
+        self.scrollOverflowOrigin = scrollOverflowOrigin
         self.firstBaselines = firstBaselines
+        self.lastBaselines = lastBaselines
         self.topMargin = topMargin
         self.bottomMargin = bottomMargin
         self.marginsCanCollapseThrough = marginsCanCollapseThrough
+    }
+
+    /// Scrollable overflow rectangle combining `scrollOverflowOrigin` (`left`/`top`)
+    /// with `contentSize` (`right`/`bottom`), matching Taffy 0.15's `scrollable_overflow_rect`.
+    @inlinable
+    public var scrollableOverflowRect: Rect<Float> {
+        get {
+            Rect(
+                left: scrollOverflowOrigin.x,
+                right: contentSize.width,
+                top: scrollOverflowOrigin.y,
+                bottom: contentSize.height
+            )
+        }
+        set {
+            scrollOverflowOrigin = Point(x: newValue.left, y: newValue.top)
+            contentSize = Size(width: newValue.right, height: newValue.bottom)
+        }
     }
 
     @inlinable
@@ -149,9 +179,17 @@ public struct LayoutOutput: Sendable, Equatable {
     public static func fromSizesAndBaselines(
         size: Size<Float>,
         contentSize: Size<Float>,
-        firstBaselines: Point<Float?>
+        firstBaselines: Point<Float?>,
+        lastBaselines: Point<Float?> = Point(x: nil, y: nil),
+        scrollOverflowOrigin: Point<Float> = .zero
     ) -> LayoutOutput {
-        LayoutOutput(size: size, contentSize: contentSize, firstBaselines: firstBaselines)
+        LayoutOutput(
+            size: size,
+            contentSize: contentSize,
+            firstBaselines: firstBaselines,
+            lastBaselines: lastBaselines,
+            scrollOverflowOrigin: scrollOverflowOrigin
+        )
     }
 }
 
@@ -392,18 +430,29 @@ private struct CompactFinalEntry: Sendable {
 }
 
 private struct ColdFinalOutput: Sendable {
+    let scrollOverflowOrigin: Point<Float>
     let firstBaselineX: Float?
     let nanBaselineY: Float?
+    let lastBaselines: Point<Float?>
     let topMargin: CollapsibleMarginSet
     let bottomMargin: CollapsibleMarginSet
     let marginsCanCollapseThrough: Bool
 
     init?(_ output: LayoutOutput) {
         let y = output.firstBaselines.y
-        guard output.firstBaselines.x != nil || y?.isNaN == true || output.topMargin != .zero
-            || output.bottomMargin != .zero || output.marginsCanCollapseThrough else { return nil }
+        let hasScrollOrigin = output.scrollOverflowOrigin.x != 0 || output.scrollOverflowOrigin.y != 0
+        let hasLastBaseline = output.lastBaselines.x != nil || output.lastBaselines.y != nil
+        guard hasScrollOrigin
+            || output.firstBaselines.x != nil
+            || y?.isNaN == true
+            || hasLastBaseline
+            || output.topMargin != .zero
+            || output.bottomMargin != .zero
+            || output.marginsCanCollapseThrough else { return nil }
+        scrollOverflowOrigin = output.scrollOverflowOrigin
         firstBaselineX = output.firstBaselines.x
         nanBaselineY = y?.isNaN == true ? y : nil
+        lastBaselines = output.lastBaselines
         topMargin = output.topMargin
         bottomMargin = output.bottomMargin
         marginsCanCollapseThrough = output.marginsCanCollapseThrough
@@ -484,10 +533,16 @@ public struct Cache: Sendable {
             }
             let cold = overflow[0].final
             let y = final.firstBaselineY.isNaN ? cold?.nanBaselineY : final.firstBaselineY
-            return LayoutOutput(size: final.size, contentSize: final.contentSize,
-                                firstBaselines: Point(x: cold?.firstBaselineX, y: y),
-                                topMargin: cold?.topMargin ?? .zero, bottomMargin: cold?.bottomMargin ?? .zero,
-                                marginsCanCollapseThrough: cold?.marginsCanCollapseThrough ?? false)
+            return LayoutOutput(
+                size: final.size,
+                contentSize: final.contentSize,
+                firstBaselines: Point(x: cold?.firstBaselineX, y: y),
+                lastBaselines: cold?.lastBaselines ?? Point(x: nil, y: nil),
+                scrollOverflowOrigin: cold?.scrollOverflowOrigin ?? .zero,
+                topMargin: cold?.topMargin ?? .zero,
+                bottomMargin: cold?.bottomMargin ?? .zero,
+                marginsCanCollapseThrough: cold?.marginsCanCollapseThrough ?? false
+            )
         case .computeSize:
             let valid = final.metadata.measureMask
             if valid & 1 != 0, measure0.matchesSize(key), final.metadata.definiteness(at: 26) == key.kdDef {

@@ -3428,14 +3428,39 @@ extension Runtime {
                     }
                     #endif
                     if glide == .zero, !isExiting, let window, let measured = nodeTextLayouts[nid], !measured.isInput,
+                       measured.box.paragraphs == nil,
                        let kept = resolvedText.retainedGlyphLayout(in: measured.box, using: textSystem, maxWidth: wrapWidth,
                                                                    pixelScale: shapeScale, window: window) {
                         if kept !== measured.box { nodeTextLayouts[nid]?.box = kept }
                         return kept.shaped
                     }
+                    if !isExiting, let byLineReq = Self.staticByLineParagraphRequest(
+                        nodeId: nid, el: el, style: resolvedText.style,
+                        spans: resolvedText.spans, pills: resolvedText.pills
+                    ) {
+                        let hasSpans = (resolvedText.spans?.isEmpty == false)
+                        let shapeMaxW: Float? = (resolvedText.style.wrap == .noWrap && resolvedText.style.maxLines == 0) ? nil : wrapWidth
+                        let laid = textSystem.layoutInput(
+                            text: hasSpans ? "" : resolvedText.displayedText,
+                            spans: resolvedText.spans,
+                            pills: resolvedText.pills,
+                            style: resolvedText.style,
+                            maxWidth: shapeMaxW,
+                            pixelScale: shapeScale,
+                            emitGlyphs: true,
+                            request: byLineReq,
+                            rasterWindow: window
+                        )
+                        let box = prepareVisibleParagraphs(in: laid, field: nid, window: window)
+                        nodeTextLayouts[nid] = RetainedLayoutCoordinator.TextLayoutRecord(box: box, isInput: false)
+                        return box.shaped
+                    }
                     return resolvedText.shape(using: textSystem, maxWidth: wrapWidth, pixelScale: shapeScale,
                                               emitGlyphs: true, glidePx: glide, rasterWindow: window)
                 }
+                let labelParagraphBox: TextLayoutBox? = (!isExiting && el.isByLine)
+                    ? (nodeTextLayouts[nid]?.box).flatMap { $0.paragraphs != nil ? $0 : nil }
+                    : nil
                 let textLeft = boxLeft + TextBoxGeometry.inlineOffset(align: el.textStyle.align,
                     wrap: resolvedText.truncateFade ? .noWrap : resolvedText.style.wrap, shaped: shaped,
                     innerWidth: drawnInnerW, textScale: sc.x, pixelScale: scale)
@@ -3659,8 +3684,25 @@ extension Runtime {
                 let wordFadeMask = ((el.elRevealWordFade ?? -1) >= 0)
                     ? wordRevealStore.mask(for: nid, text: resolvedText.displayedText, shaped: shaped, textSystem: textSystem, pixelScale: scale, now: revealClock)
                     : nil
-                let labelGlyphs = isTextFlightTarget ? [] : shaped.glyphs
-                let canRetain = !freshRaster && restsExact && !forceScaled && !isRotatedScope && !inCacheScope
+                let labelHasParagraphs = labelParagraphBox?.paragraphs != nil
+                let labelGlyphs: [PositionedGlyph]
+                if isTextFlightTarget {
+                    labelGlyphs = []
+                } else if let pBox = labelParagraphBox, let paragraphs = pBox.paragraphs {
+                    let ls = paragraphs.scale
+                    let rowPad = 2.0 * emPt * ls + 2.0 / max(1e-4, scale)
+                    let rows: (Float, Float) = (!isRotatedScope && abs(sc.y) > 1e-4)
+                        ? (
+                            ((glyphClipEdges.y / scale - textTop) / sc.y) * ls - rowPad,
+                            ((glyphClipEdges.w / scale - textTop) / sc.y) * ls + rowPad
+                        )
+                        : (-Float.infinity, Float.infinity)
+                    if paragraphs.waiting { textRows[nid] = rows }
+                    labelGlyphs = paragraphs.glyphs(top: rows.0, bottom: rows.1, using: textSystem, inks: pBox.spanInks)
+                } else {
+                    labelGlyphs = shaped.glyphs
+                }
+                let canRetain = !freshRaster && restsExact && !labelHasParagraphs && !forceScaled && !isRotatedScope && !inCacheScope
                     && glide == .zero && raster == nil && outlineMode == nil && !lcdMask
                     && inkMode == textSystem.smoothing && motionRasterGlyphs == nil
                     && el.liveText == nil && pressTint.frac == 0 && selectionInk == nil
@@ -3681,9 +3723,9 @@ extension Runtime {
                     let firstDraw = instances.count
                     let firstFixup = glyphFixups.count
                     var runBounds = SIMD4<Float>(.infinity, .infinity, -.infinity, -.infinity)
-                    let baselines = restsExact ? TextBoxGeometry.roundedBaselines(originYPx: restOrigin.y, shaped: shaped) : []
+                    let baselines = (restsExact && !labelHasParagraphs) ? TextBoxGeometry.roundedBaselines(originYPx: restOrigin.y, shaped: shaped) : []
                     let placements = TextBoxGeometry.GlyphPlacementBatch(shaped: shaped, atlas: textSystem.glyphAtlas,
-                                                                         exact: !freshRaster && (restsExact || raster != nil))
+                                                                         exact: !freshRaster && !labelHasParagraphs && (restsExact || raster != nil))
                     defer { placements?.finish() }
                     var baselineLine = 0
                     for (index, glyph) in labelGlyphs.enumerated() {
@@ -3692,8 +3734,8 @@ extension Runtime {
                         if gAlpha <= 0.0005 { continue }
                         let (gq, placement) = TextBoxGeometry.paintGlyph(
                             glyph, index: index, shaped: shaped, origin: restOrigin, scale: SIMD2<Float>(sc.x, sc.y), pixelScale: scale,
-                            restsExact: restsExact, baselines: baselines, line: &baselineLine, atlas: textSystem.glyphAtlas,
-                            raster: raster, placements: placements
+                            restsExact: restsExact && !labelHasParagraphs, baselines: baselines, line: &baselineLine, atlas: textSystem.glyphAtlas,
+                            raster: labelHasParagraphs ? nil : raster, placements: placements
                         )
                         if !isRotatedScope && (placement.y + placement.w < shownY0 || placement.y > shownY1 ||
                                                placement.x + placement.z < glyphClipEdges.x || placement.x > glyphClipEdges.z) { continue }

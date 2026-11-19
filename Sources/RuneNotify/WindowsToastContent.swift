@@ -4,11 +4,75 @@ import Foundation
 enum WindowsToastContent {
     private static let identifierKey = "rune.id"
     private static let unreserved = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+    /// Windows caps a toast's tag at 64 characters (UTF-16 code units in WinRT `HSTRING`).
+    static let maxTagLength = 64
 
+    /// Returns a Windows toast tag for `id`: `id` itself when non-empty, NUL-free, and at most 64
+    /// UTF-16 code units (matching upstream `id.chars().count() <= 64` for all non-empty NUL-free
+    /// BMP strings while staying within WinRT's `HSTRING` limit); otherwise the 16-hex-char
+    /// Rust `DefaultHasher::new()` (SipHash-1-3 with zero keys) hash of `id`.
     static func tag(for id: String) -> String {
-        if !id.isEmpty, id.utf16.count <= 64, !id.utf8.contains(0) { return id }
-        let hash = id.utf8.reduce(UInt64(0xcbf29ce484222325)) { ($0 ^ UInt64($1)) &* 0x100000001b3 }
-        return String(format: "%016llx", hash)
+        if !id.isEmpty, id.utf16.count <= maxTagLength, !id.utf8.contains(0) { return id }
+        return hex64(rustDefaultHash(id))
+    }
+
+    /// Computes Rust's `std::collections::hash_map::DefaultHasher::new()` (SipHash-1-3 with zero
+    /// keys `k0 = 0, k1 = 0`) over `s` using `Hash for str` framing (UTF-8 bytes + `0xff`).
+    static func rustDefaultHash(_ s: String) -> UInt64 {
+        var bytes = Array(s.utf8)
+        bytes.append(0xff)
+
+        var v0: UInt64 = 0x736f6d6570736575
+        var v1: UInt64 = 0x646f72616e646f6d
+        var v2: UInt64 = 0x6c7967656e657261
+        var v3: UInt64 = 0x7465646279746573
+
+        @inline(__always)
+        func rotl(_ x: UInt64, _ b: UInt64) -> UInt64 {
+            (x << b) | (x >> (64 - b))
+        }
+
+        @inline(__always)
+        func sipRound() {
+            v0 &+= v1; v1 = rotl(v1, 13); v1 ^= v0; v0 = rotl(v0, 32)
+            v2 &+= v3; v3 = rotl(v3, 16); v3 ^= v2
+            v0 &+= v3; v3 = rotl(v3, 21); v3 ^= v0
+            v2 &+= v1; v1 = rotl(v1, 17); v1 ^= v2; v2 = rotl(v2, 32)
+        }
+
+        var index = 0
+        let count = bytes.count
+        while index + 8 <= count {
+            var m: UInt64 = 0
+            for offset in 0..<8 {
+                m |= UInt64(bytes[index + offset]) << UInt64(offset * 8)
+            }
+            v3 ^= m
+            sipRound()
+            v0 ^= m
+            index += 8
+        }
+
+        var tail = UInt64(count & 0xff) << 56
+        var offset = 0
+        while index + offset < count {
+            tail |= UInt64(bytes[index + offset]) << UInt64(offset * 8)
+            offset += 1
+        }
+        v3 ^= tail
+        sipRound()
+        v0 ^= tail
+
+        v2 ^= 0xff
+        sipRound()
+        sipRound()
+        sipRound()
+        return v0 ^ v1 ^ v2 ^ v3
+    }
+
+    private static func hex64(_ value: UInt64) -> String {
+        let raw = String(value, radix: 16, uppercase: false)
+        return raw.count < 16 ? String(repeating: "0", count: 16 - raw.count) + raw : raw
     }
 
     static func validScheme(_ scheme: String) -> String? {

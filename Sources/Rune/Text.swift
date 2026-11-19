@@ -7916,13 +7916,16 @@ public final class TextSystem: @unchecked Sendable {
                     let leadX = lead.map { originX + $0.left } ?? (rtlLead ? right : left - lExtra)
                     let trailX = trail.map { originX + $0.left } ?? (rtlTrail ? left - tExtra : right)
                     #else
-                    let rtlLead = false, rtlTrail = false
                     let leadX = left - lExtra, trailX = right
                     #endif
                     if pill.isBare {
                         if lExtra > 0 {
                             let size = pill.icon?.size ?? 14
+                            #if canImport(CRuneDesktopText) && !canImport(CoreText)
                             let x = rtlLead ? leadX + lExtra - size : leadX
+                            #else
+                            let x = leadX
+                            #endif
                             inlineIconsOut.append(.init(pillIndex: index, pill: pill,
                                 rect: SIMD4(x, originY + (boxHeightPt - size) * 0.5, size, size),
                                 cornerRadius: pill.bareRadius, image: pill.bareImage, icon: pill.icon?.svg, color: pill.style.color))
@@ -7930,18 +7933,32 @@ public final class TextSystem: @unchecked Sendable {
                     } else {
                         var x0 = left, x1 = right
                         if lExtra > 0 {
+                            #if canImport(CRuneDesktopText) && !canImport(CoreText)
                             x0 = min(x0, leadX + (rtlLead ? 0 : pm.margin))
                             x1 = max(x1, leadX + lExtra - (rtlLead ? pm.margin : 0))
+                            #else
+                            x0 = min(x0, leadX + pm.margin)
+                            x1 = max(x1, leadX + lExtra)
+                            #endif
                         }
                         if tExtra > 0 {
+                            #if canImport(CRuneDesktopText) && !canImport(CoreText)
                             x0 = min(x0, trailX + (rtlTrail ? pm.margin : 0))
                             x1 = max(x1, trailX + tExtra - (rtlTrail ? 0 : pm.margin))
+                            #else
+                            x0 = min(x0, trailX)
+                            x1 = max(x1, trailX + tExtra - pm.margin)
+                            #endif
                         }
                         let old = pillBounds[index]
                         var iconX = old?.iconX
                         if lExtra > 0, pill.icon?.svg != nil {
                             let pad = pm.resolvedPad(style: pill.style)
+                            #if canImport(CRuneDesktopText) && !canImport(CoreText)
                             iconX = rtlLead ? leadX + lExtra - pm.margin - pad - pm.icon : leadX + pm.margin + pad
+                            #else
+                            iconX = leadX + pm.margin + pad
+                            #endif
                         }
                         pillBounds[index] = (min(x0, old?.left ?? x0), max(x1, old?.right ?? x1), iconX)
                     }

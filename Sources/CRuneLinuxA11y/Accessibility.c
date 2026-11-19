@@ -382,7 +382,8 @@ static AtkRole at_role(const char *role) {
         {"status", ATK_ROLE_STATUSBAR}, {"list", ATK_ROLE_LIST}, {"menu-item-check-box", ATK_ROLE_CHECK_MENU_ITEM},
         {"menu-item-radio", ATK_ROLE_RADIO_MENU_ITEM}, {"password-input", ATK_ROLE_PASSWORD_TEXT}, {"multiline-text-input", ATK_ROLE_TEXT},
         {"mark", ATK_ROLE_MARK}, {"code", ATK_ROLE_STATIC}, {"blockquote", ATK_ROLE_BLOCK_QUOTE},
-        {"table", ATK_ROLE_TABLE}
+        {"table", ATK_ROLE_TABLE}, {"searchbox", ATK_ROLE_ENTRY}, {"spinbutton", ATK_ROLE_SPIN_BUTTON},
+        {"article", ATK_ROLE_ARTICLE}, {"terminal", ATK_ROLE_TERMINAL}
     };
     for (guint i = 0; i < G_N_ELEMENTS(map); ++i)
         if (strcmp(map[i].name, role) == 0) return map[i].role;
@@ -391,10 +392,10 @@ static AtkRole at_role(const char *role) {
 
 static GType type_for(AtkRole role, unsigned actions) {
     switch (role) {
-    case ATK_ROLE_ENTRY: case ATK_ROLE_TEXT: case ATK_ROLE_PASSWORD_TEXT:
+    case ATK_ROLE_ENTRY: case ATK_ROLE_TEXT: case ATK_ROLE_PASSWORD_TEXT: case ATK_ROLE_TERMINAL:
         return actions & RUNE_AX_SET_TEXT ? rune_field_get_type() : rune_text_get_type();
     case ATK_ROLE_STATIC: case ATK_ROLE_HEADING: return rune_text_get_type();
-    case ATK_ROLE_SLIDER: case ATK_ROLE_PROGRESS_BAR: return rune_range_get_type();
+    case ATK_ROLE_SLIDER: case ATK_ROLE_PROGRESS_BAR: case ATK_ROLE_SPIN_BUTTON: return rune_range_get_type();
     default: return rune_accessible_get_type();
     }
 }

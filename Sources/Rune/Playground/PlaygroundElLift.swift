@@ -53,6 +53,7 @@ extension El {
         if let placeholderFont { out.placeholderFont = placeholderFont }
         if let outsideListDiscFont { out.outsideListDiscFont = outsideListDiscFont }
         if isWrapGreedy { out.isWrapGreedy = true }
+        if isByLine { out.isByLine = true }
         if let caretColor { out.caretColor = caretColor }
         if let selectionColor { out.selectionColor = selectionColor }
         if let iconPayload { out.iconPayload = iconPayload }

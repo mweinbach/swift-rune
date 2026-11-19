@@ -73,4 +73,125 @@ struct CompactCacheStorageTests {
         cache.store(key, output: result)
         #expect(cache.get(key) == result)
     }
+
+    @Test func lastBaselinesAndNegativeScrollOverflowOriginRoundTrip() {
+        var cache = CompactCache()
+        let finalKey = LayoutInput(runMode: .performLayout)
+
+        // 1. Both lastBaselines and negative scrollOverflowOrigin round-trip through cold final storage.
+        var output = LayoutOutput(
+            size: Size(width: 120, height: 64),
+            contentSize: Size(width: 240, height: 180),
+            firstBaselines: Point(x: nil, y: 14.25),
+            lastBaselines: Point(x: 4.5, y: 58.75),
+            scrollOverflowOrigin: Point(x: -22.5, y: -11.25)
+        )
+        #expect(output.scrollableOverflowRect == Rect(left: -22.5, right: 240, top: -11.25, bottom: 180))
+
+        cache.store(finalKey, output: output)
+        #expect(cache.heapBytes() > 0)
+        let fetched = cache.get(finalKey)
+        #expect(fetched == output)
+        #expect(fetched?.lastBaselines == Point(x: 4.5, y: 58.75))
+        #expect(fetched?.scrollOverflowOrigin == Point(x: -22.5, y: -11.25))
+        #expect(fetched?.scrollableOverflowRect == Rect(left: -22.5, right: 240, top: -11.25, bottom: 180))
+
+        // 2. Mutating via scrollableOverflowRect updates both scrollOverflowOrigin and contentSize.
+        output.scrollableOverflowRect = Rect(left: -7.5, right: 160, top: -3.25, bottom: 90)
+        #expect(output.scrollOverflowOrigin == Point(x: -7.5, y: -3.25))
+        #expect(output.contentSize == Size(width: 160, height: 90))
+        var cowCopy = cache
+        cache.store(finalKey, output: output)
+        #expect(cache.get(finalKey) == output)
+        #expect(cowCopy.get(finalKey)?.scrollOverflowOrigin == Point(x: -22.5, y: -11.25))
+
+        // 3. Only lastBaselines (zero overflow origin) still allocates cold storage and round-trips.
+        var lastOnlyCache = CompactCache()
+        let lastOnly = LayoutOutput.fromSizesAndBaselines(
+            size: Size(width: 80, height: 40),
+            contentSize: Size(width: 80, height: 40),
+            firstBaselines: Point(x: nil, y: 12),
+            lastBaselines: Point(x: nil, y: 36.5)
+        )
+        lastOnlyCache.store(finalKey, output: lastOnly)
+        #expect(lastOnlyCache.heapBytes() > 0)
+        #expect(lastOnlyCache.get(finalKey) == lastOnly)
+
+        // 4. Non-finite NaN payload in lastBaselines round-trips bit-for-bit.
+        let nanLast = Float(bitPattern: 0x7FC0_1234)
+        let withNanLast = LayoutOutput(
+            size: Size(width: 20, height: 20),
+            lastBaselines: Point(x: nil, y: nanLast)
+        )
+        lastOnlyCache.store(finalKey, output: withNanLast)
+        #expect(lastOnlyCache.get(finalKey)?.lastBaselines.y?.bitPattern == nanLast.bitPattern)
+
+        // 5. Only negative scrollOverflowOrigin (nil lastBaselines) allocates cold storage and round-trips.
+        var negOriginCache = CompactCache()
+        let negOnly = LayoutOutput(
+            size: Size(width: 60, height: 30),
+            contentSize: Size(width: 60, height: 30),
+            scrollOverflowOrigin: Point(x: -15, y: 0)
+        )
+        negOriginCache.store(finalKey, output: negOnly)
+        #expect(negOriginCache.heapBytes() > 0)
+        #expect(negOriginCache.get(finalKey) == negOnly)
+
+        // 6. Overwriting with a plain inline output clears cold final data and restores zero origin & nil lastBaselines.
+        let plain = LayoutOutput(
+            size: Size(width: 60, height: 30),
+            contentSize: Size(width: 75, height: 35),
+            firstBaselines: Point(x: nil, y: 10)
+        )
+        negOriginCache.store(finalKey, output: plain)
+        let plainFetched = negOriginCache.get(finalKey)
+        #expect(plainFetched == plain)
+        #expect(plainFetched?.scrollOverflowOrigin == .zero)
+        #expect(plainFetched?.lastBaselines == Point(x: nil, y: nil))
+    }
+
+    @Test func negativeOverflowAndLastBaselinePropagateThroughLeafAndContainerCache() {
+        var store = LayoutStore()
+        store.beginCommit()
+        let (leaf, _) = store.syncNode(
+            key: 10,
+            nodeIndex: 1,
+            style: TaffyStyle(
+                size: Size(width: .length(40), height: .length(20)),
+                margin: Rect(left: .length(-12), right: .zero, top: .length(-5), bottom: .zero),
+                flexShrink: 0
+            ),
+            measure: 1,
+            forceMeasureDirty: false,
+            childMark: store.beginChildren(),
+            childrenDirty: false
+        )
+        let mark = store.beginChildren()
+        store.pushChild(leaf)
+        var (root, _) = store.syncNode(
+            key: 1,
+            nodeIndex: 0,
+            style: TaffyStyle(display: .flex, size: Size(width: .length(100), height: .length(50)), flexDirection: .row),
+            measure: nil,
+            forceMeasureDirty: false,
+            childMark: mark,
+            childrenDirty: true
+        )
+        store.endCommit(root: &root) { _, _ in }
+
+        let room = Size<AvailableSpace>(width: .definite(100), height: .definite(50))
+        store.computeLayout(root: root, availableSpace: room) { input, _, _ in
+            LayoutOutput(
+                size: Size(width: input.knownDimensions.width ?? 40, height: input.knownDimensions.height ?? 20),
+                contentSize: Size(width: 40, height: 20),
+                firstBaselines: Point(x: nil, y: 11),
+                lastBaselines: Point(x: nil, y: 18),
+                scrollOverflowOrigin: Point(x: -3, y: -2)
+            )
+        }
+        // Negative margin places leaf at (-12, -5) inside root.
+        let leafBox = store.boxLayout(leaf)
+        #expect(leafBox.x == -12)
+        #expect(leafBox.y == -5)
+    }
 }

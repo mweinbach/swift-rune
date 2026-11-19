@@ -348,6 +348,11 @@ public enum CpuBootScroll {
             }
         }
 
+        @inline(__always)
+        func cut(_ a: SIMD4<Int32>, _ b: SIMD4<Int32>) -> SIMD4<Int32> {
+            let c = SIMD4<Int32>(max(a.x, b.x), max(a.y, b.y), min(a.z, b.z), min(a.w, b.w))
+            return (c.z > c.x && c.w > c.y) ? c : .zero
+        }
         let both = SIMD4<Float>(
             Float(r.x),
             Float(min(r.y, back.y)),
@@ -355,7 +360,11 @@ public enum CpuBootScroll {
             Float(max(r.w, back.w))
         )
         for n in bins.tile(t) {
-            guard let m = nextOld(),
+            guard let m = nextOld() else { return false }
+            let newR = cut(bins.bounds[Int(n)], r)
+            let oldR = cut(prev.bins.bounds[Int(m)], back)
+            let shifted = SIMD4<Int32>(oldR.x, oldR.y &+ dy, oldR.z, oldR.w &+ dy)
+            guard newR == shifted,
                   sameInstance(scene: scene, bins: bins, prev: prev, n: n, m: m, dy: dy, both: both) else {
                 return false
             }

@@ -44,19 +44,16 @@ extension Runtime {
         return nil
     }
 
-    /// `pointer.rs` `scroll_at_axis`: the innermost scroll viewport at `pos` that moves on `axis`.
-    /// One whose content fits on that axis (`scrollHasRoom`) is passed over for the one around
-    /// it, as Chromium skips a scroller with nothing to scroll (#1021).
+    /// `pointer.rs` `scroll_at_axis`: the innermost scroll viewport at `pos` that moves on `axis`,
+    /// walking up from `gestureStartIndex(at:)` so raised/anchored overlays occlude viewports beneath
+    /// (`#1219`). One whose content fits on that axis (`scrollHasRoom`) is passed over for the one
+    /// around it, as Chromium skips a scroller with nothing to scroll (`#1021`).
     internal func scrollContainerAt(at pos: Vec2, axis: ScrollAxes) -> String? {
-        guard let (hitNode, _) = hitTest(at: pos, ignoreBlockers: true, predicate: {
-            $0.el.layout.scrollAxes.contains(axis) && self.scrollHasRoom($0.path, axis: axis) && !self.subtreeExiting($0.index)
-        }) else {
-            return nil
-        }
-        var walkIdx: Int? = hitNode.index
-        while let i = walkIdx {
+        var walkIdx = gestureStartIndex(at: pos)
+        while let i = walkIdx, flatNodes.indices.contains(i) {
             let n = flatNodes[i]
-            if !n.effectiveInert && n.el.layout.scrollAxes.contains(axis) && scrollHasRoom(n.path, axis: axis) && !subtreeExiting(i) {
+            if !n.effectiveInert && n.el.layout.scrollAxes.contains(axis) && scrollHasRoom(n.path, axis: axis)
+                && hoverAllowed(i) && !subtreeExiting(i) {
                 return n.path
             }
             walkIdx = n.parentIndex
@@ -181,7 +178,7 @@ extension Runtime {
         }
 
         if !handled && moved {
-            wheelScrollLocked(gesture: gesture, dx: ev.dx, dy: ev.dy, phased: phased, at: targetPos, start: start, now: now)
+            wheelScrollLocked(gesture: gesture, dx: ev.dx, dy: ev.dy, notch: ev.notch, phased: phased, at: targetPos, start: start, now: now)
         }
     }
 
@@ -197,7 +194,7 @@ extension Runtime {
 
     /// `scroll/x.rs` `wheel_scroll_for`: scrolls by a delta no `onWheel` handler took, on the
     /// axis `gesture` locked to. `phased` is that delta's own gesture's policy.
-    private func wheelScrollLocked(gesture: AttemptToken, dx: Float, dy: Float, phased: Bool, at targetPos: Vec2, start: WheelStart, now: Double) {
+    private func wheelScrollLocked(gesture: AttemptToken, dx: Float, dy: Float, notch: Bool, phased: Bool, at targetPos: Vec2, start: WheelStart, now: Double) {
         if dx == 0 && dy == 0 { return }
         inputMachines.wheelLock.syncGesture(gesture)
         let horizontal: Bool
@@ -223,6 +220,12 @@ extension Runtime {
                 return nil
             }()
             if let path = latchedPath ?? scrollContainerAt(at: targetPos, axis: .horizontal) {
+                if notch {
+                    logEvent(String(format: "wheel-x %.1f", dx))
+                    _ = startOrRetargetWheelNotchX(path: path, dx: dx, at: now)
+                    return
+                }
+                cancelWheelGlides(for: path, vertical: false, horizontal: true)
                 let maxExt = scrollMaxExtents[path] ?? .zero
                 let prev = scrollOffsets[path] ?? .zero
                 let isRtl = nodeByPath[path].map { flatNodes[$0].flow == .rtl } ?? false
@@ -237,7 +240,7 @@ extension Runtime {
                 }
             }
         } else if dy != 0 {
-            scrollVerticalWheel(dy: dy, at: targetPos, start: start, now: now)
+            scrollVerticalWheel(dy: dy, notch: notch, at: targetPos, start: start, now: now)
         }
     }
 
@@ -253,13 +256,13 @@ extension Runtime {
             next = node.parentIndex
             guard node.el.layout.scrollAxes.contains(.vertical), hoverAllowed(i), !subtreeExiting(i),
                   let limit = scrollMaxExtents[node.path]?.y else { continue }
-            let offset = scrollOffsets[node.path]?.y ?? 0
+            let offset = wheelTargetY(for: node.path)
             if dy > 0 ? offset > 0 : offset < limit { return i }
         }
         return nil
     }
 
-    private func scrollVerticalWheel(dy: Float, at point: Vec2, start: WheelStart, now: Double) {
+    private func scrollVerticalWheel(dy: Float, notch: Bool, at point: Vec2, start: WheelStart, now: Double) {
         let held = inputMachines.wheelLock.verticalTarget(at: now, x: point.x, y: point.y, dy: dy).flatMap { path -> Int? in
             guard let i = nodeByPath[path], !flatNodes[i].el.layout.scrollAxes.isEmpty,
                   hoverAllowed(i), !subtreeExiting(i) else { return nil }
@@ -272,10 +275,16 @@ extension Runtime {
         let node = flatNodes[i]
         let path = node.path
         guard let limit = scrollMaxExtents[path]?.y else { return }
+        logEvent(String(format: "wheel %.1f", dy))
+        if notch {
+            let moved = startOrRetargetWheelNotchY(path: path, dy: dy, at: now)
+            inputMachines.wheelLock.ranVertical(path: path, at: now, x: point.x, y: point.y, dy: dy, moved: moved, continued: held != nil)
+            return
+        }
+        cancelWheelGlides(for: path, vertical: true, horizontal: false)
         let previous = scrollOffsets[path] ?? .zero
         var current = previous
         current.y = (current.y - dy).clamped(to: 0...limit)
-        logEvent(String(format: "wheel %.1f", dy))
         let moved = current != previous
         if moved {
             applyManualScroll(path: path, to: current, at: now)
@@ -289,6 +298,7 @@ extension Runtime {
     }
 
     internal func applyManualScroll(path: String, to cur: Vec2, at now: Double) {
+        cancelWheelGlides(for: path)
         let nid = NodeId.hash("scroll:" + path)
         scrollOffsets[path] = cur
         // Upstream `pointer.rs::wheel` / `scroll/x.rs::wheel_scroll_for`: a wheel that moved the

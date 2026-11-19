@@ -1150,24 +1150,25 @@ struct OverlayLifecycleParityTests {
         for plan in plans {
             var legalSequences = 0
             var stack: [Letter] = []
-            func visit() {
-                if aborted { return }
+            @discardableResult
+            func visit() -> Bool {
+                if aborted { return false }
                 if !stack.isEmpty {
-                    guard runSequence(plan: plan, seq: stack) else { return }
+                    guard runSequence(plan: plan, seq: stack) else { return !aborted }
                     legalSequences += 1
                 }
-                if stack.count == 6 || aborted { return }
+                if stack.count == 6 || aborted { return !aborted }
                 for l in Letter.allCases {
-                    if aborted { return }
+                    if aborted { return false }
                     stack.append(l)
-                    visit()
+                    if !visit() { return false }
                     stack.removeLast()
                 }
+                return !aborted
             }
-            visit()
+            guard visit() else { return }
             // Counted independently by the pinned Rust reference for each plan at depth six.
             #expect(legalSequences == 744_115)
-            if aborted { return }
         }
     }
 

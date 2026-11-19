@@ -1521,6 +1521,8 @@ public enum RuneLabel: Sendable, Hashable {
     case hideOthers
     case showAll
     case quit(String)
+    /// A Markdown block's marker before `n` lines nested past the container bound (`Label::MoreNestedLines`, `#1122`).
+    case moreNestedLines(Int)
 
     public var englishDefault: String {
         switch self {
@@ -1544,6 +1546,8 @@ public enum RuneLabel: Sendable, Hashable {
         case .hideOthers: return "Hide Others"
         case .showAll: return "Show All"
         case .quit(let app): return "Quit \(app)"
+        case .moreNestedLines(1): return "1 more nested line"
+        case .moreNestedLines(let n): return "\(n) more nested lines"
         }
     }
 }

@@ -12,6 +12,12 @@ extension NativeSurfaceVideoFrame {
                 throw NativeSurfaceError.importFailed("byte surface size or format differs from its frame")
             }
             return bytes.planes
+        case .dmabuf(let buf):
+            defer { buf.notifyReleased() }
+            guard size == buf.size, format == .bgra else {
+                throw NativeSurfaceError.importFailed("dmabuf surface size or format differs from its frame")
+            }
+            return [try buf.readLinearBGRA()]
         #if os(Windows)
         case .shared(let frame):
             guard size == (frame.texture.width, frame.texture.height), format == .bgra else {

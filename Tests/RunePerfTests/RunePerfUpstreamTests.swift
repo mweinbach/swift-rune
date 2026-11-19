@@ -691,4 +691,170 @@ struct RunePerfUpstreamTests {
         )
         Procwatch.watch(silentCfg)
     }
+
+    @Test func idleTidyStateMachineMatchesUpstreamContract() {
+        #expect(PerfFileRecorder.idleSeconds == 10.0)
+        #expect(PerfFileRecorder.idleMinGapSeconds == 180.0)
+        #expect(RunePerf.idleDuration == .seconds(10))
+        #expect(RunePerf.idleMinGap == .seconds(180))
+
+        // Starts parked with no timer before work arrives.
+        var tidy = PerfIdleTidy()
+        #expect(tidy.wait(now: 0) == nil)
+        #expect(tidy.takeDue(now: 1_000) == false)
+
+        // Work without a hook never arms a timer.
+        tidy = tidy.onWork(now: 5, hooked: false)
+        #expect(tidy.wait(now: 5) == nil)
+        #expect(tidy.takeDue(now: 1_000) == false)
+
+        // Work with a hook arms due = now + 10s, sliding forward on subsequent work.
+        tidy = tidy.onWork(now: 10, hooked: true)
+        #expect(tidy.wait(now: 10) == 10)
+        #expect(tidy.wait(now: 14) == 6)
+        #expect(tidy.takeDue(now: 19.9) == false)
+        tidy = tidy.onWork(now: 15, hooked: true)
+        #expect(tidy.wait(now: 15) == 10)
+        #expect(tidy.wait(now: 30) == 0)
+
+        // Firing transitions back to parked with last = now; no repeating timer wakeups.
+        let firedFirst = tidy.takeDue(now: 25)
+        #expect(firedFirst)
+        #expect(tidy.wait(now: 25) == nil)
+        #expect(tidy.takeDue(now: 500) == false)
+
+        // Next work respects IDLE_MIN_GAP (180s) after previous tidy (25 + 180 = 205).
+        tidy = tidy.onWork(now: 30, hooked: true)
+        #expect(tidy.wait(now: 30) == 175)
+        #expect(tidy.takeDue(now: 40) == false)
+        #expect(tidy.takeDue(now: 204.9) == false)
+
+        // Late traffic near the end of minGap still waits a full IDLE (10s) of quiet.
+        tidy = tidy.onWork(now: 200, hooked: true)
+        #expect(tidy.wait(now: 200) == 10)
+        #expect(tidy.takeDue(now: 205) == false)
+        let firedSecond = tidy.takeDue(now: 210)
+        #expect(firedSecond)
+        #expect(tidy.wait(now: 210) == nil)
+    }
+
+    @Test func recorderOnIdleRunsOncePerIdleSpellEnforcesMinGapAndParksUntimed() throws {
+        func waitUntil(timeout: TimeInterval = 5.0, _ predicate: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while !predicate() && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+            return predicate()
+        }
+
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeperf-idle-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: baseDir) }
+
+        // 1. Without an onIdle hook, fast samples never arm a timer.
+        do {
+            let dir = baseDir.appendingPathComponent("no-hook", isDirectory: true)
+            let recorder = try PerfFileRecorder.start(config: PerfConfig(directory: dir, app: "no-hook"))
+            defer { recorder.shutdown() }
+            #expect(waitUntil { recorder.waitCounts.untimed >= 1 })
+            #expect(recorder.record(FrameSample(window: 1, seq: 1, outcome: .drawn, updateMs: 1.0, renderMs: 1.0)))
+            #expect(waitUntil { recorder.waitCounts.untimed >= 2 })
+            #expect(recorder.waitCounts.timed == 0)
+        }
+
+        // 2. With an onIdle hook, no timer is armed and the hook never runs before work arrives.
+        do {
+            let dir = baseDir.appendingPathComponent("no-work", isDirectory: true)
+            let calls = PortableLock(initialState: 0)
+            var cfg = PerfConfig(directory: dir, app: "no-work").onIdle {
+                calls.withLock { $0 += 1 }
+            }
+            cfg.idleDelaySeconds = 0.03
+            cfg.idleMinGapSeconds = 0.15
+            let recorder = try PerfFileRecorder.start(config: cfg)
+            defer { recorder.shutdown() }
+            #expect(waitUntil { recorder.waitCounts.untimed >= 1 })
+            Thread.sleep(forTimeInterval: 0.10)
+            #expect(calls.withLock { $0 } == 0)
+            #expect(recorder.waitCounts.timed == 0)
+        }
+
+        // 3. Runs once per idle spell on the recorder thread, parks untimed, and enforces minGap.
+        do {
+            let dir = baseDir.appendingPathComponent("spells", isDirectory: true)
+            final class IdleState: @unchecked Sendable {
+                let lock = NSLock()
+                var count = 0
+                var threadNames: [String] = []
+                var timestamps: [TimeInterval] = []
+                let sem = DispatchSemaphore(value: 0)
+            }
+            let state = IdleState()
+            var cfg = PerfConfig(directory: dir, app: "spells").onIdle {
+                let name = Thread.current.name ?? ""
+                let now = TimeInterval(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000.0
+                state.lock.lock()
+                state.count += 1
+                state.threadNames.append(name)
+                state.timestamps.append(now)
+                state.lock.unlock()
+                state.sem.signal()
+            }
+            cfg.idleDelaySeconds = 0.05
+            cfg.idleMinGapSeconds = 0.25
+            cfg.quietFlushDelaySeconds = 0.02
+
+            let recorder = try PerfFileRecorder.start(config: cfg)
+            defer { recorder.shutdown() }
+            #expect(waitUntil { recorder.waitCounts.untimed >= 1 })
+
+            // Send an anomaly so flushDue (0.02s) must flush first, then idleDelay (0.05s) fires.
+            let sentAt = TimeInterval(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000.0
+            #expect(recorder.record(FrameSample(window: 1, seq: 1, outcome: .drawn, updateMs: 25.0, renderMs: 5.0)))
+            #expect(state.sem.wait(timeout: .now() + 5.0) == .success)
+
+            // Perf log was already flushed before idle ran, and the thread returns to an untimed park.
+            #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("perf.log").path))
+            #expect(waitUntil { recorder.waitCounts.untimed >= 2 })
+            let timedAfterFirstIdle = recorder.waitCounts.timed
+
+            // Stay idle for >2x idleDelaySeconds: must NOT re-fire or schedule repeating timers.
+            Thread.sleep(forTimeInterval: 0.12)
+            state.lock.lock()
+            let countWhileIdle = state.count
+            let firstTime = state.timestamps[0]
+            let firstThread = state.threadNames[0]
+            state.lock.unlock()
+            #expect(countWhileIdle == 1)
+            #expect(firstThread == "rune-perf")
+            #expect(firstTime - sentAt >= 0.04)
+            #expect(recorder.waitCounts.timed == timedAfterFirstIdle)
+
+            // New sample immediately after idle wait must wait for minGap (0.25s from firstTime).
+            #expect(recorder.record(FrameSample(window: 1, seq: 2, outcome: .drawn, updateMs: 1.0, renderMs: 1.0)))
+            #expect(state.sem.wait(timeout: .now() + 5.0) == .success)
+            state.lock.lock()
+            let countAfterSecond = state.count
+            let secondTime = state.timestamps[1]
+            state.lock.unlock()
+            #expect(countAfterSecond == 2)
+            #expect(secondTime - firstTime >= 0.22)
+        }
+
+        // 4. Shutdown while armed does not hang or invoke onIdle after disconnect.
+        do {
+            let dir = baseDir.appendingPathComponent("shutdown-armed", isDirectory: true)
+            let calls = PortableLock(initialState: 0)
+            var cfg = PerfConfig(directory: dir, app: "shutdown-armed").onIdle {
+                calls.withLock { $0 += 1 }
+            }
+            cfg.idleDelaySeconds = 5.0
+            cfg.idleMinGapSeconds = 10.0
+            let recorder = try PerfFileRecorder.start(config: cfg)
+            #expect(recorder.record(FrameSample(window: 1, seq: 1, outcome: .drawn, updateMs: 1.0, renderMs: 1.0)))
+            #expect(waitUntil { recorder.waitCounts.timed >= 1 })
+            recorder.shutdown()
+            #expect(calls.withLock { $0 } == 0)
+        }
+    }
 }

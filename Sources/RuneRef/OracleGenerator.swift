@@ -43,7 +43,8 @@ public enum OracleGenerator {
                 clip: oracleNoClip,
                 fade: [0, 0, 0, 0],
                 fadeOrigin: nil,
-                turn: nil
+                turn: nil,
+                clipRadii: nil
             )
             if (b[16] & 1) != 0 {
                 p.clip = [

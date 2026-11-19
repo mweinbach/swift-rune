@@ -26,6 +26,8 @@ internal struct ParagraphRequest: Sendable, Hashable {
     var forced: TextFlow?
     var startFlow: TextFlow
     var highlights: [TextHighlight] = []
+    /// Static multiline text laid out one `TextLayout` per `\n`-delimited line (`El::by_line`, `#1133`).
+    var byLine: Bool = false
 
     static func supports(_ spans: [TextSpan]?) -> Bool {
         spans?.contains(where: \.affectsLayout) != true
@@ -702,12 +704,15 @@ extension TextSystem {
         rasterWindow: TextRasterWindow? = nil,
         forMeasurement: Bool = false
     ) -> TextLayoutBox {
-        if let request, keep != .secret, pills.isEmpty, style.wrap == .wrap, style.maxLines == 0,
+        if let request, keep != .secret, pills.isEmpty,
+           (style.wrap == .wrap || (request.byLine && style.wrap == .noWrap)),
+           style.maxLines == 0,
            ParagraphRequest.supports(spans) {
             // A rich field's authored bytes come from its span strings, as in layoutKeyed.
             let authored = spans.flatMap { $0.isEmpty ? nil : $0.map(\.text).joined() } ?? text
             if authored.utf8.contains(0x0a) {
-                let laid = layoutParagraphs(text: authored, style: style, maxWidth: maxWidth, pixelScale: pixelScale, request: request)
+                let effectiveMaxW = (request.byLine && style.wrap == .noWrap) ? nil : maxWidth
+                let laid = layoutParagraphs(text: authored, style: style, maxWidth: effectiveMaxW, pixelScale: pixelScale, request: request)
                 let prepared = prepareHighlights(request.highlights, in: laid, field: request.field)
                 return paragraphBox(prepared, text: authored, spans: spans, style: style, pixelScale: pixelScale)
             }

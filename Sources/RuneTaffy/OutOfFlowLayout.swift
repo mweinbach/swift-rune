@@ -221,14 +221,18 @@ private func resolveAbsoluteAxis(
             let contentSize = Swift.max(0, containingSize - paddingStart * 2)
             let free = contentSize - childSize - mStart - mEnd
             if isMain {
-                switch justifyContent {
+                let effectiveJustify: AlignContentKeyword =
+                    (justifyContent.safety == .safe && free < 0) ? .start : justifyContent.keyword
+                switch effectiveJustify {
                 case .center: offset += free * 0.5
                 case .flexEnd, .end: offset += free
                 default: break
                 }
             } else {
                 let align = alignSelf ?? alignFallback
-                switch align {
+                let effectiveAlign: AlignItemsKeyword =
+                    (align.safety == .safe && free < 0) ? .start : align.keyword
+                switch effectiveAlign {
                 case .center: offset += free * 0.5
                 case .flexEnd, .end: offset += free
                 default: break
@@ -238,7 +242,9 @@ private func resolveAbsoluteAxis(
             let contentSize = Swift.max(0, containingSize - paddingStart * 2)
             let free = contentSize - childSize - mStart - mEnd
             let align = isHorizontal ? (justifySelf ?? justifyItems ?? .normal) : (alignSelf ?? alignFallback)
-            switch align {
+            let effectiveAlign: AlignItemsKeyword =
+                (align.safety == .safe && free < 0) ? .start : align.keyword
+            switch effectiveAlign {
             case .center: offset += free * 0.5
             case .end, .flexEnd, .selfEnd: offset += free
             default: break

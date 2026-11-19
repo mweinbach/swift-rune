@@ -1635,6 +1635,122 @@ struct RuneLuauParityTests {
         #expect(!logs.contains { $0.message.contains("dir only applies") })
         #expect(!logs.contains { $0.message.contains("hoverTransition") })
     }
+
+    @Test("versionHash matches upstream property reader across primitive and non-primitive values")
+    func versionHashMatchesUpstreamPropertyReaderForPrimitivesAndNonPrimitives() throws {
+        // Direct primitive checks: nil, booleans, numbers (bit-exact), strings, and byteStrings.
+        let hNil = try LuauUIBridge.versionHash(.nil)
+        let hFalse = try LuauUIBridge.versionHash(.bool(false))
+        let hTrue = try LuauUIBridge.versionHash(.bool(true))
+        let hZero = try LuauUIBridge.versionHash(.number(0.0))
+        let hNegZero = try LuauUIBridge.versionHash(.number(-0.0))
+        let hOne = try LuauUIBridge.versionHash(.number(1.0))
+        let hEmpty = try LuauUIBridge.versionHash(.string(""))
+        let hOneStr = try LuauUIBridge.versionHash(.string("1"))
+        let hHello = try LuauUIBridge.versionHash(.string("hello"))
+        let hValidBytes = try LuauUIBridge.versionHash(.byteString(Array("hello".utf8)))
+        let hInvalidBytes = try LuauUIBridge.versionHash(.byteString([0xFF, 0xFE]))
+
+        #expect(Set([hNil, hFalse, hTrue, hZero, hOne, hEmpty, hOneStr]).count == 7)
+        #expect(hZero != hNegZero) // Rust hashes `n.to_bits()`
+        #expect(hValidBytes == hHello)
+        // Upstream `props::read` maps non-UTF-8 Lua strings to `""` via `from_utf8(...).unwrap_or("")`.
+        #expect(hInvalidBytes == hEmpty)
+
+        // Direct non-primitive rejections with exact upstream message & type names.
+        let rejected: [(LuauValue, String)] = [
+            (.table(LuauTable()), "table"),
+            (.nativeFunction(LuauNativeFunction(name: "f") { _, _, _ in .values([]) }), "function"),
+            (.thread(LuauThread()), "thread"),
+            (.userdata(LuauUserdata(payload: 1)), "userdata"),
+            (.userdata(LuauUserdata(payload: LuauBufferBox([1, 2]))), "buffer"),
+            (.vector(SIMD3<Double>(1, 2, 3)), "vector"),
+        ]
+        for (value, expectedType) in rejected {
+            do {
+                _ = try LuauUIBridge.versionHash(value)
+                Issue.record("Expected versionHash to reject \(expectedType)")
+            } catch let err as LuauRuntimeError {
+                #expect(err.value.displayString == "a memo version must be nil, a boolean, a number or a string, got \(expectedType)")
+            }
+        }
+
+        // End-to-end checks through view:Memo, ui.each, and ui.virtualList (version + rowVersions).
+        let script = Script(
+            name: "version_reader_parity",
+            sources: Sources.single("""
+            local ui = require("@rune/ui")
+            local function noop() end
+            local badValues = {
+                tbl = {},
+                fn = noop,
+                th = coroutine.create(noop),
+                ud = newproxy(true),
+                buf = buffer.create(4),
+                vec = vector.create(1, 2, 3),
+            }
+            return {
+                validMemo = function(view)
+                    return ui.col({
+                        view:Memo("m-nil", nil, function() return ui.text("nil") end),
+                        view:Memo("m-bool", false, function() return ui.text("bool") end),
+                        view:Memo("m-num", 42, function() return ui.text("num") end),
+                        view:Memo("m-str", "abc", function() return ui.text("str") end),
+                        view:Memo("m-bytes", string.char(255), function() return ui.text("bytes") end),
+                        view:Memo(string.char(255), 1, function() return ui.text("bytekey") end),
+                    })
+                end,
+                memoTable = function(view) return view:Memo("k", badValues.tbl, function() return ui.text("x") end) end,
+                memoFunc = function(view) return view:Memo("k", badValues.fn, function() return ui.text("x") end) end,
+                memoThread = function(view) return view:Memo("k", badValues.th, function() return ui.text("x") end) end,
+                memoUserdata = function(view) return view:Memo("k", badValues.ud, function() return ui.text("x") end) end,
+                memoBuffer = function(view) return view:Memo("k", badValues.buf, function() return ui.text("x") end) end,
+                memoVector = function(view) return view:Memo("k", badValues.vec, function() return ui.text("x") end) end,
+                eachBad = function()
+                    return ui.col({}, ui.each({ { id = "a", v = badValues.fn } }, "id", "v", function()
+                        return ui.text("x")
+                    end))
+                end,
+                listBadVersion = function()
+                    return ui.virtualList({
+                        count = 1,
+                        version = badValues.vec,
+                        renderRow = function() return ui.text("x") end,
+                    })
+                end,
+                listBadRowVersion = function()
+                    return ui.virtualList({
+                        count = 2,
+                        rowVersions = { 1, badValues.buf },
+                        renderRow = function() return ui.text("x") end,
+                    })
+                end,
+            }
+            """)
+        )
+
+        let cx = Cx<LuauTestState>(viewport: Vec2(320, 200))
+        let validEl = script.surface(cx, name: "validMemo")
+        #expect(collectTexts(validEl) == ["nil", "bool", "num", "str", "bytes", "bytekey"])
+
+        let memoExpectations: [(String, String)] = [
+            ("memoTable", "a memo version must be nil, a boolean, a number or a string, got table"),
+            ("memoFunc", "a memo version must be nil, a boolean, a number or a string, got function"),
+            ("memoThread", "a memo version must be nil, a boolean, a number or a string, got thread"),
+            ("memoUserdata", "a memo version must be nil, a boolean, a number or a string, got userdata"),
+            ("memoBuffer", "a memo version must be nil, a boolean, a number or a string, got buffer"),
+            ("memoVector", "a memo version must be nil, a boolean, a number or a string, got vector"),
+            ("eachBad", "ui.each: item 1: a memo version must be nil, a boolean, a number or a string, got function"),
+            ("listBadVersion", "a memo version must be nil, a boolean, a number or a string, got vector"),
+            ("listBadRowVersion", "ui.virtualList rowVersions 2: a memo version must be nil, a boolean, a number or a string, got buffer"),
+        ]
+        for (surfaceName, expectedError) in memoExpectations {
+            let errEl = script.renderUncached(name: surfaceName, dark: true, LuauTestState.self)
+            #expect(findElement(errEl) { $0.keyId == "luau-error" } != nil)
+            let joined = collectTexts(errEl).joined(separator: "\n")
+            #expect(joined.contains(expectedError), "Surface \(surfaceName) expected '\(expectedError)', got '\(joined)'")
+        }
+    }
 }
 
 private func findAllTexts<S>(_ root: El<S>) -> [El<S>] {

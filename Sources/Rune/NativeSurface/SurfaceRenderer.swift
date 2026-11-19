@@ -358,6 +358,33 @@ public final class SurfaceRenderer: @unchecked Sendable {
 
     private func importFrame(_ frame: NativeSurfaceVideoFrame, revision: UInt64) throws -> ImportedFrame {
         switch frame.source {
+        case .dmabuf(let buf):
+            defer { buf.notifyReleased() }
+            let bgra = try buf.readLinearBGRA()
+            let tex0 = try uploadTexture(width: Int(buf.width), height: Int(buf.height), pixelFormat: .bgra8Unorm,
+                                         bytesPerRow: Int(buf.width) * 4, data: bgra)
+            #if canImport(CoreVideo) && canImport(IOSurface)
+            return ImportedFrame(
+                frameId: frame.id,
+                size: frame.size,
+                format: frame.format,
+                color: frame.color,
+                orient: frame.orient,
+                textures: [tex0, tex0],
+                token: nil,
+                revision: revision
+            )
+            #else
+            return ImportedFrame(
+                frameId: frame.id,
+                size: frame.size,
+                format: frame.format,
+                color: frame.color,
+                orient: frame.orient,
+                textures: [tex0, tex0],
+                revision: revision
+            )
+            #endif
         case .bytes(let bf):
             let tex0Fmt: MTLPixelFormat
             switch bf.format {

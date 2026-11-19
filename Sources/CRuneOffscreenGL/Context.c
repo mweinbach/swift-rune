@@ -45,6 +45,8 @@ struct RuneOffscreenGLContext {
 };
 
 #ifdef __APPLE__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static int open_context(RuneOffscreenGLContext *gl, char *error, size_t size) {
     CGLPixelFormatAttribute attributes[] = {
         kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_GL4_Core, kCGLPFAAccelerated, 0
@@ -76,6 +78,7 @@ static void close_context(RuneOffscreenGLContext *gl) {
     if (gl->previous) CGLReleaseContext(gl->previous);
     if (gl->context) CGLReleaseContext(gl->context);
 }
+#pragma clang diagnostic pop
 
 void *rune_offscreen_gl_proc(const char *name) {
     return name ? dlsym(RTLD_DEFAULT, name) : NULL;

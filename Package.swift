@@ -949,7 +949,8 @@ let package = Package(
             path: "Tests/RuneI18nTests"
         ),
         .target(name: "CRuneTestSockets", path: "Tests/Support/CRuneTestSockets", linkerSettings: [
-            .linkedLibrary("ws2_32", .when(platforms: [.windows]))
+            .linkedLibrary("ws2_32", .when(platforms: [.windows])),
+            .linkedFramework("CoreFoundation", .when(platforms: [.macOS]))
         ]),
         .testTarget(
             name: "RuneTests",

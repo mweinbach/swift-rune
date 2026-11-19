@@ -1107,7 +1107,7 @@ struct ShellAndTabStripTests {
         #expect(abs(tabB[0] - (tabA[0] + tabA[2] + 8.0)) < 1.5)
         #expect(abs(tabA[2] - 224.0) < 1.5)
 
-        // closeTabStop(true) keeps close button as a focus stop inside the tab list focusGroup
+        // closeTabStop(true) makes each tab's close button its own Tab stop after its tab (#1219).
         rt.keyDown(KeyEvent(key: .tab), at: 0.01)
         rt.frame(at: 0.02)
         #expect(rt.focusedKey == "bstrip-tab-a")
@@ -1116,6 +1116,9 @@ struct ShellAndTabStripTests {
         #expect(rt.focusedKey == "bstrip-close-a")
         rt.keyDown(KeyEvent(key: .tab), at: 0.042)
         rt.frame(at: 0.045)
+        #expect(rt.focusedKey == "bstrip-close-b")
+        rt.keyDown(KeyEvent(key: .tab), at: 0.047)
+        rt.frame(at: 0.049)
         #expect(rt.focusedKey == "new-tab")
 
         // Hover and double click on tab b

@@ -415,6 +415,8 @@ internal func computeGridLayout(
     alignTracks(tracks: &rowTracks, containerInnerSize: finalInnerH, gap: rowGap, alignContent: style.alignContent ?? .normal, startOffset: contentBoxInset.top)
 
     // 6. Position & layout each grid item
+    var contentMinX: Float = 0
+    var contentMinY: Float = 0
     var contentMaxX: Float = contentBoxInset.left
     var contentMaxY: Float = contentBoxInset.top
     var firstBaselineY: Float? = nil
@@ -451,10 +453,10 @@ internal func computeGridLayout(
             var targetW = item.style.size.width.maybeResolve(areaW).map { $0 + cAdj.width }
             var targetH = item.style.size.height.maybeResolve(areaH).map { $0 + cAdj.height }
 
-            if targetW == nil && (justify == .stretch || justify == .normal) && mL != nil && mR != nil && !item.style.itemIsReplaced {
+            if targetW == nil && (justify.keyword == .stretch || justify.keyword == .normal) && mL != nil && mR != nil && !item.style.itemIsReplaced {
                 targetW = Swift.max(0, areaW - (mL ?? 0) - (mR ?? 0))
             }
-            if targetH == nil && (align == .stretch || align == .normal) && mT != nil && mB != nil && !item.style.itemIsReplaced {
+            if targetH == nil && (align.keyword == .stretch || align.keyword == .normal) && mT != nil && mB != nil && !item.style.itemIsReplaced {
                 targetH = Swift.max(0, areaH - (mT ?? 0) - (mB ?? 0))
             }
 
@@ -506,6 +508,16 @@ internal func computeGridLayout(
                 else if let b = item.style.inset.bottom.maybeResolve(areaH) { y -= b }
             }
 
+            contentMinX = Swift.min(contentMinX, x)
+            contentMinY = Swift.min(contentMinY, y)
+            if childOut.scrollOverflowOrigin != .zero {
+                if item.style.overflow.x == .visible {
+                    contentMinX = Swift.min(contentMinX, x + childOut.scrollOverflowOrigin.x)
+                }
+                if item.style.overflow.y == .visible {
+                    contentMinY = Swift.min(contentMinY, y + childOut.scrollOverflowOrigin.y)
+                }
+            }
             contentMaxX = Swift.max(contentMaxX, x + finalW)
             contentMaxY = Swift.max(contentMaxY, y + finalH)
             if firstBaselineY == nil {
@@ -531,7 +543,8 @@ internal func computeGridLayout(
             width: Swift.max(outerWidth, contentMaxX + contentBoxInset.right),
             height: Swift.max(outerHeight, contentMaxY + contentBoxInset.bottom)
         ),
-        firstBaselines: Point(x: nil, y: firstBaselineY)
+        firstBaselines: Point(x: nil, y: firstBaselineY),
+        scrollOverflowOrigin: Point(x: contentMinX, y: contentMinY)
     )
 }
 
@@ -963,7 +976,7 @@ private func sizeTracks(
     }
 
     // 5. Stretch auto tracks if alignContent/justifyContent is stretch/normal and container size is definite
-    if let containerSize = containerInnerSize, (alignContent == .stretch || alignContent == .normal) {
+    if let containerSize = containerInnerSize, (alignContent.keyword == .stretch || alignContent.keyword == .normal) {
         let used = sumTrackSizes(tracks, gap: gap)
         let free = Swift.max(0, containerSize - used)
         if free > 0 {
@@ -995,19 +1008,22 @@ private func alignTracks(
 ) {
     guard !tracks.isEmpty else { return }
     let used = sumTrackSizes(tracks, gap: gap)
-    let free = Swift.max(0, containerInnerSize - used)
+    let rawFree = containerInnerSize - used
+    let free = Swift.max(0, rawFree)
     let activeCount = tracks.filter { !$0.isCollapsed }.count
 
     var cur = startOffset
     var extraGap: Float = 0
 
-    switch alignContent {
+    let effectiveKeyword: AlignContentKeyword =
+        (alignContent.safety == .safe && rawFree < 0) ? .start : alignContent.keyword
+    switch effectiveKeyword {
     case .start, .flexStart, .normal, .stretch:
         break
     case .end, .flexEnd:
-        cur += free
+        cur += alignContent.safety == .unsafe ? rawFree : free
     case .center:
-        cur += free * 0.5
+        cur += (alignContent.safety == .unsafe ? rawFree : free) * 0.5
     case .spaceBetween:
         if activeCount > 1 {
             extraGap = free / Float(activeCount - 1)
@@ -1066,7 +1082,9 @@ private func alignItemInArea(
     }
 
     let offset: Float
-    switch alignment {
+    let effectiveAlignment: AlignItemsKeyword =
+        (alignment.safety == .safe && free < 0) ? .start : alignment.keyword
+    switch effectiveAlignment {
     case .start, .flexStart, .selfStart, .stretch, .normal, .baseline:
         offset = mS
     case .end, .flexEnd, .selfEnd:

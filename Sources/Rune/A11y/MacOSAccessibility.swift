@@ -517,11 +517,20 @@ public extension Runtime {
         }
 
         func a11yKeyed(from idx: Int, key: String) -> Int? {
-            let match = AccessibilityNameSource.relatedIndex(key, from: idx, parent: { flatNodes[$0].parentIndex },
-                                                             children: { edges.children(of: $0) }, keyAt: { flatNodes[$0].key })
-            guard let match, !AccessibilityTreeEdges.hasAncestorOrSelf(match, count: flatNodes.count,
-                parent: { flatNodes[$0].parentIndex }, matching: { isExiting(flatNodes[$0].nodeId) }) else { return nil }
-            return match
+            AccessibilityNameSource.relatedIndex(
+                key,
+                from: idx,
+                parent: { flatNodes[$0].parentIndex },
+                children: { edges.children(of: $0) },
+                keyAt: { flatNodes[$0].key },
+                isExcluded: { candidate in
+                    AccessibilityTreeEdges.hasAncestorOrSelf(
+                        candidate, count: flatNodes.count,
+                        parent: { flatNodes[$0].parentIndex },
+                        matching: { isExiting(flatNodes[$0].nodeId) }
+                    )
+                }
+            )
         }
 
         func a11yWords(_ idx: Int) -> String? {
@@ -692,21 +701,22 @@ public extension Runtime {
             let labelledByText = el.a11yLabelledBy.flatMap { a11yKeyed(from: idx, key: $0) }.flatMap(a11yWords)
             let describedByText = el.a11yDescribedBy.flatMap { a11yKeyed(from: idx, key: $0) }.flatMap(a11yWords)
             let resolvedHelp: String? = el.a11yDescription ?? describedByText ?? el.a11yHelp
-            let selectedState: Bool? = (selectableRoles.contains(el.role) || el.itemSelected) ? el.itemSelected : nil
+            let inFocusGroup = findFocusGroupAncestor(of: idx).map { $0 != idx } ?? false
+            let selectedState: Bool? = (el.itemSelected || (selectableRoles.contains(el.role) && inFocusGroup)) ? el.itemSelected : nil
 
             let hasScroll = !el.layout.scrollAxes.isEmpty
             let sOff = hasScroll ? (scrollOffsets[node.path] ?? .zero) : nil
             let sMax = hasScroll ? scrollMaxExtents[node.path] : nil
 
-            let resolvedRole: ElementRole = editLens != nil || (el.role == .textInput && (isSecure || editMultiline))
-                ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: editMultiline)
+            let resolvedRole: ElementRole = editLens != nil || ((el.role == .textInput || el.role == .searchbox) && (isSecure || editMultiline))
+                ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: editMultiline, authoredRole: el.role)
                 : semanticRole
             let givenName = AccessibilityNameSource.nonblank(el.a11yLabel) ?? labelledByText
             let controlName = AccessibilityRoleRules.controlName(
                 given: givenName, role: resolvedRole, isDefaultButton: el.isDefaultButton, secure: isSecure,
                 words: a11yWords(idx)
             )
-            let resolvedLabel = controlName ?? (isSecure ? "Password" : (el.role == .textInput ? nil : richPlain))
+            let resolvedLabel = controlName ?? (isSecure ? "Password" : ((el.role == .textInput || el.role == .searchbox) ? nil : richPlain))
             let hasLinks = hasActiveTextLinks(el)
             var builtChildren = edges.project(edges.children(of: idx), insideScroll: insideScroll || hasScroll, projection: projection, build: build)
             if let grid = el.terminalGridPayload {
@@ -798,8 +808,13 @@ public extension Runtime {
                 let scroll = inputScroll[node.path] ?? 0
                 let origin = Vec2(rect.x + (el.layout.padding.left - scroll) * scale.x,
                                   rect.y + el.layout.padding.top * scale.y)
+                let fieldRect = NSRect(x: CGFloat(rect.x), y: CGFloat(rect.y),
+                                       width: CGFloat(rect.width), height: CGFloat(rect.height))
+                let clipRect = NSRect(x: CGFloat(node.clipRect.x), y: CGFloat(node.clipRect.y),
+                                      width: CGFloat(node.clipRect.width), height: CGFloat(node.clipRect.height))
+                let visibleClip = clipRect.isEmpty ? fieldRect : fieldRect.intersection(clipRect)
                 projected.fieldLayout = A11yFieldLayout(text: value, box: box, system: textSystem,
-                                                        origin: origin, scale: scale)
+                                                        origin: origin, scale: scale, visibleClip: visibleClip)
             }
             #endif
             projected.runtimePath = node.path

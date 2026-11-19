@@ -114,7 +114,9 @@ internal final class RuneAXTextField: RuneNSAccessibilityElement {
     override func accessibilityFrame(for range: NSRange) -> NSRect {
         let field = snapshot
         guard let layout = field.layout, let offsets = field.bytes(range) else { return .zero }
-        return layout.frame(forBytes: offsets).applying(field.viewToScreen)
+        let local = layout.frame(forBytes: offsets)
+        guard !local.isEmpty else { return .zero }
+        return local.applying(field.viewToScreen)
     }
 
     override func accessibilityNumberOfCharacters() -> Int { snapshot.text.utf16.count }

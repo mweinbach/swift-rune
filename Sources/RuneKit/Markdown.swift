@@ -44,24 +44,30 @@ public enum MarkdownBidi {
     }
 
     public static func blocksDirection(_ blocks: [MarkdownDocBlock]) -> MarkdownDirection? {
-        for block in blocks {
-            if let direction = blockDirection(block) { return direction }
+        var stack: [MarkdownDocBlock] = []
+        stack.reserveCapacity(blocks.count)
+        for b in blocks.reversed() { stack.append(b) }
+        while let block = stack.popLast() {
+            switch block {
+            case let .para(inline), let .heading(_, inline):
+                if let d = inlineDirection(inline) { return d }
+            case let .quote(inner):
+                for c in inner.reversed() { stack.append(c) }
+            case let .list(_, items):
+                for item in items.reversed() {
+                    for c in item.reversed() { stack.append(c) }
+                }
+            case let .table(table):
+                if let d = tableDirection(table) { return d }
+            case .image, .code, .diff, .mermaid, .rule:
+                break
+            }
         }
         return nil
     }
 
     fileprivate static func blockDirection(_ block: MarkdownDocBlock) -> MarkdownDirection? {
-        switch block {
-        case let .para(inline), let .heading(_, inline): return inlineDirection(inline)
-        case let .quote(inner): return blocksDirection(inner)
-        case let .list(_, items):
-            for item in items {
-                if let direction = blocksDirection(item) { return direction }
-            }
-            return nil
-        case let .table(table): return tableDirection(table)
-        case .image, .code, .diff, .mermaid, .rule: return nil
-        }
+        blocksDirection([block])
     }
 
     /// Detects table base direction from its header cells, then body cells.
@@ -177,6 +183,13 @@ fileprivate struct MarkdownInlineBidi: Sendable {
             marked.sort { $0.lowerBound < $1.lowerBound }
         }
         units = Self.merging(marked, with: TextBidiUnits.ltrUnits(in: text))
+        let hasStrongCandidate = bytes.contains { b in
+            (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || b >= 0x80
+        }
+        guard hasStrongCandidate else {
+            direction = nil
+            return
+        }
         var at = 0
         for range in units {
             if at < range.lowerBound, let found = MarkdownBidi.firstStrongDirection(in: string(at..<range.lowerBound)) {
@@ -654,21 +667,67 @@ public indirect enum MarkdownBlockMap: Sendable, Equatable, Hashable {
     case none
     case inline(MarkdownSpanMap)
     case code(MarkdownSpanMap)
+    case deepTail(lines: Int, map: MarkdownSpanMap)
     case quote([MarkdownBlockMap])
     case list([[MarkdownBlockMap]])
     case table(head: [MarkdownSpanMap], rows: [[MarkdownSpanMap]])
 
     public func shiftedSrc(_ offset: Int) -> MarkdownBlockMap {
         guard offset != 0 else { return self }
-        switch self {
-        case .none: return .none
-        case .inline(let m): return .inline(m.shiftedSrc(offset))
-        case .code(let m): return .code(m.shiftedSrc(offset))
-        case .quote(let inner): return .quote(inner.map { $0.shiftedSrc(offset) })
-        case .list(let items): return .list(items.map { $0.map { $0.shiftedSrc(offset) } })
-        case let .table(head, rows):
-            return .table(head: head.map { $0.shiftedSrc(offset) }, rows: rows.map { $0.map { $0.shiftedSrc(offset) } })
+        enum Step {
+            case enter(MarkdownBlockMap)
+            case finishQuote(Int)
+            case finishItem(Int)
+            case finishList(Int)
         }
+        var vals: [MarkdownBlockMap] = []
+        var itemsVals: [[MarkdownBlockMap]] = []
+        var stack: [Step] = [.enter(self)]
+        while let step = stack.popLast() {
+            switch step {
+            case .enter(let m):
+                switch m {
+                case .none:
+                    vals.append(.none)
+                case .inline(let sm):
+                    vals.append(.inline(sm.shiftedSrc(offset)))
+                case .code(let sm):
+                    vals.append(.code(sm.shiftedSrc(offset)))
+                case let .deepTail(lines, sm):
+                    vals.append(.deepTail(lines: lines, map: sm.shiftedSrc(offset)))
+                case let .table(head, rows):
+                    vals.append(.table(
+                        head: head.map { $0.shiftedSrc(offset) },
+                        rows: rows.map { $0.map { $0.shiftedSrc(offset) } }
+                    ))
+                case .quote(let inner):
+                    stack.append(.finishQuote(inner.count))
+                    for c in inner.reversed() { stack.append(.enter(c)) }
+                case .list(let items):
+                    stack.append(.finishList(items.count))
+                    for item in items.reversed() {
+                        stack.append(.finishItem(item.count))
+                        for c in item.reversed() { stack.append(.enter(c)) }
+                    }
+                }
+            case .finishQuote(let n):
+                let start = vals.count - n
+                let children = Array(vals[start...])
+                vals.removeSubrange(start...)
+                vals.append(.quote(children))
+            case .finishItem(let n):
+                let start = vals.count - n
+                let children = Array(vals[start...])
+                vals.removeSubrange(start...)
+                itemsVals.append(children)
+            case .finishList(let n):
+                let start = itemsVals.count - n
+                let items = Array(itemsVals[start...])
+                itemsVals.removeSubrange(start...)
+                vals.append(.list(items))
+            }
+        }
+        return vals.popLast() ?? .none
     }
 }
 
@@ -928,10 +987,21 @@ public enum MarkdownFind {
     /// diff blocks, Mermaid sources a diagram doesn't draw, table head and body cells, and the
     /// blocks of list items and quotes.
     static func eachText(blocks: [MarkdownDocBlock], maps: [MarkdownBlockMap], _ f: (String, MarkdownSpanMap) -> Void) {
-        for (i, b) in blocks.enumerated() {
-            let map = i < maps.count ? maps[i] : .none
+        var stack: [([MarkdownDocBlock], [MarkdownBlockMap], Int)] = [(blocks, maps, 0)]
+        while !stack.isEmpty {
+            let topIdx = stack.count - 1
+            let i = stack[topIdx].2
+            if i >= stack[topIdx].0.count {
+                stack.removeLast()
+                continue
+            }
+            let b = stack[topIdx].0[i]
+            let map = i < stack[topIdx].1.count ? stack[topIdx].1[i] : .none
+            stack[topIdx].2 = i + 1
             switch (b, map) {
             case let (.para(inl), .inline(m)), let (.heading(_, inl), .inline(m)):
+                f(inl.text, m)
+            case let (.para(inl), .deepTail(_, m)):
                 f(inl.text, m)
             case let (.image(_, alt, _), .inline(m)):
                 f(alt, m)
@@ -951,11 +1021,12 @@ public enum MarkdownFind {
                     }
                 }
             case let (.list(_, items), .list(itemMaps)):
-                for (idx, item) in items.enumerated() where idx < itemMaps.count {
-                    eachText(blocks: item, maps: itemMaps[idx], f)
+                let limit = min(items.count, itemMaps.count)
+                for idx in stride(from: limit - 1, through: 0, by: -1) {
+                    stack.append((items[idx], itemMaps[idx], 0))
                 }
             case let (.quote(inner), .quote(innerMaps)):
-                eachText(blocks: inner, maps: innerMaps, f)
+                stack.append((inner, innerMaps, 0))
             default:
                 continue
             }
@@ -1196,91 +1267,269 @@ public enum MarkdownFind {
 
 // MARK: - Plain Text Formatter (`rune_kit::markdown::plain`)
 
-/// Renders a `MarkdownParsedDoc` to clean copyable plain text (`rune_kit::markdown::plain`).
+/// Renders a `MarkdownParsedDoc` to clean copyable plain text iteratively (`rune_kit::markdown::plain`, #1122).
 public enum MarkdownPlain {
+    internal struct QuotePlainKey: Hashable {
+        let id: ObjectIdentifier
+        let firstTask: Int
+        let cols: Int
+        let lists: Int
+    }
+
+    internal struct QuotePlainEntry {
+        let taskDelta: Int
+        let breaks: (UInt8, UInt8)
+        let text: String
+    }
+
+    internal typealias QuotePlainCache = [QuotePlainKey: QuotePlainEntry]
+
+    private struct Piece {
+        let breaks: (UInt8, UInt8)
+        let text: String
+    }
+
+    private enum PlainFrame {
+        case blocks(
+            blocks: [MarkdownDocBlock],
+            maps: [MarkdownBlockMap],
+            pre: [MarkdownPreBlock]?,
+            idx: Int,
+            cols: Int,
+            lists: Int,
+            lead: (String, UInt8)?
+        )
+        case list(
+            start: UInt64?,
+            items: [[MarkdownDocBlock]],
+            itemMaps: [[MarkdownBlockMap]],
+            preItems: [MarkdownPreItem]?,
+            idx: Int,
+            cols: Int,
+            lists: Int
+        )
+    }
+
     public static func render(
         blocks: [MarkdownDocBlock],
         tasks: [MarkdownTaskState?] = [],
         nextTask: inout Int
     ) -> String {
-        var out = ""
-        writeBlocks(blocks, into: &out, tasks: tasks, nextTask: &nextTask, indentCols: 0, quotePrefix: false, allowQuotePrefix: false, inListItem: false)
-        return out
+        var cache: QuotePlainCache = [:]
+        return renderCached(
+            quotePre: nil,
+            blocks: blocks,
+            maps: [],
+            pre: nil,
+            tasks: tasks,
+            nextTask: &nextTask,
+            cols: 0,
+            lists: 0,
+            cache: &cache
+        )
     }
 
     public static func render(_ doc: MarkdownParsedDoc) -> String {
         var next = 0
+        var cache: QuotePlainCache = [:]
+        return renderCached(
+            quotePre: nil,
+            blocks: doc.blocks,
+            maps: doc.maps,
+            pre: nil,
+            tasks: doc.tasks,
+            nextTask: &next,
+            cols: 0,
+            lists: 0,
+            cache: &cache
+        )
+    }
+
+    internal static func renderCached(
+        quotePre: MarkdownPreBlock?,
+        blocks: [MarkdownDocBlock],
+        maps: [MarkdownBlockMap],
+        pre: [MarkdownPreBlock]?,
+        tasks: [MarkdownTaskState?],
+        nextTask: inout Int,
+        cols: Int,
+        lists: Int,
+        cache: inout QuotePlainCache
+    ) -> String {
+        guard !blocks.isEmpty else { return "" }
+        let firstTask = nextTask
+        let cacheKey = quotePre.map { QuotePlainKey(id: ObjectIdentifier($0), firstTask: firstTask, cols: cols, lists: lists) }
+        if let key = cacheKey, let hit = cache[key] {
+            nextTask = firstTask + hit.taskDelta
+            return hit.text
+        }
+        if blocks.count == 1, case let .quote(grand) = blocks[0] {
+            if grand.isEmpty { return "" }
+            if let childPre = pre?.first,
+               let hit = cache[QuotePlainKey(id: ObjectIdentifier(childPre), firstTask: firstTask, cols: cols, lists: lists)] {
+                if let key = cacheKey { cache[key] = hit }
+                nextTask = firstTask + hit.taskDelta
+                return hit.text
+            }
+        }
+
+        var pieces: [Piece] = []
+        plainIter(
+            rootBlocks: blocks,
+            rootMaps: maps,
+            rootPre: pre,
+            tasks: tasks,
+            task: &nextTask,
+            rootCols: cols,
+            rootLists: lists,
+            rootLead: nil,
+            cache: cache,
+            out: &pieces
+        )
+        let bounds: (UInt8, UInt8) = if let f = pieces.first, let l = pieces.last {
+            (f.breaks.0, l.breaks.1)
+        } else {
+            (0, 0)
+        }
         var out = ""
-        writeBlocks(doc.blocks, into: &out, tasks: doc.tasks, nextTask: &next, indentCols: 0, quotePrefix: false, allowQuotePrefix: true, inListItem: false)
+        let cap = pieces.reduce(0) { $0 + $1.text.utf8.count + 2 }
+        out.reserveCapacity(cap)
+        var after: UInt8 = 0
+        for (i, p) in pieces.enumerated() {
+            if i > 0 {
+                let n = Int(max(after, p.breaks.0))
+                if n > 0 { out.append(String(repeating: "\n", count: n)) }
+            }
+            out.append(p.text)
+            after = p.breaks.1
+        }
+        if let key = cacheKey {
+            let delta = max(0, nextTask - firstTask)
+            cache[key] = QuotePlainEntry(taskDelta: delta, breaks: bounds, text: out)
+        }
         return out
     }
 
-    private static func writeBlocks(
-        _ blocks: [MarkdownDocBlock],
-        into out: inout String,
+    private static func plainIter(
+        rootBlocks: [MarkdownDocBlock],
+        rootMaps: [MarkdownBlockMap],
+        rootPre: [MarkdownPreBlock]?,
         tasks: [MarkdownTaskState?],
-        nextTask: inout Int,
-        indentCols: Int,
-        quotePrefix: Bool,
-        allowQuotePrefix: Bool,
-        inListItem: Bool
+        task: inout Int,
+        rootCols: Int,
+        rootLists: Int,
+        rootLead: (String, UInt8)?,
+        cache: QuotePlainCache,
+        out: inout [Piece]
     ) {
-        for (i, b) in blocks.enumerated() {
-            if i > 0 {
-                if inListItem, case .list = b {
-                    out.append("\n")
-                } else {
-                    out.append("\n\n")
+        var stack: [PlainFrame] = [
+            .blocks(blocks: rootBlocks, maps: rootMaps, pre: rootPre, idx: 0, cols: rootCols, lists: rootLists, lead: rootLead)
+        ]
+        while !stack.isEmpty {
+            let topIdx = stack.count - 1
+            switch stack[topIdx] {
+            case let .blocks(blocks, maps, pre, idx, cols, lists, lead):
+                if idx >= blocks.count {
+                    stack.removeLast()
+                    continue
                 }
-            }
-            switch b {
-            case let .para(inl), let .heading(_, inl):
-                let clean = MarkdownInline.unpadded(inl.text)
-                if quotePrefix {
-                    out.append(clean.split(separator: "\n", omittingEmptySubsequences: false).map { "> \($0)" }.joined(separator: "\n"))
-                } else {
-                    out.append(clean)
-                }
-            case let .code(s), let .diff(s), let .mermaid(s):
-                out.append(s)
-            case let .image(_, alt, _):
-                out.append(alt)
-            case .rule:
-                out.append("---")
-            case let .quote(inner):
-                writeBlocks(inner, into: &out, tasks: tasks, nextTask: &nextTask, indentCols: indentCols, quotePrefix: allowQuotePrefix, allowQuotePrefix: allowQuotePrefix, inListItem: false)
-            case let .list(start, items):
-                for (k, item) in items.enumerated() {
-                    if k > 0 { out.append("\n") }
-                    let task = nextTask < tasks.count ? tasks[nextTask] : nil
-                    nextTask += 1
-                    let marker: String
-                    if let task {
-                        marker = task.checked ? "- [x] " : "- [ ] "
-                    } else if let s = start {
-                        marker = "\(s + UInt64(k)). "
-                    } else {
-                        marker = "- "
+                let b = blocks[idx]
+                let m: MarkdownBlockMap? = idx < maps.count ? maps[idx] : nil
+                let p: MarkdownPreBlock? = pre.flatMap { idx < $0.count ? $0[idx] : nil }
+                stack[topIdx] = .blocks(blocks: blocks, maps: maps, pre: pre, idx: idx + 1, cols: cols, lists: lists, lead: nil)
+                let here = lead
+
+                switch (b, m) {
+                case let (.para(inl), .deepTail):
+                    let pad = String(repeating: " ", count: cols)
+                    var text = ""
+                    text.reserveCapacity(inl.text.utf8.count + 16)
+                    let lines = inl.text.split(separator: "\n", omittingEmptySubsequences: false)
+                    for (j, line) in lines.enumerated() {
+                        if j > 0 { text.append("\n") }
+                        text.append(pad)
+                        text.append(contentsOf: line)
                     }
-                    let pad = String(repeating: " ", count: indentCols)
-                    out.append(pad)
-                    out.append(marker)
-                    var itemOut = ""
-                    writeBlocks(item, into: &itemOut, tasks: tasks, nextTask: &nextTask, indentCols: indentCols + 2, quotePrefix: quotePrefix, allowQuotePrefix: allowQuotePrefix, inListItem: true)
-                    let trimFirst = String(repeating: " ", count: indentCols + 2)
-                    if itemOut.hasPrefix(trimFirst) {
-                        out.append(String(itemOut.dropFirst(trimFirst.count)))
+                    out.append(Piece(breaks: (2, 2), text: text))
+                case let (.para(inl), _), let (.heading(_, inl), _):
+                    let text = MarkdownInline.unpadded(inl.text)
+                    if let (marker, before) = here {
+                        out.append(Piece(breaks: (before, 1), text: marker + text))
                     } else {
-                        out.append(itemOut)
+                        out.append(Piece(breaks: (2, 2), text: text))
                     }
+                case let (.code(s), _), let (.diff(s), _), let (.mermaid(s), _):
+                    var trimmed = s
+                    while trimmed.hasSuffix("\n") { trimmed.removeLast() }
+                    out.append(Piece(breaks: (2, 2), text: trimmed))
+                case let (.quote(inner), mapOpt):
+                    if inner.isEmpty { continue }
+                    if here == nil, let p,
+                       let hit = cache[QuotePlainKey(id: ObjectIdentifier(p), firstTask: task, cols: cols, lists: lists)] {
+                        task += hit.taskDelta
+                        if !hit.text.isEmpty {
+                            out.append(Piece(breaks: hit.breaks, text: hit.text))
+                        }
+                        continue
+                    }
+                    let innerMaps: [MarkdownBlockMap] = if case let .quote(im) = mapOpt { im } else { [] }
+                    stack.append(.blocks(blocks: inner, maps: innerMaps, pre: p?.inner, idx: 0, cols: cols, lists: lists, lead: here))
+                case let (.list(start, items), mapOpt):
+                    let itemMaps: [[MarkdownBlockMap]] = if case let .list(im) = mapOpt { im } else { [] }
+                    stack.append(.list(start: start, items: items, itemMaps: itemMaps, preItems: p?.items, idx: 0, cols: cols, lists: lists))
+                case let (.table(t), _):
+                    func formatRow(_ cells: [MarkdownInline]) -> String {
+                        cells.map { MarkdownInline.unpadded($0.text) }.joined(separator: "\t")
+                    }
+                    var rows = [formatRow(t.head)]
+                    rows.reserveCapacity(t.rows.count + 1)
+                    for r in t.rows { rows.append(formatRow(r)) }
+                    out.append(Piece(breaks: (1, 1), text: rows.joined(separator: "\n")))
+                case (.image, _), (.rule, _):
+                    break
                 }
-            case let .table(t):
-                let h = t.head.map { MarkdownInline.unpadded($0.text) }.joined(separator: "\t")
-                out.append(h)
-                for row in t.rows {
-                    out.append("\n")
-                    out.append(row.map { MarkdownInline.unpadded($0.text) }.joined(separator: "\t"))
+
+            case let .list(start, items, itemMaps, preItems, idx, cols, lists):
+                if idx >= items.count {
+                    stack.removeLast()
+                    continue
                 }
+                let k = idx
+                stack[topIdx] = .list(start: start, items: items, itemMaps: itemMaps, preItems: preItems, idx: k + 1, cols: cols, lists: lists)
+                let itemBlocks = items[k]
+                let imap = k < itemMaps.count ? itemMaps[k] : []
+                let ipre = preItems.flatMap { k < $0.count ? $0[k].inner : nil }
+                if imap.count == 1, case .deepTail = imap[0] {
+                    task += 1
+                    stack.append(.blocks(blocks: itemBlocks, maps: imap, pre: ipre, idx: 0, cols: cols, lists: lists + 1, lead: nil))
+                    continue
+                }
+                let checked: Bool? = task < tasks.count ? tasks[task]?.checked : nil
+                task += 1
+                let markText: String
+                let markWidth: Int
+                if let done = checked {
+                    markText = done ? "- [x] " : "- [ ] "
+                    markWidth = 2
+                } else if let n = start {
+                    let num = n + UInt64(k)
+                    markText = "\(num). "
+                    markWidth = String(num).count + 2
+                } else {
+                    markText = "- "
+                    markWidth = 2
+                }
+                let marker = String(repeating: " ", count: cols) + markText
+                let before: UInt8 = (k == 0 && lists == 0) ? 2 : 1
+                stack.append(.blocks(
+                    blocks: itemBlocks,
+                    maps: imap,
+                    pre: ipre,
+                    idx: 0,
+                    cols: cols + markWidth,
+                    lists: lists + 1,
+                    lead: (marker, before)
+                ))
             }
         }
     }
@@ -1297,7 +1546,8 @@ private func markdownMayDefineReferences(in bytes: Substring.UTF8View) -> Bool {
     return false
 }
 
-/// Thread-safe LRU cache for parsed Markdown documents with incremental cut reuse (`rune_kit::markdown::cache`).
+/// Thread-safe LRU cache for parsed Markdown documents with incremental cut reuse, precomputed
+/// 128-bit block digests (`PreBlock`), and streaming EOF deep-tail extension (`rune_kit::markdown::cache`).
 public final class MarkdownDocCache: @unchecked Sendable {
     public static var shared: MarkdownDocCache {
         runeExecutionLocal(forKey: "rune.kit.markdown", create: { MarkdownDocCache() })
@@ -1317,8 +1567,16 @@ public final class MarkdownDocCache: @unchecked Sendable {
         let mode: Mode
     }
 
+    private struct ParsedEntry: Sendable {
+        var doc: MarkdownParsedDoc
+        var meta: [MarkdownPreBlock]
+        /// When `src` ended inside an active `MarkdownBlockMap.deepTail` at EOF, holds
+        /// `(cutStart, minCols)` so streamed tokens extending that tail update only the leaf.
+        var eofDeepTail: (cutStart: Int, minCols: Int)?
+    }
+
     private let lock = NSLock()
-    private let docs: BudgetCache<Key, MarkdownParsedDoc>
+    private let docs: BudgetCache<Key, ParsedEntry>
     private struct Previous {
         let key: Key
         let mayDefineReferences: Bool
@@ -1353,26 +1611,34 @@ public final class MarkdownDocCache: @unchecked Sendable {
     public func peek(_ source: String, autolink: Bool = true, streaming: Bool? = nil) -> MarkdownParsedDoc? {
         let text = KitSourceKey(source)
         if let streaming {
-            return docs.peek(Key(text: text, mode: Mode(autolink: autolink, streaming: streaming)))
+            return docs.peek(Key(text: text, mode: Mode(autolink: autolink, streaming: streaming)))?.doc
         }
-        return docs.peek(Key(text: text, mode: Mode(autolink: autolink, streaming: false)))
-            ?? docs.peek(Key(text: text, mode: Mode(autolink: autolink, streaming: true)))
+        return docs.peek(Key(text: text, mode: Mode(autolink: autolink, streaming: false)))?.doc
+            ?? docs.peek(Key(text: text, mode: Mode(autolink: autolink, streaming: true)))?.doc
     }
 
     public func streamCached(_ source: String, autolink: Bool = true) -> MarkdownParsedDoc {
-        cached(source, autolink: autolink, streaming: true)
+        cachedWithMeta(source, autolink: autolink, streaming: true).doc
     }
 
     public func docCached(_ source: String, autolink: Bool = true) -> MarkdownParsedDoc {
-        cached(source, autolink: autolink, streaming: false)
+        cachedWithMeta(source, autolink: autolink, streaming: false).doc
     }
 
-    private func cached(_ source: String, autolink: Bool, streaming: Bool) -> MarkdownParsedDoc {
+    internal func streamCachedWithMeta(_ source: String, autolink: Bool = true) -> (doc: MarkdownParsedDoc, meta: [MarkdownPreBlock]) {
+        cachedWithMeta(source, autolink: autolink, streaming: true)
+    }
+
+    internal func docCachedWithMeta(_ source: String, autolink: Bool = true) -> (doc: MarkdownParsedDoc, meta: [MarkdownPreBlock]) {
+        cachedWithMeta(source, autolink: autolink, streaming: false)
+    }
+
+    private func cachedWithMeta(_ source: String, autolink: Bool, streaming: Bool) -> (doc: MarkdownParsedDoc, meta: [MarkdownPreBlock]) {
         let mode = Mode(autolink: autolink, streaming: streaming)
         let key = Key(text: KitSourceKey(source), mode: mode)
         lock.lock()
         defer { lock.unlock() }
-        if let hit = docs.get(key) { return hit }
+        if let hit = docs.get(key) { return (hit.doc, hit.meta) }
 
         let parse = streaming ? MarkdownTailStream.parseStreaming : MarkdownParser.parseDocument
         let grown = last[mode].flatMap { candidate in
@@ -1386,23 +1652,264 @@ public final class MarkdownDocCache: @unchecked Sendable {
         let bytes = source.utf8
         let checkAt = bytes.index(bytes.startIndex, offsetBy: checkFrom)
         let mayDefineReferences = grown?.mayDefineReferences == true || markdownMayDefineReferences(in: bytes[checkAt...])
-        let parsed: MarkdownParsedDoc
+        let entry: ParsedEntry
         if let grown, var base = docs.usedNow(grown.key) ? docs.peek(grown.key) : docs.take(grown.key),
            !mayDefineReferences,
-           Self.incrementalExtend(base: &base, baseLen: oldLength, source: source, autolink: autolink, parse: parse) {
-            parsed = base
+           Self.tryExtend(base: &base, baseLen: oldLength, source: source, autolink: autolink, streaming: streaming, parse: parse) {
+            entry = base
             extensions += 1
         } else {
-            parsed = parse(source, autolink)
+            let parsed = parse(source, autolink)
+            let meta = MarkdownMemoMeta.precomputeBlocks(parsed.blocks, maps: parsed.maps)
+            let eofDeepTail = Self.detectEofDeepTail(source: source, blocks: parsed.blocks, maps: parsed.maps)
+            entry = ParsedEntry(doc: parsed, meta: meta, eofDeepTail: eofDeepTail)
             fullParses += 1
         }
-        docs.insert(key, value: parsed, bytes: 2 * source.utf8.count + 64 * parsed.cuts.count + 128)
+        let metaBytes = entry.meta.reduce(0) { $0 + $1.heapBytes() }
+        docs.insert(key, value: entry, bytes: 2 * source.utf8.count + 64 * entry.doc.cuts.count + metaBytes + 128)
         last[mode] = Previous(key: key, mayDefineReferences: mayDefineReferences)
-        return parsed
+        return (entry.doc, entry.meta)
+    }
+
+    private static func detectEofDeepTail(
+        source: String,
+        blocks: [MarkdownDocBlock],
+        maps: [MarkdownBlockMap]
+    ) -> (cutStart: Int, minCols: Int)? {
+        guard var b = blocks.last, var m = maps.last else { return nil }
+        while true {
+            switch (b, m) {
+            case let (.list(_, items), .list(imaps)):
+                guard let nb = items.last?.last, let nm = imaps.last?.last else { return nil }
+                b = nb
+                m = nm
+            case let (.quote(inner), .quote(imaps)):
+                guard let nb = inner.last, let nm = imaps.last else { return nil }
+                b = nb
+                m = nm
+            case let (.para, .deepTail(_, spanMap)):
+                guard let firstSrc = spanMap.segments.first?.src,
+                      let lastSrc = spanMap.segments.last?.src else { return nil }
+                let bytes = Array(source.utf8)
+                guard lastSrc.upperBound <= bytes.count else { return nil }
+                for k in lastSrc.upperBound..<bytes.count {
+                    let ch = bytes[k]
+                    if ch != 0x20 && ch != 0x09 && ch != 0x0A && ch != 0x0D && ch != 0x0C {
+                        return nil
+                    }
+                }
+                var cutStart = 0
+                if firstSrc.lowerBound > 0 {
+                    var p = min(firstSrc.lowerBound, bytes.count)
+                    while p > 0 {
+                        if bytes[p - 1] == 0x0A {
+                            cutStart = p
+                            break
+                        }
+                        p -= 1
+                    }
+                }
+                var nl = cutStart
+                while nl < bytes.count && bytes[nl] != 0x0A { nl += 1 }
+                let (cols, blank, fence) = MarkdownParser.lineIndentCols(bytes[cutStart..<nl])
+                return (!blank && !fence && cols >= 4) ? (cutStart, cols) : nil
+            default:
+                return nil
+            }
+        }
+    }
+
+    /// Replaces the trailing `DeepTail` leaf iteratively (`O(1)` call stack).
+    private static func replaceEofDeepTail(
+        blocks: inout [MarkdownDocBlock],
+        maps: inout [MarkdownBlockMap],
+        newBlock: MarkdownDocBlock,
+        newMap: MarkdownBlockMap
+    ) -> Bool {
+        enum SpineStep {
+            case quote(blocks: [MarkdownDocBlock], maps: [MarkdownBlockMap])
+            case list(start: UInt64?, items: [[MarkdownDocBlock]], itemMaps: [[MarkdownBlockMap]], lastItemBlocks: [MarkdownDocBlock], lastItemMaps: [MarkdownBlockMap])
+        }
+        guard !blocks.isEmpty, blocks.count == maps.count else { return false }
+        var curBlock = blocks[blocks.count - 1]
+        var curMap = maps[maps.count - 1]
+        var spine: [SpineStep] = []
+        while true {
+            switch (curBlock, curMap) {
+            case let (.list(start, items), .list(imaps)):
+                guard let lastItem = items.last, let lastItemMap = imaps.last,
+                      !lastItem.isEmpty, lastItem.count == lastItemMap.count else { return false }
+                spine.append(.list(start: start, items: items, itemMaps: imaps, lastItemBlocks: lastItem, lastItemMaps: lastItemMap))
+                curBlock = lastItem[lastItem.count - 1]
+                curMap = lastItemMap[lastItemMap.count - 1]
+            case let (.quote(inner), .quote(imaps)):
+                guard !inner.isEmpty, inner.count == imaps.count else { return false }
+                spine.append(.quote(blocks: inner, maps: imaps))
+                curBlock = inner[inner.count - 1]
+                curMap = imaps[imaps.count - 1]
+            case (.para, .deepTail):
+                curBlock = newBlock
+                curMap = newMap
+                while let step = spine.popLast() {
+                    switch step {
+                    case var .quote(qBlocks, qMaps):
+                        qBlocks[qBlocks.count - 1] = curBlock
+                        qMaps[qMaps.count - 1] = curMap
+                        curBlock = .quote(qBlocks)
+                        curMap = .quote(qMaps)
+                    case let .list(start, itemsVal, imapsVal, lastItemBlocksVal, lastItemMapsVal):
+                        var items = itemsVal
+                        var imaps = imapsVal
+                        var lastItemBlocks = lastItemBlocksVal
+                        var lastItemMaps = lastItemMapsVal
+                        lastItemBlocks[lastItemBlocks.count - 1] = curBlock
+                        lastItemMaps[lastItemMaps.count - 1] = curMap
+                        items[items.count - 1] = lastItemBlocks
+                        imaps[imaps.count - 1] = lastItemMaps
+                        curBlock = .list(start: start, items: items)
+                        curMap = .list(imaps)
+                    }
+                }
+                blocks[blocks.count - 1] = curBlock
+                maps[maps.count - 1] = curMap
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private static func replaceEofDeepTailMeta(
+        baseMeta: [MarkdownPreBlock],
+        blocks: [MarkdownDocBlock],
+        maps: [MarkdownBlockMap]
+    ) -> [MarkdownPreBlock]? {
+        enum Spine {
+            case quote(MarkdownPreBlock)
+            case list(UInt64?, MarkdownPreBlock, MarkdownPreItem)
+        }
+        guard !blocks.isEmpty, baseMeta.count == blocks.count, maps.count == blocks.count else { return nil }
+        let last = blocks.count - 1
+        var b = blocks[last]
+        var m = maps[last]
+        var pb = baseMeta[last]
+        var spine: [Spine] = []
+        var cur: MarkdownPreBlock
+        while true {
+            switch (b, m) {
+            case let (.list(start, items), .list(imaps)):
+                guard pb.items.count == items.count,
+                      let itemPb = pb.items.last,
+                      let itemBlocks = items.last,
+                      let itemMaps = imaps.last,
+                      itemPb.inner.count == itemBlocks.count,
+                      let nb = itemBlocks.last,
+                      let nm = itemMaps.last,
+                      let npb = itemPb.inner.last else { return nil }
+                spine.append(.list(start, pb, itemPb))
+                b = nb
+                m = nm
+                pb = npb
+            case let (.quote(inner), .quote(imaps)):
+                guard pb.inner.count == inner.count,
+                      let nb = inner.last,
+                      let nm = imaps.last,
+                      let npb = pb.inner.last else { return nil }
+                spine.append(.quote(pb))
+                b = nb
+                m = nm
+                pb = npb
+            case (.para, .deepTail):
+                cur = MarkdownMemoMeta.precomputeBlock(b, map: m)
+                while let step = spine.popLast() {
+                    switch step {
+                    case .quote(let oldQ):
+                        var children = Array(oldQ.inner.dropLast())
+                        children.append(cur)
+                        cur = MarkdownMemoMeta.rebuildQuoteMeta(children)
+                    case let .list(start, oldL, oldIt):
+                        var itemChildren = Array(oldIt.inner.dropLast())
+                        itemChildren.append(cur)
+                        let newItem = MarkdownMemoMeta.rebuildItemMeta(itemChildren)
+                        var items = Array(oldL.items.dropLast())
+                        items.append(newItem)
+                        cur = MarkdownMemoMeta.rebuildListMeta(start: start, items: items)
+                    }
+                }
+                var out = Array(baseMeta.dropLast())
+                out.append(cur)
+                return out
+            default:
+                return nil
+            }
+        }
+    }
+
+    private static func extendEofDeepTail(
+        base: inout ParsedEntry,
+        baseLen: Int,
+        source: String
+    ) -> Bool {
+        guard let (cutStart, minCols) = base.eofDeepTail else { return false }
+        let bytes = Array(source.utf8)
+        guard cutStart <= baseLen, baseLen <= bytes.count else { return false }
+        var checkFrom = cutStart
+        if baseLen > 0 {
+            var p = baseLen
+            while p > 0 {
+                if bytes[p - 1] == 0x0A {
+                    checkFrom = max(p, cutStart)
+                    break
+                }
+                p -= 1
+            }
+        }
+        // Check for "]:" reference definitions inside the appended tail
+        if checkFrom + 1 < bytes.count {
+            for k in checkFrom..<(bytes.count - 1) {
+                if bytes[k] == 0x5D && bytes[k + 1] == 0x3A { return false }
+            }
+        }
+        var pos = checkFrom
+        while pos < bytes.count {
+            var nl = pos
+            while nl < bytes.count && bytes[nl] != 0x0A { nl += 1 }
+            if nl < bytes.count {
+                let (cols, _, fence) = MarkdownParser.lineIndentCols(bytes[pos..<nl])
+                if fence || cols < minCols { return false }
+                pos = nl + 1
+            } else {
+                let (cols, blank, fence) = MarkdownParser.lineIndentCols(bytes[pos..<bytes.count])
+                if !blank && (fence || cols < minCols) { return false }
+                break
+            }
+        }
+        let (nb, nm) = MarkdownParser.buildDeepTail(source: source, range: cutStart..<bytes.count)
+        guard replaceEofDeepTail(blocks: &base.doc.blocks, maps: &base.doc.maps, newBlock: nb, newMap: nm) else {
+            return false
+        }
+        base.meta = replaceEofDeepTailMeta(baseMeta: base.meta, blocks: base.doc.blocks, maps: base.doc.maps)
+            ?? MarkdownMemoMeta.precomputeBlocks(base.doc.blocks, maps: base.doc.maps)
+        base.eofDeepTail = (cutStart, minCols)
+        return true
+    }
+
+    private static func tryExtend(
+        base: inout ParsedEntry,
+        baseLen: Int,
+        source: String,
+        autolink: Bool,
+        streaming: Bool,
+        parse: (String, Bool) -> MarkdownParsedDoc
+    ) -> Bool {
+        if streaming && extendEofDeepTail(base: &base, baseLen: baseLen, source: source) {
+            return true
+        }
+        return incrementalExtend(base: &base, baseLen: baseLen, source: source, autolink: autolink, parse: parse)
     }
 
     private static func incrementalExtend(
-        base: inout MarkdownParsedDoc, baseLen: Int, source: String, autolink: Bool,
+        base: inout ParsedEntry, baseLen: Int, source: String, autolink: Bool,
         parse: (String, Bool) -> MarkdownParsedDoc
     ) -> Bool {
         // A new reference definition changes links throughout the document. Only the
@@ -1411,23 +1918,27 @@ public final class MarkdownDocCache: @unchecked Sendable {
         let oldEnd = bytes.index(bytes.startIndex, offsetBy: baseLen)
         guard let lastNewline = bytes[..<oldEnd].lastIndex(of: 0x0A) else { return false }
         let newlineOffset = bytes.distance(from: bytes.startIndex, to: lastNewline)
-        guard let cutIdx = base.cuts.lastIndex(where: { $0.at <= newlineOffset }) else { return false }
-        let cut = base.cuts[cutIdx]
-        guard cut.at > 0, cut.blocks < base.blocks.count,
+        guard let cutIdx = base.doc.cuts.lastIndex(where: { $0.at <= newlineOffset }) else { return false }
+        let cut = base.doc.cuts[cutIdx]
+        guard cut.at > 0, cut.blocks < base.doc.blocks.count,
               let tailStr = utf8Slice(source, range: cut.at..<bytes.count) else { return false }
         let tail = parse(tailStr, autolink)
+        let shiftedMaps = tail.maps.map { $0.shiftedSrc(cut.at) }
+        let tailMeta = MarkdownMemoMeta.precomputeBlocks(tail.blocks, maps: shiftedMaps)
         // Reuse the old arrays when the grown prefix was the sole owner. Array COW
         // keeps earlier snapshots and documents also drawn in this commit intact.
-        base.blocks.replaceSubrange(cut.blocks..., with: tail.blocks)
-        base.sources.replaceSubrange(cut.sources..., with: tail.sources)
-        base.tasks.replaceSubrange(cut.tasks..., with: tail.tasks.map { task in
+        base.doc.blocks.replaceSubrange(cut.blocks..., with: tail.blocks)
+        base.meta.replaceSubrange(cut.blocks..., with: tailMeta)
+        base.doc.sources.replaceSubrange(cut.sources..., with: tail.sources)
+        base.doc.tasks.replaceSubrange(cut.tasks..., with: tail.tasks.map { task in
             task.map { MarkdownTaskState(checked: $0.checked, markerOffset: $0.markerOffset + cut.at) }
         })
-        base.blockStarts.replaceSubrange(cut.blocks..., with: tail.blockStarts.map { $0 + cut.at })
-        base.maps.replaceSubrange(cut.blocks..., with: tail.maps.map { $0.shiftedSrc(cut.at) })
-        base.cuts.replaceSubrange(cutIdx..., with: tail.cuts.map {
+        base.doc.blockStarts.replaceSubrange(cut.blocks..., with: tail.blockStarts.map { $0 + cut.at })
+        base.doc.maps.replaceSubrange(cut.blocks..., with: shiftedMaps)
+        base.doc.cuts.replaceSubrange(cutIdx..., with: tail.cuts.map {
             MarkdownCut(at: $0.at + cut.at, blocks: $0.blocks + cut.blocks, sources: $0.sources + cut.sources, tasks: $0.tasks + cut.tasks)
         })
+        base.eofDeepTail = detectEofDeepTail(source: source, blocks: base.doc.blocks, maps: base.doc.maps)
         return true
     }
 }
@@ -1603,18 +2114,24 @@ public struct MarkdownTailStream: Sendable, Equatable {
         func hit(_ spanMap: MarkdownSpanMap) -> Bool {
             spanMap.segments.contains { $0.src.lowerBound < range.upperBound && range.lowerBound < $0.src.upperBound }
         }
-        switch map {
-        case let .inline(m), let .code(m):
-            return hit(m)
-        case let .list(items):
-            return items.contains { $0.contains { blockMap($0, shows: range) } }
-        case let .quote(inner):
-            return inner.contains { blockMap($0, shows: range) }
-        case let .table(head, rows):
-            return head.contains(where: hit) || rows.contains { $0.contains(where: hit) }
-        case .none:
-            return false
+        var stack: [MarkdownBlockMap] = [map]
+        while let m = stack.popLast() {
+            switch m {
+            case let .inline(sm), let .code(sm), let .deepTail(_, sm):
+                if hit(sm) { return true }
+            case let .list(items):
+                for item in items { stack.append(contentsOf: item) }
+            case let .quote(inner):
+                stack.append(contentsOf: inner)
+            case let .table(head, rows):
+                if head.contains(where: hit) || rows.contains(where: { $0.contains(where: hit) }) {
+                    return true
+                }
+            case .none:
+                break
+            }
         }
+        return false
     }
 
     static func heldTableEndByte(in source: String, parseLastBlock: () -> MarkdownDocBlock?) -> Int? {
@@ -1940,30 +2457,42 @@ public struct MarkdownTailStream: Sendable, Equatable {
             map.truncateOut(cut)
             inl.preparedBidi = MarkdownInlineBidi(inl)
         }
-        func walk(_ block: inout MarkdownDocBlock, _ map: inout MarkdownBlockMap) {
-            switch (block, map) {
+        enum WalkStep {
+            case quote([MarkdownDocBlock], [MarkdownBlockMap])
+            case list(UInt64?, [[MarkdownDocBlock]], [[MarkdownBlockMap]], [MarkdownDocBlock], [MarkdownBlockMap])
+        }
+        let last = doc.blocks.count - 1
+        guard last < doc.maps.count else { return }
+        var curBlock = doc.blocks[last]
+        var curMap = doc.maps[last]
+        var spine: [WalkStep] = []
+        var modified = false
+        while true {
+            switch (curBlock, curMap) {
             case (var .para(inl), var .inline(m)):
                 stripPad(&inl, &m)
-                block = .para(inl)
-                map = .inline(m)
+                curBlock = .para(inl)
+                curMap = .inline(m)
+                modified = true
             case (let .heading(lvl, inlVal), var .inline(m)):
                 var inl = inlVal
                 stripPad(&inl, &m)
-                block = .heading(level: lvl, inl)
-                map = .inline(m)
-            case (var .quote(inner), var .quote(im)):
-                if !inner.isEmpty && !im.isEmpty {
-                    walk(&inner[inner.count - 1], &im[im.count - 1])
-                    block = .quote(inner)
-                    map = .quote(im)
-                }
-            case (let .list(start, itemsVal), var .list(lm)):
-                var items = itemsVal
-                if let li = items.indices.last, let bi = items[li].indices.last,
-                   li < lm.count, bi < lm[li].count {
-                    walk(&items[li][bi], &lm[li][bi])
-                    block = .list(start: start, items: items)
-                    map = .list(lm)
+                curBlock = .heading(level: lvl, inl)
+                curMap = .inline(m)
+                modified = true
+            case let (.quote(inner), .quote(im)) where !inner.isEmpty && !im.isEmpty:
+                spine.append(.quote(inner, im))
+                curBlock = inner[inner.count - 1]
+                curMap = im[im.count - 1]
+                continue
+            case let (.list(start, items), .list(lm)) where !items.isEmpty && !lm.isEmpty:
+                let lastItem = items[items.count - 1]
+                let lastMap = lm[lm.count - 1]
+                if !lastItem.isEmpty && !lastMap.isEmpty {
+                    spine.append(.list(start, items, lm, lastItem, lastMap))
+                    curBlock = lastItem[lastItem.count - 1]
+                    curMap = lastMap[lastMap.count - 1]
+                    continue
                 }
             case (var .table(t), .table(var head, var rows)):
                 if let ri = t.rows.indices.last, let ci = t.rows[ri].indices.last,
@@ -1972,16 +2501,37 @@ public struct MarkdownTailStream: Sendable, Equatable {
                 } else if let hi = t.head.indices.last, hi < head.count {
                     stripPad(&t.head[hi], &head[hi])
                 }
-                block = .table(t)
-                map = .table(head: head, rows: rows)
+                curBlock = .table(t)
+                curMap = .table(head: head, rows: rows)
+                modified = true
             default:
                 break
             }
+            break
         }
-        let last = doc.blocks.count - 1
-        if last < doc.maps.count {
-            walk(&doc.blocks[last], &doc.maps[last])
+        guard modified else { return }
+        while let step = spine.popLast() {
+            switch step {
+            case var .quote(inner, im):
+                inner[inner.count - 1] = curBlock
+                im[im.count - 1] = curMap
+                curBlock = .quote(inner)
+                curMap = .quote(im)
+            case let .list(start, itemsVal, lmVal, lastItemVal, lastMapVal):
+                var items = itemsVal
+                var lm = lmVal
+                var lastItem = lastItemVal
+                var lastMap = lastMapVal
+                lastItem[lastItem.count - 1] = curBlock
+                lastMap[lastMap.count - 1] = curMap
+                items[items.count - 1] = lastItem
+                lm[lm.count - 1] = lastMap
+                curBlock = .list(start: start, items: items)
+                curMap = .list(lm)
+            }
         }
+        doc.blocks[last] = curBlock
+        doc.maps[last] = curMap
     }
 }
 
@@ -2025,6 +2575,26 @@ public enum MarkdownParser {
         }
     }
 
+    // MARK: Nesting Bounds (`crates/rune-kit/src/markdown/parser.rs`, #1122)
+
+    /// Maximum open container elements under `<body>` matching Blink's 512-element HTML parser cap:
+    /// 255 nested lists, 1 quote + 255 nested lists, or 510 non-empty block quotes on desktop.
+    public static let maxElementDepth: Int = 511
+
+    /// Maximum flattened items/blocks rendered individually inside a past-bound container before
+    /// grouping remaining lines into one selectable, searchable plain block with a count marker.
+    public static let maxFlattenedTailItems: Int = 64
+
+    /// Maximum nested flex containers on targets without stack continuation (`wasm32`/`iOS`/`Android`):
+    /// preserves all 255 nested lists (765), 1 quote + 255 lists (767), and caps pure block quotes at 385 (770).
+    public static let maxUnguardedLayoutDepth: Int = 770
+
+    #if os(Windows) || os(macOS) || os(Linux)
+    internal static let defaultUnguardedLayoutLimit: Int? = nil
+    #else
+    internal static let defaultUnguardedLayoutLimit: Int? = maxUnguardedLayoutDepth
+    #endif
+
     // MARK: Full Upstream AST Parse (`parseDocument` / `parseAST`)
 
     public static func parseAST(_ source: String, autolink: Bool = true) -> [MarkdownDocBlock] {
@@ -2032,12 +2602,107 @@ public enum MarkdownParser {
     }
 
     public static func parseDocument(_ source: String, autolink: Bool = true) -> MarkdownParsedDoc {
-        documentWithTail(source, autolink: autolink).0
+        documentWithTail(source, autolink: autolink, unguardedLayoutLimit: defaultUnguardedLayoutLimit).0
     }
 
-    fileprivate static func documentWithTail(_ source: String, autolink: Bool) -> (MarkdownParsedDoc, MarkdownParseTail) {
+    internal static func parseDocument(
+        _ source: String,
+        autolink: Bool = true,
+        unguardedLayoutLimit: Int?
+    ) -> MarkdownParsedDoc {
+        documentWithTail(source, autolink: autolink, unguardedLayoutLimit: unguardedLayoutLimit).0
+    }
+
+    /// Builds a single plain `.para` + `.deepTail` covering `source[range]`, stripping each line's
+    /// outer container indentation (`' '`, `'\t'`, `'>'`) while mapping every kept byte 1-to-1 back
+    /// to `source` so Find, highlights, selection and copy preserve all lines (`parser::build_deep_tail`).
+    internal static func buildDeepTail(source: String, range: Range<Int>) -> (MarkdownDocBlock, MarkdownBlockMap) {
+        let bytes = Array(source.utf8)
+        var pos = max(0, min(range.lowerBound, bytes.count))
+        let end = max(pos, min(range.upperBound, bytes.count))
+        var out = ""
+        out.reserveCapacity(end - pos)
+        var map = MarkdownSpanMap()
+        var lines = 0
+
+        while pos < end {
+            var nl = pos
+            while nl < end && bytes[nl] != 0x0A { nl += 1 }
+            let lineEnd = (nl > pos && bytes[nl - 1] == 0x0D) ? (nl - 1) : nl
+            var k = pos
+            while k < lineEnd {
+                switch bytes[k] {
+                case 0x20, 0x09:
+                    k += 1
+                case 0x3E: // '>'
+                    k += 1
+                    if k < lineEnd && bytes[k] == 0x20 { k += 1 }
+                default:
+                    break
+                }
+                if k < lineEnd && bytes[k] != 0x20 && bytes[k] != 0x09 && bytes[k] != 0x3E {
+                    break
+                }
+            }
+            if k < lineEnd {
+                lines += 1
+                if !out.isEmpty {
+                    let nlOut = out.utf8.count
+                    out.append("\n")
+                    if pos > range.lowerBound && bytes[pos - 1] == 0x0A {
+                        map.push(src: (pos - 1)..<pos, out: nlOut..<(nlOut + 1))
+                    }
+                }
+                let o0 = out.utf8.count
+                out.append(String(decoding: bytes[k..<lineEnd], as: UTF8.self))
+                map.push(src: k..<lineEnd, out: o0..<out.utf8.count)
+            }
+            pos = nl < end ? (nl + 1) : end
+        }
+        var inl = MarkdownInline(text: out)
+        inl.preparedBidi = MarkdownInlineBidi(inl)
+        return (.para(inl), .deepTail(lines: max(1, lines), map: map))
+    }
+
+    internal static func lineIndentCols(_ line: ArraySlice<UInt8>) -> (cols: Int, blank: Bool, fence: Bool) {
+        var i = line.startIndex
+        let end = line.endIndex
+        var cols = 0
+        while i < end {
+            switch line[i] {
+            case 0x20:
+                cols += 1
+                i += 1
+            case 0x09:
+                cols += 4
+                i += 1
+            case 0x3E: // '>'
+                cols += 2
+                i += 1
+                if i < end && line[i] == 0x20 { i += 1 }
+            case 0x0D:
+                i += 1
+            default:
+                let rest = line[i..<end]
+                let fence = rest.starts(with: [0x60, 0x60, 0x60]) || rest.starts(with: [0x7E, 0x7E, 0x7E])
+                return (cols, false, fence)
+            }
+        }
+        return (cols, true, false)
+    }
+
+    fileprivate static func documentWithTail(
+        _ source: String,
+        autolink: Bool,
+        unguardedLayoutLimit: Int? = defaultUnguardedLayoutLimit
+    ) -> (MarkdownParsedDoc, MarkdownParseTail) {
         let lines = splitLineSlices(source)
-        var parser = DocumentParser(source: source, baseOffset: 0, autolink: autolink)
+        var parser = DocumentParser(
+            source: source,
+            baseOffset: 0,
+            autolink: autolink,
+            unguardedLayoutLimit: unguardedLayoutLimit
+        )
         let first = parser.parseRoot(lines: lines)
         // A later definition can resolve an earlier link or lift an earlier image into a block.
         guard let firstBlock = first.blockStarts.first, let lastDefinition = parser.lastNewDefinition,
@@ -2078,7 +2743,7 @@ public enum MarkdownParser {
 
     private static func collectLinkDefinitions(in source: String) -> [KitSourceKey: LinkDefinition] {
         guard markdownMayDefineReferences(in: source.utf8[...]) else { return [:] }
-        var parser = DocumentParser(source: source, baseOffset: 0, autolink: false)
+        var parser = DocumentParser(source: source, baseOffset: 0, autolink: false, unguardedLayoutLimit: defaultUnguardedLayoutLimit)
         _ = parser.parseRoot(lines: splitLineSlices(source))
         return parser.definitions
     }
@@ -2133,19 +2798,50 @@ public enum MarkdownParser {
         var lastNewDefinition: Int?
         var mayDefineReferences: Bool?
         let autolink: Bool
+        let unguardedLayoutLimit: Int?
         var tail: MarkdownParseTail = .none
+
+        private struct PendingListItem {
+            var slices: [LineSlice]
+            var task: MarkdownTaskState?
+            var rawStart: Int
+        }
+
+        private enum ParseFrame {
+            case root(lines: [LineSlice], index: Int, blocks: [MarkdownDocBlock], maps: [MarkdownBlockMap], starts: [Int])
+            case quote(lines: [LineSlice], index: Int, blockStart: Int, blocks: [MarkdownDocBlock], maps: [MarkdownBlockMap])
+            case mergedQuote(lines: [LineSlice], index: Int, rangeEnd: Int)
+            case list(blockStart: Int, start: UInt64?, pendingItems: [PendingListItem], nextItem: Int, items: [[MarkdownDocBlock]], itemMaps: [[MarkdownBlockMap]])
+            case siblingList(pendingItems: [PendingListItem], nextItem: Int, rangeEnd: Int)
+            case item(lines: [LineSlice], index: Int, blocks: [MarkdownDocBlock], maps: [MarkdownBlockMap])
+            case tailLines(lines: [LineSlice], index: Int)
+
+            var elementCost: Int {
+                switch self {
+                case .quote, .list, .item: return 1
+                case .root, .mergedQuote, .siblingList, .tailLines: return 0
+                }
+            }
+
+            var layoutCost: Int {
+                switch self {
+                case .quote, .item: return 2
+                case .list: return 1
+                case .root, .mergedQuote, .siblingList, .tailLines: return 0
+                }
+            }
+        }
 
         mutating func parseRoot(lines: [LineSlice]) -> MarkdownParsedDoc {
             var doc = MarkdownParsedDoc()
-            parseBlockSequence(
-                lines: lines,
+            parseIterative(
+                rootLines: lines,
                 into: &doc.blocks,
                 maps: &doc.maps,
                 sources: &doc.sources,
                 tasks: &doc.tasks,
                 blockStarts: &doc.blockStarts,
-                cuts: &doc.cuts,
-                trackRootCuts: true
+                cuts: &doc.cuts
             )
             // Stream-tolerant pending table at end of root document
             if let last = doc.blocks.last, case .para = last,
@@ -2183,22 +2879,348 @@ public enum MarkdownParser {
             }
         }
 
-        private mutating func parseBlockSequence(
-            lines: [LineSlice],
-            into blocks: inout [MarkdownDocBlock],
-            maps: inout [MarkdownBlockMap],
+        /// Iterative CommonMark + GFM parser enforcing the 511-element nesting bound, optional
+        /// 770 flex-container cap on unguarded platforms, and lossless 64-item deep-tail grouping
+        /// (`crates/rune-kit/src/markdown/parser.rs`, #1122).
+        private mutating func parseIterative(
+            rootLines: [LineSlice],
+            into outBlocks: inout [MarkdownDocBlock],
+            maps outMaps: inout [MarkdownBlockMap],
             sources: inout [MarkdownCodeSource],
             tasks: inout [MarkdownTaskState?],
-            blockStarts: inout [Int],
-            cuts: inout [MarkdownCut],
-            trackRootCuts: Bool
+            blockStarts outStarts: inout [Int],
+            cuts: inout [MarkdownCut]
         ) {
-            var i = 0
-            while i < lines.count {
+            let sourceBytes = Array(source.utf8)
+            var frames: [ParseFrame] = [.root(lines: rootLines, index: 0, blocks: [], maps: [], starts: [])]
+            var elementDepth = 0
+            var layoutCost = 0
+            var pastBoundItems = 0
+
+            func layoutFits(_ add: Int) -> Bool {
+                guard let limit = unguardedLayoutLimit else { return true }
+                return layoutCost + add <= limit
+            }
+
+            func pushFrame(_ frame: ParseFrame) {
+                elementDepth += frame.elementCost
+                layoutCost += frame.layoutCost
+                frames.append(frame)
+            }
+
+            func popFrame() -> ParseFrame {
+                let frame = frames.removeLast()
+                elementDepth -= frame.elementCost
+                layoutCost -= frame.layoutCost
+                return frame
+            }
+
+            func firstMergedQuoteIndex() -> Int? {
+                for idx in frames.indices {
+                    if case .mergedQuote = frames[idx] { return idx }
+                }
+                return nil
+            }
+
+            func firstSiblingListIndex() -> Int? {
+                for idx in frames.indices {
+                    if case .siblingList = frames[idx] { return idx }
+                }
+                return nil
+            }
+
+            func nearestRealContainerIndex() -> Int {
+                for idx in stride(from: frames.count - 1, through: 0, by: -1) {
+                    switch frames[idx] {
+                    case .root, .quote, .list, .item: return idx
+                    case .mergedQuote, .siblingList, .tailLines: continue
+                    }
+                }
+                return 0
+            }
+
+            func topRealIsListOrItem() -> Bool {
+                let idx = nearestRealContainerIndex()
+                switch frames[idx] {
+                case .list, .item: return true
+                default: return false
+                }
+            }
+
+            func appendToNearestRealContainer(_ block: MarkdownDocBlock, map: MarkdownBlockMap, blockStart: Int) {
+                switch block {
+                case let .para(inline), let .heading(_, inline):
+                    if inline.text.isEmpty { return }
+                default:
+                    break
+                }
+                let idx = nearestRealContainerIndex()
+                switch frames[idx] {
+                case .root(let lines, let cursor, var blocks, var maps, var starts):
+                    blocks.append(block)
+                    maps.append(map)
+                    starts.append(blockStart)
+                    frames[idx] = .root(lines: lines, index: cursor, blocks: blocks, maps: maps, starts: starts)
+                case .quote(let lines, let cursor, let bs, var blocks, var maps):
+                    blocks.append(block)
+                    maps.append(map)
+                    frames[idx] = .quote(lines: lines, index: cursor, blockStart: bs, blocks: blocks, maps: maps)
+                case .item(let lines, let cursor, var blocks, var maps):
+                    blocks.append(block)
+                    maps.append(map)
+                    frames[idx] = .item(lines: lines, index: cursor, blocks: blocks, maps: maps)
+                case .list(let bs, let start, let pending, let nextIt, var items, var itemMaps):
+                    if !items.isEmpty {
+                        items[items.count - 1].append(block)
+                        itemMaps[itemMaps.count - 1].append(map)
+                    } else {
+                        tasks.append(nil)
+                        items.append([block])
+                        itemMaps.append([map])
+                    }
+                    frames[idx] = .list(blockStart: bs, start: start, pendingItems: pending, nextItem: nextIt, items: items, itemMaps: itemMaps)
+                case .mergedQuote, .siblingList, .tailLines:
+                    preconditionFailure("nearestRealContainerIndex returned non-real frame")
+                }
+            }
+
+            func appendCompletedItem(blocks: [MarkdownDocBlock], maps: [MarkdownBlockMap]) {
+                for idx in stride(from: frames.count - 1, through: 0, by: -1) {
+                    if case .list(let bs, let start, let pending, let nextIt, var items, var itemMaps) = frames[idx] {
+                        items.append(blocks)
+                        itemMaps.append(maps)
+                        frames[idx] = .list(blockStart: bs, start: start, pendingItems: pending, nextItem: nextIt, items: items, itemMaps: itemMaps)
+                        return
+                    }
+                }
+            }
+
+            func emitDeepTail(range: Range<Int>) {
+                guard range.lowerBound < range.upperBound else { return }
+                let (block, bmap) = MarkdownParser.buildDeepTail(source: source, range: range)
+                let idx = nearestRealContainerIndex()
+                if case .list(let bs, let start, let pending, let nextIt, var items, var itemMaps) = frames[idx] {
+                    tasks.append(nil)
+                    items.append([block])
+                    itemMaps.append([bmap])
+                    frames[idx] = .list(blockStart: bs, start: start, pendingItems: pending, nextItem: nextIt, items: items, itemMaps: itemMaps)
+                } else {
+                    appendToNearestRealContainer(block, map: bmap, blockStart: range.lowerBound)
+                }
+            }
+
+            func deepTailCutStart(at byteOffset: Int) -> Int {
+                let clamped = max(0, min(byteOffset, sourceBytes.count))
+                var lineStart = 0
+                if clamped > 0 {
+                    var p = clamped
+                    while p > 0 {
+                        if sourceBytes[p - 1] == 0x0A {
+                            lineStart = p
+                            break
+                        }
+                        p -= 1
+                    }
+                }
+                // Only rewind to line start if everything between lineStart and clamped is container indentation.
+                var k = lineStart
+                while k < clamped {
+                    let ch = sourceBytes[k]
+                    if ch == 0x20 || ch == 0x09 || ch == 0x3E {
+                        k += 1
+                    } else {
+                        return clamped
+                    }
+                }
+                return lineStart
+            }
+
+            func unwindAbove(_ targetIdx: Int) {
+                while frames.count > targetIdx + 1 {
+                    let popped = popFrame()
+                    switch popped {
+                    case let .quote(_, _, bs, blocks, maps):
+                        appendToNearestRealContainer(.quote(blocks), map: .quote(maps), blockStart: bs)
+                    case let .list(bs, start, _, _, items, itemMaps):
+                        if !items.isEmpty {
+                            appendToNearestRealContainer(.list(start: start, items: items), map: .list(itemMaps), blockStart: bs)
+                        }
+                    case let .item(_, _, blocks, maps):
+                        appendCompletedItem(blocks: blocks, maps: maps)
+                    case .mergedQuote, .siblingList, .tailLines, .root:
+                        break
+                    }
+                }
+            }
+
+            func isInFreshItem() -> Bool {
+                if case let .item(_, _, blocks, _) = frames.last {
+                    return blocks.isEmpty
+                }
+                return false
+            }
+
+            func triggerDeepTailIfMergedQuoteExceeded(blockStartByte: Int) -> Bool {
+                guard !isInFreshItem(), let mqIdx = firstMergedQuoteIndex() else { return false }
+                pastBoundItems += 1
+                guard pastBoundItems > MarkdownParser.maxFlattenedTailItems else { return false }
+                let ce: Int = if case let .mergedQuote(_, _, rangeEnd) = frames[mqIdx] { rangeEnd } else { sourceBytes.count }
+                let cs = deepTailCutStart(at: blockStartByte)
+                unwindAbove(mqIdx)
+                _ = popFrame()
+                pastBoundItems = 0
+                tail = .none
+                emitDeepTail(range: cs..<ce)
+                return true
+            }
+
+            func advanceLineCursor(to newIndex: Int) {
+                let topIdx = frames.count - 1
+                switch frames[topIdx] {
+                case let .root(lines, _, blocks, maps, starts):
+                    frames[topIdx] = .root(lines: lines, index: newIndex, blocks: blocks, maps: maps, starts: starts)
+                case let .quote(lines, _, bs, blocks, maps):
+                    frames[topIdx] = .quote(lines: lines, index: newIndex, blockStart: bs, blocks: blocks, maps: maps)
+                case let .mergedQuote(lines, _, rangeEnd):
+                    frames[topIdx] = .mergedQuote(lines: lines, index: newIndex, rangeEnd: rangeEnd)
+                case let .item(lines, _, blocks, maps):
+                    frames[topIdx] = .item(lines: lines, index: newIndex, blocks: blocks, maps: maps)
+                case let .tailLines(lines, _):
+                    frames[topIdx] = .tailLines(lines: lines, index: newIndex)
+                case .list, .siblingList:
+                    break
+                }
+            }
+
+            while !frames.isEmpty {
+                let topIdx = frames.count - 1
+                switch frames[topIdx] {
+                case let .list(bs, start, pendingItems, nextItem, items, itemMaps):
+                    if nextItem >= pendingItems.count {
+                        _ = popFrame()
+                        appendToNearestRealContainer(.list(start: start, items: items), map: .list(itemMaps), blockStart: bs)
+                        continue
+                    }
+                    let next = pendingItems[nextItem]
+                    frames[topIdx] = .list(blockStart: bs, start: start, pendingItems: pendingItems, nextItem: nextItem + 1, items: items, itemMaps: itemMaps)
+
+                    if firstMergedQuoteIndex() != nil || firstSiblingListIndex() != nil {
+                        pastBoundItems += 1
+                        if pastBoundItems > MarkdownParser.maxFlattenedTailItems {
+                            let cs = deepTailCutStart(at: next.rawStart)
+                            if let mqIdx = firstMergedQuoteIndex() {
+                                let ce: Int = if case let .mergedQuote(_, _, rangeEnd) = frames[mqIdx] { rangeEnd } else { sourceBytes.count }
+                                unwindAbove(mqIdx)
+                                _ = popFrame()
+                                pastBoundItems = 0
+                                tail = .none
+                                emitDeepTail(range: cs..<ce)
+                            } else if let slIdx = firstSiblingListIndex() {
+                                let ce: Int = if case let .siblingList(_, _, rangeEnd) = frames[slIdx] { rangeEnd } else { sourceBytes.count }
+                                unwindAbove(slIdx)
+                                _ = popFrame()
+                                pastBoundItems = 0
+                                tail = .none
+                                emitDeepTail(range: cs..<ce)
+                            }
+                            continue
+                        }
+                    }
+
+                    if let startByte = next.slices.first?.contentRange.lowerBound {
+                        tail = .inline(startByte, .paragraph)
+                    }
+                    tasks.append(next.task)
+                    pushFrame(.item(lines: next.slices, index: 0, blocks: [], maps: []))
+                    continue
+
+                case let .siblingList(pendingItems, nextItem, rangeEnd):
+                    if nextItem >= pendingItems.count {
+                        _ = popFrame()
+                        if firstSiblingListIndex() == nil && firstMergedQuoteIndex() == nil {
+                            pastBoundItems = 0
+                        }
+                        continue
+                    }
+                    let next = pendingItems[nextItem]
+                    frames[topIdx] = .siblingList(pendingItems: pendingItems, nextItem: nextItem + 1, rangeEnd: rangeEnd)
+
+                    pastBoundItems += 1
+                    if pastBoundItems > MarkdownParser.maxFlattenedTailItems {
+                        let cs = deepTailCutStart(at: next.rawStart)
+                        if let mqIdx = firstMergedQuoteIndex() {
+                            let ce: Int = if case let .mergedQuote(_, _, qEnd) = frames[mqIdx] { qEnd } else { sourceBytes.count }
+                            unwindAbove(mqIdx)
+                            _ = popFrame()
+                            pastBoundItems = 0
+                            tail = .none
+                            emitDeepTail(range: cs..<ce)
+                        } else if let slIdx = firstSiblingListIndex() {
+                            let ce: Int = if case let .siblingList(_, _, sEnd) = frames[slIdx] { sEnd } else { sourceBytes.count }
+                            unwindAbove(slIdx)
+                            _ = popFrame()
+                            pastBoundItems = 0
+                            tail = .none
+                            emitDeepTail(range: cs..<ce)
+                        }
+                        continue
+                    }
+
+                    if let startByte = next.slices.first?.contentRange.lowerBound {
+                        tail = .inline(startByte, .paragraph)
+                    }
+                    tasks.append(next.task)
+                    pushFrame(.item(lines: next.slices, index: 0, blocks: [], maps: []))
+                    continue
+
+                case .root, .quote, .mergedQuote, .item, .tailLines:
+                    break
+                }
+
+                let lines: [LineSlice]
+                let i: Int
+                let isRoot: Bool
+                let rootBlockCount: Int
+                switch frames[topIdx] {
+                case let .root(l, idx, blocks, _, _):
+                    lines = l; i = idx; isRoot = true; rootBlockCount = blocks.count
+                case let .quote(l, idx, _, _, _):
+                    lines = l; i = idx; isRoot = false; rootBlockCount = 0
+                case let .mergedQuote(l, idx, _):
+                    lines = l; i = idx; isRoot = false; rootBlockCount = 0
+                case let .item(l, idx, _, _):
+                    lines = l; i = idx; isRoot = false; rootBlockCount = 0
+                case let .tailLines(l, idx):
+                    lines = l; i = idx; isRoot = false; rootBlockCount = 0
+                case .list, .siblingList:
+                    continue
+                }
+
+                if i >= lines.count {
+                    let finished = popFrame()
+                    switch finished {
+                    case let .root(_, _, blocks, maps, starts):
+                        outBlocks = blocks
+                        outMaps = maps
+                        outStarts = starts
+                    case let .quote(_, _, bs, blocks, maps):
+                        appendToNearestRealContainer(.quote(blocks), map: .quote(maps), blockStart: bs)
+                    case .mergedQuote:
+                        if firstMergedQuoteIndex() == nil && firstSiblingListIndex() == nil {
+                            pastBoundItems = 0
+                        }
+                    case let .item(_, _, blocks, maps):
+                        appendCompletedItem(blocks: blocks, maps: maps)
+                    case .tailLines, .list, .siblingList:
+                        break
+                    }
+                    continue
+                }
+
                 let raw = utf8Slice(source, range: lines[i].contentRange) ?? ""
                 let trimmed = raw.trimmingCharacters(in: .whitespaces)
                 if trimmed.isEmpty {
-                    i += 1
+                    advanceLineCursor(to: i + 1)
                     continue
                 }
 
@@ -2211,15 +3233,16 @@ public enum MarkdownParser {
                                                           title: reference.rawTitle.map(unescapeMarkdown) ?? "")
                         lastNewDefinition = lines[i].contentRange.lowerBound
                     }
-                    i += reference.lineCount
+                    advanceLineCursor(to: i + reference.lineCount)
                     continue
                 }
 
                 let blockStartByte = lines[i].contentRange.lowerBound
-                if trackRootCuts {
+                if isRoot {
+                    pastBoundItems = 0
                     cuts.append(MarkdownCut(
                         at: blockStartByte,
-                        blocks: blocks.count,
+                        blocks: rootBlockCount,
                         sources: sources.count,
                         tasks: tasks.count
                     ))
@@ -2228,18 +3251,21 @@ public enum MarkdownParser {
                 if let end = MarkdownHTML.blockStart(in: raw) {
                     tail = .code
                     var line = raw
+                    var nextI = i
                     while true {
-                        i += 1
+                        nextI += 1
                         if case let .marker(marker) = end, line.contains(marker) { break }
-                        guard i < lines.count else { break }
-                        line = utf8Slice(source, range: lines[i].contentRange) ?? ""
+                        guard nextI < lines.count else { break }
+                        line = utf8Slice(source, range: lines[nextI].contentRange) ?? ""
                         if case .blankLine = end, line.utf8.allSatisfy({ $0 == 32 || $0 == 9 }) { break }
                     }
+                    advanceLineCursor(to: nextI)
                     continue
                 }
 
                 // 1. Fenced code block (``` or ~~~)
                 if let fence = parseFenceHeader(raw) {
+                    if triggerDeepTailIfMergedQuoteExceeded(blockStartByte: blockStartByte) { continue }
                     tail = .code
                     var codeRanges: [Range<Int>] = []
                     var j = i + 1
@@ -2258,30 +3284,31 @@ public enum MarkdownParser {
                     let (codeText, codeMap) = buildCodeTextAndMap(source: source, baseOffset: baseOffset, lineRanges: codeRanges, closed: closed, hasTrailingNewline: hasTrailing)
                     let langLower = fence.lang?.lowercased()
                     if langLower == "diff" || langLower == "patch" {
-                        appendBlock(.diff(codeText), map: .code(codeMap), start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
+                        appendToNearestRealContainer(.diff(codeText), map: .code(codeMap), blockStart: blockStartByte)
                     } else if langLower == "mermaid" {
                         let coloured = (closed || hasTrailing) ? codeText.utf8.count : lastNewlineCut(codeText)
                         sources.append(MarkdownCodeSource(language: fence.lang, open: !closed, colouredBytes: coloured, length: codeText.utf8.count))
-                        appendBlock(.mermaid(codeText), map: .code(codeMap), start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
+                        appendToNearestRealContainer(.mermaid(codeText), map: .code(codeMap), blockStart: blockStartByte)
                     } else {
                         let coloured = (closed || hasTrailing) ? codeText.utf8.count : lastNewlineCut(codeText)
                         sources.append(MarkdownCodeSource(language: fence.lang, open: !closed, colouredBytes: coloured, length: codeText.utf8.count))
-                        appendBlock(.code(codeText), map: .code(codeMap), start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
+                        appendToNearestRealContainer(.code(codeText), map: .code(codeMap), blockStart: blockStartByte)
                     }
-                    i = j
+                    advanceLineCursor(to: j)
                     continue
                 }
 
                 // 2. Thematic break (---, ***, ___) — must precede heading/list check
                 if isHorizontalRule(trimmed) {
                     tail = .none
-                    appendBlock(.rule, map: .none, start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
-                    i += 1
+                    appendToNearestRealContainer(.rule, map: .none, blockStart: blockStartByte)
+                    advanceLineCursor(to: i + 1)
                     continue
                 }
 
                 // 3. ATX Heading (# ... ######)
                 if let (level, headingContentRange) = parseATXHeading(source: source, lineRange: lines[i].contentRange) {
+                    if triggerDeepTailIfMergedQuoteExceeded(blockStartByte: blockStartByte) { continue }
                     tail = .inline(blockStartByte, .line)
                     let headingStr = utf8Slice(source, range: headingContentRange) ?? ""
                     let (inl, spanMap, _) = parseInline(
@@ -2291,20 +3318,20 @@ public enum MarkdownParser {
                         definitions: definitions,
                         trimTrailingCodePad: true
                     )
-                    appendBlock(.heading(level: level, inl), map: .inline(spanMap), start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
-                    i += 1
+                    appendToNearestRealContainer(.heading(level: level, inl), map: .inline(spanMap), blockStart: blockStartByte)
+                    advanceLineCursor(to: i + 1)
                     continue
                 }
 
                 // 4. Indented code block (4 spaces or leading tab)
                 if isIndentedCodeLine(raw) {
+                    if triggerDeepTailIfMergedQuoteExceeded(blockStartByte: blockStartByte) { continue }
                     tail = .code
                     var ranges: [Range<Int>] = []
                     var j = i
                     while j < lines.count {
                         let rStr = utf8Slice(source, range: lines[j].contentRange) ?? ""
                         if rStr.trimmingCharacters(in: .whitespaces).isEmpty {
-                            // Include blank lines only if another indented line follows
                             var look = j + 1
                             while look < lines.count && (utf8Slice(source, range: lines[look].contentRange) ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
                                 look += 1
@@ -2326,8 +3353,8 @@ public enum MarkdownParser {
                     }
                     let (codeText, codeMap) = buildCodeTextAndMap(source: source, baseOffset: baseOffset, lineRanges: ranges, closed: true, hasTrailingNewline: false)
                     sources.append(MarkdownCodeSource(language: nil, open: false, colouredBytes: codeText.utf8.count, length: codeText.utf8.count))
-                    appendBlock(.code(codeText), map: .code(codeMap), start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
-                    i = j
+                    appendToNearestRealContainer(.code(codeText), map: .code(codeMap), blockStart: blockStartByte)
+                    advanceLineCursor(to: j)
                     continue
                 }
 
@@ -2358,13 +3385,13 @@ public enum MarkdownParser {
                             break
                         }
                     }
-                    var qBlocks: [MarkdownDocBlock] = []
-                    var qMaps: [MarkdownBlockMap] = []
-                    var qStarts: [Int] = []
-                    var qCuts: [MarkdownCut] = []
-                    parseBlockSequence(lines: innerLines, into: &qBlocks, maps: &qMaps, sources: &sources, tasks: &tasks, blockStarts: &qStarts, cuts: &qCuts, trackRootCuts: false)
-                    appendBlock(.quote(qBlocks), map: .quote(qMaps), start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
-                    i = j
+                    let quoteRangeEnd = (j > i ? lines[j - 1].lineEnd : lines[i].lineEnd)
+                    advanceLineCursor(to: j)
+                    if elementDepth + 2 <= MarkdownParser.maxElementDepth && layoutFits(2) {
+                        pushFrame(.quote(lines: innerLines, index: 0, blockStart: blockStartByte, blocks: [], maps: []))
+                    } else {
+                        pushFrame(.mergedQuote(lines: innerLines, index: 0, rangeEnd: quoteRangeEnd))
+                    }
                     continue
                 }
 
@@ -2372,15 +3399,13 @@ public enum MarkdownParser {
                 if let firstMarker = parseListMarker(raw) {
                     let isOrdered = firstMarker.ordered
                     let startNum = firstMarker.start
-                    var itemSlices: [[LineSlice]] = []
+                    var pendingItems: [PendingListItem] = []
                     var html = ContainerHTMLTail()
-                    var itemTasks: [MarkdownTaskState?] = []
                     var j = i
 
                     while j < lines.count {
                         let lStr = utf8Slice(source, range: lines[j].contentRange) ?? ""
                         if lStr.trimmingCharacters(in: .whitespaces).isEmpty {
-                            // Consume blank lines between items only if the next non-blank line continues the same list
                             var peek = j + 1
                             while peek < lines.count && (utf8Slice(source, range: lines[peek].contentRange) ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
                                 peek += 1
@@ -2393,7 +3418,7 @@ public enum MarkdownParser {
                                 }
                                 if indentWidth(peekStr) >= firstMarker.contentIndent {
                                     html.append("")
-                                    itemSlices[itemSlices.count - 1].append(lines[j])
+                                    pendingItems[pendingItems.count - 1].slices.append(lines[j])
                                     j += 1
                                     continue
                                 }
@@ -2402,7 +3427,6 @@ public enum MarkdownParser {
                         }
 
                         if let m = parseListMarker(lStr), m.ordered == isOrdered, m.marker == firstMarker.marker, m.indent < firstMarker.contentIndent {
-                            // New item in this list
                             var cStart = lines[j].contentRange.lowerBound + m.contentOffsetBytes
                             var taskState: MarkdownTaskState?
                             if let rest = utf8Slice(source, range: cStart..<lines[j].contentRange.upperBound),
@@ -2410,24 +3434,22 @@ public enum MarkdownParser {
                                 taskState = MarkdownTaskState(checked: task.checked, markerOffset: baseOffset + cStart)
                                 cStart += task.dropBytes
                             }
-                            itemTasks.append(taskState)
                             let slice = LineSlice(contentRange: min(cStart, lines[j].contentRange.upperBound)..<lines[j].contentRange.upperBound, lineEnd: lines[j].lineEnd)
                             html = ContainerHTMLTail()
                             html.append(utf8Slice(source, range: slice.contentRange) ?? "")
-                            itemSlices.append([slice])
+                            pendingItems.append(PendingListItem(slices: [slice], task: taskState, rawStart: lines[j].contentRange.lowerBound))
                             j += 1
-                        } else if !itemSlices.isEmpty {
+                        } else if !pendingItems.isEmpty {
                             let ind = indentWidth(lStr)
                             if ind >= firstMarker.contentIndent {
                                 let stripped = stripLeadingIndent(lStr, targetCols: firstMarker.contentIndent)
                                 let cStart = lines[j].contentRange.lowerBound + stripped
                                 let slice = LineSlice(contentRange: min(cStart, lines[j].contentRange.upperBound)..<lines[j].contentRange.upperBound, lineEnd: lines[j].lineEnd)
                                 html.append(utf8Slice(source, range: slice.contentRange) ?? "")
-                                itemSlices[itemSlices.count - 1].append(slice)
+                                pendingItems[pendingItems.count - 1].slices.append(slice)
                                 j += 1
                             } else if !html.followsHTML && MarkdownHTML.blockStart(in: lStr, interruptsParagraph: true) == nil && parseListMarker(lStr) == nil && !isHorizontalRule(lStr.trimmingCharacters(in: .whitespaces)) && parseATXHeading(source: source, lineRange: lines[j].contentRange) == nil && !isFenceHeaderBool(lStr) && !lStr.trimmingCharacters(in: .whitespaces).hasPrefix(">") {
-                                // Lazy paragraph continuation inside list item
-                                itemSlices[itemSlices.count - 1].append(lines[j])
+                                pendingItems[pendingItems.count - 1].slices.append(lines[j])
                                 j += 1
                             } else {
                                 break
@@ -2437,21 +3459,29 @@ public enum MarkdownParser {
                         }
                     }
 
-                    var renderedItems: [[MarkdownDocBlock]] = []
-                    var itemMaps: [[MarkdownBlockMap]] = []
-                    for (idx, subLines) in itemSlices.enumerated() {
-                        if let start = subLines.first?.contentRange.lowerBound { tail = .inline(start, .paragraph) }
-                        tasks.append(itemTasks[idx])
-                        var ib: [MarkdownDocBlock] = []
-                        var im: [MarkdownBlockMap] = []
-                        var isrcStarts: [Int] = []
-                        var icuts: [MarkdownCut] = []
-                        parseBlockSequence(lines: subLines, into: &ib, maps: &im, sources: &sources, tasks: &tasks, blockStarts: &isrcStarts, cuts: &icuts, trackRootCuts: false)
-                        renderedItems.append(ib)
-                        itemMaps.append(im)
+                    let listRangeEnd = (j > i ? lines[j - 1].lineEnd : lines[i].lineEnd)
+                    advanceLineCursor(to: j)
+
+                    if (elementDepth + 2 <= MarkdownParser.maxElementDepth && layoutFits(3)) || !topRealIsListOrItem() {
+                        pushFrame(.list(
+                            blockStart: blockStartByte,
+                            start: isOrdered ? startNum : nil,
+                            pendingItems: pendingItems,
+                            nextItem: 0,
+                            items: [],
+                            itemMaps: []
+                        ))
+                    } else {
+                        // Flatten deeper list items as siblings in the enclosing list (`ListSlot::SiblingItems`).
+                        if case let .item(itemLines, itemNext, itemBlocks, itemMaps) = frames.last {
+                            _ = popFrame()
+                            appendCompletedItem(blocks: itemBlocks, maps: itemMaps)
+                            if itemNext < itemLines.count {
+                                pushFrame(.tailLines(lines: itemLines, index: itemNext))
+                            }
+                        }
+                        pushFrame(.siblingList(pendingItems: pendingItems, nextItem: 0, rangeEnd: listRangeEnd))
                     }
-                    appendBlock(.list(start: isOrdered ? startNum : nil, items: renderedItems), map: .list(itemMaps), start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
-                    i = j
                     continue
                 }
 
@@ -2462,6 +3492,7 @@ public enum MarkdownParser {
                    raw.contains("|") {
                     let headCells = splitTableRow(raw, baseOffset: baseOffset + lines[i].contentRange.lowerBound)
                     if headCells.count == aligns.count || (!headCells.isEmpty && raw.trimmingCharacters(in: .whitespaces).hasPrefix("|")) {
+                        if triggerDeepTailIfMergedQuoteExceeded(blockStartByte: blockStartByte) { continue }
                         tail = .none
                         var headInlines: [MarkdownInline] = []
                         var headMaps: [MarkdownSpanMap] = []
@@ -2496,8 +3527,8 @@ public enum MarkdownParser {
                             j += 1
                         }
                         let table = MarkdownTableAST(align: aligns, head: headInlines, rows: bodyRows, open: lastOpen)
-                        appendBlock(.table(table), map: .table(head: headMaps, rows: rowMaps), start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
-                        i = j
+                        appendToNearestRealContainer(.table(table), map: .table(head: headMaps, rows: rowMaps), blockStart: blockStartByte)
+                        advanceLineCursor(to: j)
                         continue
                     }
                 }
@@ -2506,18 +3537,20 @@ public enum MarkdownParser {
                 if i + 1 < lines.count {
                     let nextTrim = (utf8Slice(source, range: lines[i + 1].contentRange) ?? "").trimmingCharacters(in: .whitespaces)
                     if !nextTrim.isEmpty && (nextTrim.allSatisfy { $0 == "=" } || nextTrim.allSatisfy { $0 == "-" }) {
+                        if triggerDeepTailIfMergedQuoteExceeded(blockStartByte: blockStartByte) { continue }
                         tail = .inline(blockStartByte, .line)
                         let lvl = nextTrim.first == "=" ? 1 : 2
                         let pStr = raw.trimmingCharacters(in: .whitespaces)
                         let leadOff = raw.utf8.count - String(raw.drop(while: \.isWhitespace)).utf8.count
                         let (inl, sm, _) = parseInline(pStr, baseOffset: baseOffset + lines[i].contentRange.lowerBound + leadOff, autolink: autolink, definitions: definitions, trimTrailingCodePad: true)
-                        appendBlock(.heading(level: lvl, inl), map: .inline(sm), start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
-                        i += 2
+                        appendToNearestRealContainer(.heading(level: lvl, inl), map: .inline(sm), blockStart: blockStartByte)
+                        advanceLineCursor(to: i + 2)
                         continue
                     }
                 }
 
                 // 9. Paragraph (joining soft lines, breaking on container starts or interrupt-numbered continuations, lifting standalone images on root)
+                if triggerDeepTailIfMergedQuoteExceeded(blockStartByte: blockStartByte) { continue }
                 tail = .inline(blockStartByte, .paragraph)
                 var paraRanges: [Range<Int>] = [lines[i].contentRange]
                 var j = i + 1
@@ -2532,7 +3565,6 @@ public enum MarkdownParser {
                         nextTrim.hasPrefix(">") {
                         break
                     }
-                    // Interrupt on unordered list or numbered item unless paragraph already has unclosed **/__/~~/` across lines.
                     if let lm = parseListMarker(nextRaw) {
                         let itemTail = utf8Slice(source, range: (lines[j].contentRange.lowerBound + lm.contentOffsetBytes)..<lines[j].contentRange.upperBound)?
                             .trimmingCharacters(in: .whitespaces) ?? ""
@@ -2543,15 +3575,21 @@ public enum MarkdownParser {
                     paraRanges.append(lines[j].contentRange)
                     j += 1
                 }
+                var pBlocks: [MarkdownDocBlock] = []
+                var pMaps: [MarkdownBlockMap] = []
+                var pStarts: [Int] = []
                 emitParagraphLines(
                     paraRanges,
                     blockStart: blockStartByte,
-                    allowImageLift: trackRootCuts,
-                    into: &blocks,
-                    maps: &maps,
-                    starts: &blockStarts
+                    allowImageLift: isRoot,
+                    into: &pBlocks,
+                    maps: &pMaps,
+                    starts: &pStarts
                 )
-                i = j
+                for idx in pBlocks.indices {
+                    appendToNearestRealContainer(pBlocks[idx], map: pMaps[idx], blockStart: pStarts[idx])
+                }
+                advanceLineCursor(to: j)
             }
         }
 
@@ -5086,9 +6124,20 @@ public struct MarkdownView<State>: Sendable {
 
     private func renderUncached(_ style: MarkdownStyle) -> El<State> {
         Markdown.recordUncachedRender()
-        let doc = config.document()
+        let doc: MarkdownParsedDoc
+        let meta: [MarkdownPreBlock]
+        if config.isAutolinkEnabled {
+            (doc, meta) = config.isStreaming
+                ? MarkdownDocCache.sharedStream.streamCachedWithMeta(config.source, autolink: true)
+                : MarkdownDocCache.shared.docCachedWithMeta(config.source, autolink: true)
+        } else {
+            doc = config.isStreaming
+                ? MarkdownTailStream.parseStreaming(config.source, autolink: false)
+                : MarkdownParser.parseDocument(config.source, autolink: false)
+            meta = MarkdownMemoMeta.precomputeBlocks(doc.blocks, maps: doc.maps)
+        }
         let keys = matchBlockKeys(starts: doc.blockStarts, callerKeys: config.callerBlockKeys)
-        let renderer = MarkdownRenderer<State>(view: self, style: style, doc: doc)
+        let renderer = MarkdownRenderer<State>(view: self, style: style, doc: doc, meta: meta)
         return renderer.renderRoot(keys: keys)
     }
 
@@ -5106,10 +6155,13 @@ private final class MarkdownRenderer<State> {
     let view: MarkdownView<State>
     let s: MarkdownStyle
     let doc: MarkdownParsedDoc
+    let meta: [MarkdownPreBlock]
+    let baseDigest: MarkdownDigest128
     var nextSource = 0
     var nextTask = 0
     var currentBlockKey = "b0"
     var flow = FlowState()
+    private var localMemoSlots: [MarkdownDigest128: Int] = [:]
 
     enum Lead {
         case bullet
@@ -5140,15 +6192,192 @@ private final class MarkdownRenderer<State> {
         var lead: (cols: Int, lead: Lead, before: UInt8)? = nil
     }
 
-    init(view: MarkdownView<State>, style: MarkdownStyle, doc: MarkdownParsedDoc) {
+    private final class BlocksFrame {
+        let blocks: [MarkdownDocBlock]
+        let pre: [MarkdownPreBlock]?
+        let maps: [MarkdownBlockMap]
+        let names: [String]
+        let topLevel: Bool
+        let inItem: Bool
+        let openTail: Bool
+        let allowMemo: Bool
+        var idx: Int = 0
+        var prevMb: Float = 0
+        var afterHeading: Bool = false
+        var lastDir: MarkdownDirection?
+        var curCol: El<State>
+        var pending: (key: String, top: Float, prose: Bool, own: MarkdownDirection?)? = nil
+
+        init(
+            blocks: [MarkdownDocBlock],
+            pre: [MarkdownPreBlock]?,
+            maps: [MarkdownBlockMap],
+            names: [String],
+            topLevel: Bool,
+            inItem: Bool,
+            openTail: Bool,
+            allowMemo: Bool,
+            lastDir: MarkdownDirection?,
+            curCol: El<State>
+        ) {
+            self.blocks = blocks
+            self.pre = pre
+            self.maps = maps
+            self.names = names
+            self.topLevel = topLevel
+            self.inItem = inItem
+            self.openTail = openTail
+            self.allowMemo = allowMemo
+            self.lastDir = lastDir
+            self.curCol = curCol
+        }
+    }
+
+    private final class QuoteFrame {
+        let quotePre: MarkdownPreBlock?
+        let inner: [MarkdownDocBlock]
+        let innerPre: [MarkdownPreBlock]?
+        let innerMaps: [MarkdownBlockMap]
+        let savedFlow: FlowState
+        let firstTask: Int
+        let quoteDir: MarkdownDirection?
+
+        init(
+            quotePre: MarkdownPreBlock?,
+            inner: [MarkdownDocBlock],
+            innerPre: [MarkdownPreBlock]?,
+            innerMaps: [MarkdownBlockMap],
+            savedFlow: FlowState,
+            firstTask: Int,
+            quoteDir: MarkdownDirection?
+        ) {
+            self.quotePre = quotePre
+            self.inner = inner
+            self.innerPre = innerPre
+            self.innerMaps = innerMaps
+            self.savedFlow = savedFlow
+            self.firstTask = firstTask
+            self.quoteDir = quoteDir
+        }
+    }
+
+    private final class ListFrame {
+        let start: UInt64?
+        let items: [[MarkdownDocBlock]]
+        let preItems: [MarkdownPreItem]?
+        let itemMaps: [[MarkdownBlockMap]]
+        let savedFlow: FlowState
+        let indent: Float
+        let space: Float
+        let openTail: Bool
+        let allowMemo: Bool
+        let listDir: MarkdownDirection?
+        let realN: Int
+        var idx: Int = 0
+        var listCol: El<State>
+        var pendingItem: (k: Int, gapMt: Float, task: MarkdownTaskState?, isDeepTail: Bool)? = nil
+
+        init(
+            start: UInt64?,
+            items: [[MarkdownDocBlock]],
+            preItems: [MarkdownPreItem]?,
+            itemMaps: [[MarkdownBlockMap]],
+            savedFlow: FlowState,
+            indent: Float,
+            space: Float,
+            openTail: Bool,
+            allowMemo: Bool,
+            listDir: MarkdownDirection?,
+            listCol: El<State>
+        ) {
+            self.start = start
+            self.items = items
+            self.preItems = preItems
+            self.itemMaps = itemMaps
+            self.savedFlow = savedFlow
+            self.indent = indent
+            self.space = space
+            self.openTail = openTail
+            self.allowMemo = allowMemo
+            self.listDir = listDir
+            let hasTrailingDeepTail: Bool = {
+                guard !items.isEmpty, let lastMap = itemMaps.last, lastMap.count == 1, case .deepTail = lastMap[0] else { return false }
+                return true
+            }()
+            self.realN = items.count - (hasTrailingDeepTail ? 1 : 0)
+            self.listCol = listCol
+        }
+    }
+
+    private enum RenderFrame {
+        case blocks(BlocksFrame)
+        case quote(QuoteFrame)
+        case list(ListFrame)
+    }
+
+    init(view: MarkdownView<State>, style: MarkdownStyle, doc: MarkdownParsedDoc, meta: [MarkdownPreBlock]) {
         self.view = view
         self.s = style
         self.doc = doc
+        self.meta = meta
+        self.baseDigest = Self.computeBaseDigest(view: view, style: style)
+    }
+
+    private static func computeBaseDigest(view: MarkdownView<State>, style: MarkdownStyle) -> MarkdownDigest128 {
+        var h = MarkdownPairHasher()
+        h.writeStyle(style)
+        h.writeInt(view.config.highlightsList.count)
+        for item in view.config.highlightsList {
+            h.writeInt(item.ranges.count)
+            for r in item.ranges {
+                h.writeInt(r.lowerBound)
+                h.writeInt(r.upperBound)
+            }
+            h.writeHighlight(item.style)
+        }
+        h.writeFloat(view.config.revealDelay)
+        h.writeBool(view.config.isStreaming)
+        h.writeBool(view.config.areTasksReadOnly)
+        h.writeBool(view.config.isSelectable)
+        h.writeBool(view.config.isScrollWide)
+        h.writeBool(view.config.imageAltVisible)
+        h.writeBool(view.onLinkHandler != nil)
+        h.writeBool(view.onLinkSecondaryHandler != nil)
+        return h.finish128()
+    }
+
+    private func cachedSubtree(_ digest: MarkdownDigest128, build: () -> El<State>) -> El<State> {
+        let slot = localMemoSlots[digest, default: 0]
+        localMemoSlots[digest] = slot + 1
+        let rawId = "cached:md:\(String(digest.lo, radix: 16))-\(String(digest.hi, radix: 16)):\(slot)"
+        return Rune.memo(rawId, deps: digest, build: build)
+    }
+
+    private func blockDir(_ b: MarkdownDocBlock, pre: MarkdownPreBlock?) -> MarkdownDirection? {
+        if let pre { return pre.dir }
+        return MarkdownBidi.blockDirection(b)
     }
 
     func renderRoot(keys: [String]) -> El<State> {
-        let root = blocksIn(doc.blocks, maps: doc.maps, keys: keys, topLevel: true, inItem: false)
-            .markdownDirection(MarkdownBidi.blocksDirection(doc.blocks) ?? view.config.tentativeDirection)
+        let rootDir = meta.first(where: { $0.dir != nil })?.dir
+            ?? (meta.isEmpty ? MarkdownBidi.blocksDirection(doc.blocks) : nil)
+            ?? view.config.tentativeDirection
+        var quotePlainCache: MarkdownPlain.QuotePlainCache = [:]
+        let rootFrame = BlocksFrame(
+            blocks: doc.blocks,
+            pre: meta,
+            maps: doc.maps,
+            names: renderedKeys(count: doc.blocks.count, keys: keys),
+            topLevel: true,
+            inItem: false,
+            openTail: view.config.isStreaming,
+            allowMemo: true,
+            lastDir: view.config.tentativeDirection,
+            curCol: col().wFull()
+        )
+        let drawn = runFrames(initial: [.blocks(rootFrame)], quotePlainCache: &quotePlainCache)
+        let root = drawn
+            .markdownDirection(rootDir)
             .selectionGroup(view.config.isSelectable)
         guard view.config.isSelectable && view.config.copySourceMode else {
             return root
@@ -5201,53 +6430,628 @@ private final class MarkdownRenderer<State> {
         }
     }
 
-    private func collapsed(_ b: MarkdownDocBlock, index i: Int, inItem: Bool) -> (top: Float, bottom: Float) {
-        let base: (Float, Float)
+    private func ownMargins(_ b: MarkdownDocBlock, index i: Int, inItem: Bool) -> (top: Float, bottom: Float) {
         switch b {
         case .para where inItem:
-            base = (i == 0 ? 0 : 8, i == 0 ? 0 : 12)
+            return (i == 0 ? 0 : 8, i == 0 ? 0 : 12)
         case .list where inItem:
-            base = (4, 4)
+            return (4, 4)
         default:
-            base = margins(b)
+            return margins(b)
         }
-        let first: Float?
-        let last: Float?
-        switch b {
-        case let .quote(inner):
-            first = inner.first.map { collapsed($0, index: 0, inItem: false).top }
-            last = inner.last.map { collapsed($0, index: inner.count - 1, inItem: false).bottom }
-        case let .list(_, items):
-            first = items.first?.first.map { collapsed($0, index: 0, inItem: true).top }
-            last = items.last.map { item in
-                let tail = item.last.map { collapsed($0, index: item.count - 1, inItem: true).bottom } ?? 0
-                return max(tail, s.listGap)
-            }
-        default:
-            first = nil
-            last = nil
-        }
-        return (max(first ?? 0, base.0), max(last ?? 0, base.1))
     }
 
-    private func blocksIn(
-        _ blocks: [MarkdownDocBlock],
-        maps: [MarkdownBlockMap],
-        keys: [String],
-        topLevel: Bool,
-        inItem: Bool
+    private func collapsedTop(_ startBlock: MarkdownDocBlock, index startIndex: Int, inItem startInItem: Bool) -> Float {
+        var b = startBlock
+        var i = startIndex
+        var inItem = startInItem
+        var top: Float = 0
+        while true {
+            top = max(top, ownMargins(b, index: i, inItem: inItem).top)
+            switch b {
+            case let .quote(inner):
+                guard let first = inner.first else { return top }
+                b = first; i = 0; inItem = false
+            case let .list(_, items):
+                guard let first = items.first?.first else { return top }
+                b = first; i = 0; inItem = true
+            default:
+                return top
+            }
+        }
+    }
+
+    private func collapsedBottom(_ startBlock: MarkdownDocBlock, index startIndex: Int, inItem startInItem: Bool) -> Float {
+        var b = startBlock
+        var i = startIndex
+        var inItem = startInItem
+        var bot: Float = 0
+        while true {
+            bot = max(bot, ownMargins(b, index: i, inItem: inItem).bottom)
+            switch b {
+            case let .quote(inner):
+                guard let last = inner.last else { return bot }
+                b = last; i = inner.count - 1; inItem = false
+            case let .list(_, items):
+                guard let item = items.last else { return bot }
+                bot = max(bot, s.listGap)
+                guard let last = item.last else { return bot }
+                b = last; i = item.count - 1; inItem = true
+            default:
+                return bot
+            }
+        }
+    }
+
+    private func collapsed(_ b: MarkdownDocBlock, index i: Int, inItem: Bool) -> (top: Float, bottom: Float) {
+        (collapsedTop(b, index: i, inItem: inItem), collapsedBottom(b, index: i, inItem: inItem))
+    }
+
+    private func listItemGap(items: [[MarkdownDocBlock]], k: Int) -> Float {
+        guard k > 0 else { return 0 }
+        let prevEdge: Float = items[k - 1].last.map { collapsedBottom($0, index: items[k - 1].count - 1, inItem: true) } ?? 0
+        let curEdge: Float = items[k].first.map { collapsedTop($0, index: 0, inItem: true) } ?? 0
+        return max(s.listGap, max(prevEdge, curEdge))
+    }
+
+    // MARK: Settled Block / Item / Code-Card / Table-Row Memo Digests (`memo.rs`, #1130)
+
+    private func hashFlow(_ f: FlowState, into h: inout MarkdownPairHasher) {
+        h.writeInt(f.lists)
+        h.writeOptionalColor(f.ink)
+        h.writeFloat(f.inset)
+        h.writeInt(f.cols)
+        if let lead = f.lead {
+            h.writeByte(1)
+            h.writeInt(lead.cols)
+            h.writeByte(lead.before)
+            switch lead.lead {
+            case .bullet: h.writeByte(0)
+            case .number(let n):
+                h.writeByte(1)
+                h.writeUInt64(n)
+            case .task(let done):
+                h.writeByte(2)
+                h.writeBool(done)
+            }
+        } else {
+            h.writeByte(0)
+        }
+    }
+
+    private func canMemoLinks(hasLinks: Bool) -> Bool {
+        !hasLinks || (view.onLinkHandler == nil && view.onLinkSecondaryHandler == nil)
+    }
+
+    private func canMemoFlags(_ flags: UInt8) -> Bool {
+        if (flags & MarkdownPreFlags.hasCode) != 0 && (!view.config.syntaxHighlighter.isBuiltin || view.codeFrameHandler != nil) {
+            return false
+        }
+        if (flags & MarkdownPreFlags.hasMermaid) != 0 && (view.diagramFrameHandler != nil || !view.config.syntaxHighlighter.isBuiltin) {
+            return false
+        }
+        if (flags & MarkdownPreFlags.hasImage) != 0 && view.imageFrameHandler != nil {
+            return false
+        }
+        if (flags & MarkdownPreFlags.hasQuote) != 0 && view.quoteFrameHandler != nil {
+            return false
+        }
+        if (flags & MarkdownPreFlags.hasOpenTable) != 0 && view.config.isStreaming {
+            return false
+        }
+        return true
+    }
+
+    private func hashLinkURL(_ url: String, into h: inout MarkdownPairHasher) {
+        if view.config.linkPaintFn != nil || view.config.linkLookFn != nil {
+            h.writeLinkStyle(resolvedLinkStyle(url))
+        }
+        if let ringFn = view.config.linkRingFn {
+            if let ring = ringFn(url) {
+                h.writeByte(1)
+                h.writeColor(ring.0)
+                h.writeFloat(ring.1)
+            } else {
+                h.writeByte(0)
+            }
+        }
+        if let helpFn = view.config.linkHelpFn {
+            h.writeOptionalString(helpFn(url))
+        }
+        if s.linkIcon != nil,
+           let host = MarkdownLinkIcons.linkHost(url),
+           host != "github.com",
+           let favFn = view.config.linkFaviconFn {
+            h.writeRGBA8Atlas(favFn(url))
+        }
+    }
+
+    private func hashInlineDirect(_ inl: MarkdownInline, into h: inout MarkdownPairHasher) -> Bool {
+        let resolved = withCodeLinks(inl)
+        guard canMemoLinks(hasLinks: !resolved.links.isEmpty) else { return false }
+        h.writeByte(1)
+        h.writeInline(resolved)
+        for lk in resolved.links {
+            if let matcher = view.config.codeLinkMatchFn,
+               let slice = utf8Slice(resolved.text, range: lk.start..<lk.end),
+               let m = matcher(slice) {
+                h.writeByte(1)
+                h.writeColor(m.color)
+            } else {
+                h.writeByte(0)
+            }
+            hashLinkURL(lk.url, into: &h)
+        }
+        return true
+    }
+
+    private enum HashBlockStep {
+        case block(MarkdownDocBlock, MarkdownBlockMap?)
+        case len(Int)
+    }
+
+    private func hashBlockDirect(_ rootBlock: MarkdownDocBlock, map rootMap: MarkdownBlockMap?, into h: inout MarkdownPairHasher) -> Bool {
+        var stack: [HashBlockStep] = [.block(rootBlock, rootMap)]
+        while let step = stack.popLast() {
+            switch step {
+            case .len(let n):
+                h.writeInt(n)
+            case let .block(b, mapOpt):
+                switch (b, mapOpt) {
+                case let (.para(inl), .deepTail(lines, _)):
+                    h.writeByte(11)
+                    h.writeInt(lines)
+                    h.writeString(inl.text)
+                case let (.para(inl), _):
+                    h.writeByte(1)
+                    if !hashInlineDirect(inl, into: &h) { return false }
+                case let (.heading(level, inl), _):
+                    h.writeByte(2)
+                    h.writeInt(level)
+                    if !hashInlineDirect(inl, into: &h) { return false }
+                case let (.code(code), _):
+                    guard canMemoFlags(MarkdownPreFlags.hasCode) else { return false }
+                    h.writeByte(3)
+                    h.writeString(code)
+                case let (.diff(src), _):
+                    h.writeByte(4)
+                    h.writeString(src)
+                case let (.mermaid(src), _):
+                    guard canMemoFlags(MarkdownPreFlags.hasMermaid) else { return false }
+                    h.writeByte(5)
+                    h.writeString(src)
+                case (.rule, _):
+                    h.writeByte(6)
+                case let (.image(src, alt, title), _):
+                    guard canMemoFlags(MarkdownPreFlags.hasImage) else { return false }
+                    h.writeByte(7)
+                    h.writeString(src)
+                    h.writeString(alt)
+                    h.writeString(title)
+                case let (.quote(inner), mapVal):
+                    guard canMemoFlags(MarkdownPreFlags.hasQuote) else { return false }
+                    let innerMaps: [MarkdownBlockMap] = if case let .quote(m) = mapVal { m } else { [] }
+                    h.writeByte(8)
+                    h.writeInt(inner.count)
+                    for i in stride(from: inner.count - 1, through: 0, by: -1) {
+                        stack.append(.block(inner[i], i < innerMaps.count ? innerMaps[i] : nil))
+                    }
+                case let (.list(start, items), mapVal):
+                    let itemMaps: [[MarkdownBlockMap]] = if case let .list(m) = mapVal { m } else { [] }
+                    h.writeByte(9)
+                    if let st = start { h.writeByte(1); h.writeUInt64(st) } else { h.writeByte(0) }
+                    h.writeInt(items.count)
+                    for k in stride(from: items.count - 1, through: 0, by: -1) {
+                        let item = items[k]
+                        let imap = k < itemMaps.count ? itemMaps[k] : []
+                        for j in stride(from: item.count - 1, through: 0, by: -1) {
+                            stack.append(.block(item[j], j < imap.count ? imap[j] : nil))
+                        }
+                        stack.append(.len(item.count))
+                    }
+                case let (.table(t), _):
+                    if t.open && view.config.isStreaming { return false }
+                    h.writeByte(10)
+                    h.writeBool(t.open)
+                    h.writeInt(t.align.count)
+                    h.writeInt(t.head.count)
+                    h.writeInt(t.rows.count)
+                    for a in t.align { h.writeAlign(a) }
+                    for c in t.head { if !hashInlineDirect(c, into: &h) { return false } }
+                    for row in t.rows {
+                        h.writeInt(row.count)
+                        for c in row { if !hashInlineDirect(c, into: &h) { return false } }
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    private func hashSources(_ srcs: ArraySlice<MarkdownCodeSource>, into h: inout MarkdownPairHasher) {
+        h.writeInt(srcs.count)
+        for src in srcs {
+            h.writeOptionalString(src.language)
+            h.writeInt(src.length)
+            h.writeInt(src.colouredBytes)
+            h.writeBool(src.open)
+        }
+    }
+
+    private func hashTasks(_ tasks: ArraySlice<MarkdownTaskState?>, into h: inout MarkdownPairHasher) {
+        h.writeInt(tasks.count)
+        for t in tasks {
+            if let t {
+                h.writeByte(1)
+                h.writeBool(t.checked)
+                h.writeInt(t.markerOffset)
+            } else {
+                h.writeByte(0)
+            }
+        }
+    }
+
+    private func settledBlockDigest(
+        _ b: MarkdownDocBlock,
+        pre: MarkdownPreBlock?,
+        map: MarkdownBlockMap,
+        key: String,
+        top: Float,
+        dir: MarkdownDirection?,
+        srcRange: (at: Int, count: Int),
+        taskRange: (at: Int, count: Int)
+    ) -> MarkdownDigest128? {
+        guard srcRange.at >= 0, srcRange.at + srcRange.count <= doc.sources.count,
+              taskRange.at >= 0, taskRange.at + taskRange.count <= doc.tasks.count else { return nil }
+        let srcs = doc.sources[srcRange.at..<(srcRange.at + srcRange.count)]
+        if srcs.contains(where: \.open) { return nil }
+        let tasks = doc.tasks[taskRange.at..<(taskRange.at + taskRange.count)]
+        if view.onTaskHandler != nil && !view.config.areTasksReadOnly && tasks.contains(where: { $0 != nil }) {
+            return nil
+        }
+        var h = MarkdownPairHasher()
+        h.writeByte(1)
+        h.writeDigest(baseDigest)
+        h.writeString(key)
+        h.writeFloat(top)
+        h.writeDirection(dir)
+        if let p = pre, view.config.codeLinkMatchFn == nil || (p.flags & MarkdownPreFlags.hasInlineCode) == 0 {
+            guard canMemoFlags(p.flags), canMemoLinks(hasLinks: !p.links.isEmpty) else { return nil }
+            h.writeDigest(p.digest)
+            for url in p.links { hashLinkURL(url, into: &h) }
+        } else {
+            guard hashBlockDirect(b, map: map, into: &h) else { return nil }
+        }
+        hashFlow(flow, into: &h)
+        hashSources(srcs, into: &h)
+        hashTasks(tasks, into: &h)
+        if !view.config.highlightsList.isEmpty {
+            h.writeBlockMap(map)
+        }
+        return h.finish128()
+    }
+
+    private func settledItemDigest(
+        _ item: [MarkdownDocBlock],
+        pre: MarkdownPreItem?,
+        imap: [MarkdownBlockMap],
+        srcRange: (at: Int, count: Int),
+        taskRange: (at: Int, count: Int)
+    ) -> MarkdownDigest128? {
+        guard srcRange.at >= 0, srcRange.at + srcRange.count <= doc.sources.count,
+              taskRange.at >= 0, taskRange.at + taskRange.count <= doc.tasks.count else { return nil }
+        let srcs = doc.sources[srcRange.at..<(srcRange.at + srcRange.count)]
+        if srcs.contains(where: \.open) { return nil }
+        let tasks = doc.tasks[taskRange.at..<(taskRange.at + taskRange.count)]
+        if view.onTaskHandler != nil && !view.config.areTasksReadOnly && tasks.contains(where: { $0 != nil }) {
+            return nil
+        }
+        var h = MarkdownPairHasher()
+        h.writeByte(2)
+        h.writeDigest(baseDigest)
+        if let p = pre, view.config.codeLinkMatchFn == nil || (p.flags & MarkdownPreFlags.hasInlineCode) == 0 {
+            guard canMemoFlags(p.flags), canMemoLinks(hasLinks: !p.links.isEmpty) else { return nil }
+            h.writeDigest(p.digest)
+            for url in p.links { hashLinkURL(url, into: &h) }
+        } else {
+            h.writeInt(item.count)
+            for (j, b) in item.enumerated() {
+                guard hashBlockDirect(b, map: j < imap.count ? imap[j] : nil, into: &h) else { return nil }
+            }
+        }
+        hashFlow(flow, into: &h)
+        hashSources(srcs, into: &h)
+        hashTasks(tasks, into: &h)
+        if !view.config.highlightsList.isEmpty {
+            h.writeInt(imap.count)
+            for m in imap { h.writeBlockMap(m) }
+        }
+        return h.finish128()
+    }
+
+    private func settledCodeCardDigest(_ code: String, source: MarkdownCodeSource?, map: MarkdownSpanMap?) -> MarkdownDigest128? {
+        guard view.config.syntaxHighlighter.isBuiltin, source?.open != true else { return nil }
+        var h = MarkdownPairHasher()
+        h.writeByte(3)
+        h.writeDigest(baseDigest)
+        h.writeString(code)
+        if let src = source {
+            h.writeByte(1)
+            h.writeOptionalString(src.language)
+            h.writeInt(src.length)
+            h.writeInt(src.colouredBytes)
+            h.writeBool(src.open)
+        } else {
+            h.writeByte(0)
+        }
+        if !view.config.highlightsList.isEmpty, let m = map {
+            h.writeSpanMap(m)
+        }
+        return h.finish128()
+    }
+
+    private func settledTableRowDigest(
+        cells: [MarkdownInline],
+        pre: MarkdownPreRow?,
+        maps: [MarkdownSpanMap],
+        align: [MarkdownTableAlign],
+        tableDir: MarkdownDirection?,
+        natural: [Float],
+        minWidths: [Float],
+        widths: [Float]?,
+        font: TextStyle,
+        color: Color,
+        pad: [Float],
+        cellRoleTag: UInt8,
+        key: String,
+        extraTag: UInt8,
+        extraBool: Bool = false,
+        extraA: Float = 0,
+        extraB: Float = 0
+    ) -> MarkdownDigest128? {
+        var h = MarkdownPairHasher()
+        h.writeByte(4)
+        h.writeDigest(baseDigest)
+        h.writeByte(cellRoleTag)
+        h.writeString(key)
+        h.writeByte(extraTag)
+        h.writeBool(extraBool)
+        h.writeFloat(extraA)
+        h.writeFloat(extraB)
+        h.writeTextStyle(font)
+        h.writeColor(color)
+        h.writeInt(pad.count)
+        for p in pad { h.writeFloat(p) }
+        h.writeDirection(tableDir)
+        if let p = pre, view.config.codeLinkMatchFn == nil || (p.flags & MarkdownPreFlags.hasInlineCode) == 0 {
+            guard canMemoLinks(hasLinks: !p.links.isEmpty) else { return nil }
+            h.writeDigest(p.digest)
+            for url in p.links { hashLinkURL(url, into: &h) }
+        } else {
+            h.writeInt(cells.count)
+            for c in cells {
+                guard hashInlineDirect(c, into: &h) else { return nil }
+            }
+        }
+        h.writeInt(align.count)
+        for a in align { h.writeAlign(a) }
+        h.writeInt(natural.count)
+        for w in natural { h.writeFloat(w) }
+        h.writeInt(minWidths.count)
+        for w in minWidths { h.writeFloat(w) }
+        if let ws = widths {
+            h.writeByte(1)
+            h.writeInt(ws.count)
+            for w in ws { h.writeFloat(w) }
+        } else {
+            h.writeByte(0)
+        }
+        if !view.config.highlightsList.isEmpty {
+            h.writeInt(maps.count)
+            for m in maps { h.writeSpanMap(m) }
+        }
+        return h.finish128()
+    }
+
+    private func tableRowWidthKey(
+        cells: [MarkdownInline],
+        pre: MarkdownPreRow?,
+        colCount n: Int,
+        font: TextStyle,
+        epoch: UInt64
+    ) -> MarkdownDigest128 {
+        var h = MarkdownPairHasher()
+        h.writeInt(n)
+        h.writeTextStyle(font)
+        h.writeFloat(s.inlineCodeScale)
+        h.writeFloat(s.inlineCodeWeight)
+        h.writeFloat(s.inlineCodePad)
+        h.writeFloat(s.strongWeight)
+        h.writeUInt64(epoch)
+        h.writeInt(min(cells.count, n))
+        if let p = pre, cells.count <= n,
+           view.config.codeLinkMatchFn == nil || (p.flags & MarkdownPreFlags.hasInlineCode) == 0 {
+            h.writeDigest(p.digest)
+            if view.config.linkPaintFn != nil || view.config.linkLookFn != nil {
+                for url in p.links {
+                    let st = resolvedLinkStyle(url)
+                    h.writeOptionalFloat(st?.weight)
+                }
+            }
+        } else {
+            for j in 0..<min(cells.count, n) {
+                let resolved = withCodeLinks(cells[j])
+                h.writeInline(resolved)
+                if view.config.linkPaintFn != nil || view.config.linkLookFn != nil {
+                    for lk in resolved.links {
+                        let st = resolvedLinkStyle(lk.url)
+                        h.writeOptionalFloat(st?.weight)
+                    }
+                }
+            }
+        }
+        return h.finish128()
+    }
+
+    // MARK: Iterative Frame-Stack Block / Quote / List Renderer (`render.rs`, #1122 + #1130)
+
+    @inline(never)
+    private func unmemoisedBlock(
+        _ b: MarkdownDocBlock,
+        pre: MarkdownPreBlock?,
+        map: MarkdownBlockMap,
+        quotePlainCache: inout MarkdownPlain.QuotePlainCache
     ) -> El<State> {
-        var c: El<State> = col().wFull()
-        c.children.reserveCapacity(blocks.count)
-        var prevMb: Float = 0
-        var afterHeading = false
-        let names = renderedKeys(count: blocks.count, keys: keys)
-        var lastDir: MarkdownDirection? = topLevel ? view.config.tentativeDirection : nil
+        switch b {
+        case let .quote(inner):
+            let innerMaps = map.quoteMaps ?? []
+            let saved = flow
+            let firstTask = nextTask
+            flow = FlowState(
+                lists: saved.lists,
+                inset: saved.inset + s.quote.width + s.quote.pad,
+                ink: s.quote.text ?? saved.ink,
+                cols: saved.cols,
+                lead: saved.lead
+            )
+            let qFrame = QuoteFrame(
+                quotePre: pre,
+                inner: inner,
+                innerPre: pre?.inner,
+                innerMaps: innerMaps,
+                savedFlow: saved,
+                firstTask: firstTask,
+                quoteDir: blockDir(b, pre: pre)
+            )
+            let bFrame = BlocksFrame(
+                blocks: inner,
+                pre: pre?.inner,
+                maps: innerMaps,
+                names: renderedKeys(count: inner.count, keys: []),
+                topLevel: false,
+                inItem: false,
+                openTail: false,
+                allowMemo: false,
+                lastDir: nil,
+                curCol: col().wFull()
+            )
+            return runFrames(initial: [.quote(qFrame), .blocks(bFrame)], quotePlainCache: &quotePlainCache)
+        case let .list(start, items):
+            let itemMaps = map.listMaps ?? []
+            let saved = flow
+            let indent = listIndent(start: start, listsDepth: saved.lists)
+            let space = listOutsideSpace(start: start)
+            let lFrame = ListFrame(
+                start: start,
+                items: items,
+                preItems: pre?.items,
+                itemMaps: itemMaps,
+                savedFlow: saved,
+                indent: indent,
+                space: space,
+                openTail: false,
+                allowMemo: false,
+                listDir: blockDir(b, pre: pre),
+                listCol: col().role(.list).wFull()
+            )
+            return runFrames(initial: [.list(lFrame)], quotePlainCache: &quotePlainCache)
+        default:
+            return leafBlock(b, pre: pre, map: map)
+        }
+    }
 
-        for (i, b) in blocks.enumerated() {
-            let key = names[i]
-            let map = i < maps.count ? maps[i] : .none
+    private func listIndent(start: UInt64?, listsDepth: Int) -> Float {
+        if let nested = s.listNested, listsDepth > 0 {
+            return start != nil ? nested[1] : nested[0]
+        }
+        return s.listIndent
+    }
 
+    private func listOutsideSpace(start: UInt64?) -> Float {
+        if start != nil && s.listOutside {
+            return TextMeasure.measure("x x", style: s.body).x - TextMeasure.measure("xx", style: s.body).x
+        }
+        return 0
+    }
+
+    @inline(never)
+    private func runFrames(
+        initial: [RenderFrame],
+        quotePlainCache: inout MarkdownPlain.QuotePlainCache
+    ) -> El<State> {
+        var stack = initial
+        var ret: El<State>? = nil
+
+        while let top = stack.last {
+            switch top {
+            case .blocks(let frame):
+                stepBlocksFrame(frame, stack: &stack, ret: &ret)
+            case .quote(let frame):
+                stack.removeLast()
+                ret = finishQuoteFrame(frame, drawn: ret ?? col().wFull(), quotePlainCache: &quotePlainCache)
+            case .list(let frame):
+                stepListFrame(frame, stack: &stack, ret: &ret)
+            }
+        }
+        return ret ?? col().wFull()
+    }
+
+    @inline(never)
+    private func buildMemoisedBlock(
+        _ b: MarkdownDocBlock,
+        pre pb: MarkdownPreBlock?,
+        map: MarkdownBlockMap,
+        key: String,
+        top: Float,
+        prose: Bool,
+        dir: MarkdownDirection?,
+        srcAt: Int,
+        srcN: Int,
+        taskAt: Int,
+        taskN: Int,
+        digest: MarkdownDigest128
+    ) -> El<State> {
+        let cachedEl = cachedSubtree(digest) {
+            Markdown.noteBlockBuild()
+            self.nextSource = srcAt
+            self.nextTask = taskAt
+            var subQpc: MarkdownPlain.QuotePlainCache = [:]
+            var childEl = self.unmemoisedBlock(b, pre: pb, map: map, quotePlainCache: &subQpc)
+            assert(self.nextSource == srcAt + srcN)
+            assert(self.nextTask == taskAt + taskN)
+            if prose { childEl.setMarkdownDirection(dir) }
+            childEl = childEl.key(key)
+            return top > 0 ? childEl.mt(top) : childEl
+        }
+        nextSource = srcAt + srcN
+        nextTask = taskAt + taskN
+        return cachedEl
+    }
+
+    @inline(never)
+    private func stepBlocksFrame(
+        _ frame: BlocksFrame,
+        stack: inout [RenderFrame],
+        ret: inout El<State>?
+    ) {
+        if let childEl = ret {
+            ret = nil
+            if let p = frame.pending {
+                frame.pending = nil
+                var drawn = childEl
+                if p.prose { drawn.setMarkdownDirection(p.own ?? frame.lastDir) }
+                if let own = p.own { frame.lastDir = own }
+                drawn = drawn.key(p.key)
+                if p.top > 0 { drawn = drawn.mt(p.top) }
+                frame.curCol.children.append(drawn)
+            }
+            return
+        }
+
+        while frame.idx < frame.blocks.count {
+            let i = frame.idx
+            frame.idx += 1
+            let b = frame.blocks[i]
             if view.config.isStreaming, case let .code(codeStr) = b, codeStr.isEmpty {
                 if nextSource < doc.sources.count, doc.sources[nextSource].open, doc.sources[nextSource].length == 0 {
                     nextSource += 1
@@ -5255,43 +7059,405 @@ private final class MarkdownRenderer<State> {
                 }
             }
 
-            let (mt, mb) = collapsed(b, index: i, inItem: inItem)
+            let (mt, mb) = collapsed(b, index: i, inItem: frame.inItem)
             let top: Float
             if i == 0 {
                 top = 0
             } else {
                 switch b {
-                case .heading, .rule, .image: top = max(mt, prevMb)
-                default: top = afterHeading ? prevMb : max(mt, prevMb)
+                case .heading, .rule, .image: top = max(mt, frame.prevMb)
+                default: top = frame.afterHeading ? frame.prevMb : max(mt, frame.prevMb)
+                }
+            }
+            frame.prevMb = mb
+            if case .heading = b { frame.afterHeading = true } else { frame.afterHeading = false }
+
+            let key = frame.names[i]
+            if frame.topLevel { currentBlockKey = key }
+            if i > 0 { flow.lead = nil }
+
+            let pb: MarkdownPreBlock? = frame.pre.flatMap { i < $0.count ? $0[i] : nil }
+            let own = blockDir(b, pre: pb)
+            let prose: Bool = switch b {
+            case .code, .diff, .mermaid, .image, .rule: false
+            default: true
+            }
+            let dir: MarkdownDirection? = prose ? (own ?? frame.lastDir) : nil
+            let map: MarkdownBlockMap = i < frame.maps.count ? frame.maps[i] : .none
+            let childOpenTail = frame.openTail && (i + 1 == frame.blocks.count)
+            let isDeepTail: Bool = if case .para = b, case .deepTail = map { true } else { false }
+            let canMemoHere = frame.allowMemo && !childOpenTail && !(view.config.isStreaming && isDeepTail)
+
+            if canMemoHere {
+                let srcAt = nextSource
+                let srcN = pb.map { Int($0.srcN) } ?? MarkdownMemoMeta.sourceCount(b)
+                let taskAt = nextTask
+                let taskN = pb.map { Int($0.taskN) } ?? MarkdownMemoMeta.taskCount(b)
+                if let digest = settledBlockDigest(
+                    b, pre: pb, map: map, key: key, top: top, dir: dir,
+                    srcRange: (srcAt, srcN), taskRange: (taskAt, taskN)
+                ) {
+                    let cachedEl = buildMemoisedBlock(
+                        b, pre: pb, map: map, key: key, top: top, prose: prose, dir: dir,
+                        srcAt: srcAt, srcN: srcN, taskAt: taskAt, taskN: taskN, digest: digest
+                    )
+                    if let own { frame.lastDir = own }
+                    frame.curCol.children.append(cachedEl)
+                    continue
                 }
             }
 
-            if topLevel {
-                currentBlockKey = key
-            }
-            if i > 0 {
-                flow.lead = nil
-            }
-
-            let ownDir = MarkdownBidi.blockDirection(b)
-            let resolvedDir = ownDir ?? lastDir
-            if let ownDir { lastDir = ownDir }
-
-            var drawn = renderBlock(b, map: map, dir: ownDir)
             switch b {
-            case .para, .heading, .quote, .list, .table: drawn.setMarkdownDirection(resolvedDir)
-            default: break
+            case let .quote(inner):
+                frame.pending = (key: key, top: top, prose: prose, own: own)
+                let innerMaps = map.quoteMaps ?? []
+                let saved = flow
+                let firstTask = nextTask
+                flow = FlowState(
+                    lists: saved.lists,
+                    inset: saved.inset + s.quote.width + s.quote.pad,
+                    ink: s.quote.text ?? saved.ink,
+                    cols: saved.cols,
+                    lead: saved.lead
+                )
+                stack.append(.quote(QuoteFrame(
+                    quotePre: pb,
+                    inner: inner,
+                    innerPre: pb?.inner,
+                    innerMaps: innerMaps,
+                    savedFlow: saved,
+                    firstTask: firstTask,
+                    quoteDir: own
+                )))
+                stack.append(.blocks(BlocksFrame(
+                    blocks: inner,
+                    pre: pb?.inner,
+                    maps: innerMaps,
+                    names: renderedKeys(count: inner.count, keys: []),
+                    topLevel: false,
+                    inItem: false,
+                    openTail: childOpenTail,
+                    allowMemo: frame.allowMemo,
+                    lastDir: nil,
+                    curCol: col().wFull()
+                )))
+                return
+            case let .list(start, items):
+                frame.pending = (key: key, top: top, prose: prose, own: own)
+                let itemMaps = map.listMaps ?? []
+                let saved = flow
+                let indent = listIndent(start: start, listsDepth: saved.lists)
+                let space = listOutsideSpace(start: start)
+                stack.append(.list(ListFrame(
+                    start: start,
+                    items: items,
+                    preItems: pb?.items,
+                    itemMaps: itemMaps,
+                    savedFlow: saved,
+                    indent: indent,
+                    space: space,
+                    openTail: childOpenTail,
+                    allowMemo: frame.allowMemo,
+                    listDir: own,
+                    listCol: col().role(.list).wFull()
+                )))
+                return
+            default:
+                var drawn = leafBlock(b, pre: pb, map: map)
+                if prose { drawn.setMarkdownDirection(dir) }
+                if let own { frame.lastDir = own }
+                drawn = drawn.key(key)
+                if top > 0 { drawn = drawn.mt(top) }
+                frame.curCol.children.append(drawn)
             }
-            drawn = drawn.key(key)
-            if top > 0 { drawn = drawn.mt(top) }
-            c.children.append(drawn)
-            prevMb = mb
-            if case .heading = b { afterHeading = true } else { afterHeading = false }
         }
-        return c
+
+        stack.removeLast()
+        ret = frame.curCol
     }
 
-    private func renderBlock(_ b: MarkdownDocBlock, map: MarkdownBlockMap, dir: MarkdownDirection?) -> El<State> {
+    @inline(never)
+    private func finishQuoteFrame(
+        _ frame: QuoteFrame,
+        drawn: El<State>,
+        quotePlainCache: inout MarkdownPlain.QuotePlainCache
+    ) -> El<State> {
+        flow = frame.savedFlow
+        let qEl: El<State> = row()
+            .role(.blockquote)
+            .wFull()
+            .child(el().w(s.quote.width).hFull().rounded(min(s.quote.width / 2.0, 1.0)).bg(s.quoteRule))
+            .child(drawn.grow(1).shrink(1).pl(s.quote.pad))
+            .markdownDirection(frame.quoteDir)
+        if let qFrame = view.quoteFrameHandler {
+            var tIdx = frame.firstTask
+            let plain = MarkdownPlain.renderCached(
+                quotePre: frame.quotePre,
+                blocks: frame.inner,
+                maps: frame.innerMaps,
+                pre: frame.innerPre,
+                tasks: doc.tasks,
+                nextTask: &tIdx,
+                cols: frame.savedFlow.cols,
+                lists: frame.savedFlow.lists,
+                cache: &quotePlainCache
+            )
+            return qFrame(qEl, MarkdownQuoteFrameContext(text: plain))
+        }
+        return qEl
+    }
+
+    @inline(never)
+    private func buildMemoisedItemBody(
+        item: [MarkdownDocBlock],
+        ipre: MarkdownPreItem?,
+        imap: [MarkdownBlockMap],
+        srcAt: Int,
+        srcN: Int,
+        taskAt: Int,
+        taskN: Int,
+        digest: MarkdownDigest128
+    ) -> El<State> {
+        let body = cachedSubtree(digest) {
+            Markdown.noteBlockBuild()
+            self.nextSource = srcAt
+            self.nextTask = taskAt
+            var subQpc: MarkdownPlain.QuotePlainCache = [:]
+            let itemFrame = BlocksFrame(
+                blocks: item,
+                pre: ipre?.inner,
+                maps: imap,
+                names: self.renderedKeys(count: item.count, keys: []),
+                topLevel: false,
+                inItem: true,
+                openTail: false,
+                allowMemo: false,
+                lastDir: nil,
+                curCol: col().wFull()
+            )
+            let b = self.runFrames(initial: [.blocks(itemFrame)], quotePlainCache: &subQpc).grow(1).shrink(1)
+            assert(self.nextSource == srcAt + srcN)
+            assert(self.nextTask == taskAt + taskN)
+            return b
+        }
+        nextSource = srcAt + srcN
+        nextTask = taskAt + taskN
+        return body
+    }
+
+    @inline(never)
+    private func stepListFrame(
+        _ frame: ListFrame,
+        stack: inout [RenderFrame],
+        ret: inout El<State>?
+    ) {
+        if let itemBody = ret {
+            ret = nil
+            if let p = frame.pendingItem {
+                frame.pendingItem = nil
+                let rowEl: El<State>
+                if p.isDeepTail {
+                    rowEl = row().key("i\(p.k)").wFull().pl(frame.indent).child(itemBody.grow(1).shrink(1))
+                } else if let task = p.task {
+                    rowEl = renderTaskItemBody(
+                        k: p.k, n: frame.realN, indent: frame.indent, item: frame.items[p.k],
+                        itemBody: itemBody, markerOffset: task.markerOffset, checked: task.checked
+                    )
+                } else {
+                    let marker = renderListMarker(start: frame.start, k: p.k, indent: frame.indent, space: frame.space)
+                    rowEl = row()
+                        .key("i\(p.k)")
+                        .role(.listItem)
+                        .positionInSet(p.k + 1, size: frame.realN)
+                        .wFull()
+                        .child(withReveal(marker).a11yHidden())
+                        .child(itemBody.grow(1).shrink(1))
+                }
+                frame.listCol.children.append(p.gapMt > 0 ? rowEl.mt(p.gapMt) : rowEl)
+            }
+            return
+        }
+
+        while frame.idx < frame.items.count {
+            let k = frame.idx
+            frame.idx += 1
+            let item = frame.items[k]
+            let ipre: MarkdownPreItem? = frame.preItems.flatMap { k < $0.count ? $0[k] : nil }
+            let imap = k < frame.itemMaps.count ? frame.itemMaps[k] : []
+            let isDeepTail: Bool = imap.count == 1 && ({ if case .deepTail = imap[0] { return true }; return false }())
+            let itemOpenTail = frame.openTail && (k + 1 == frame.items.count)
+            let gapMt = listItemGap(items: frame.items, k: k)
+            let taskIdx = nextTask
+            nextTask = taskIdx + 1
+
+            if isDeepTail {
+                flow = FlowState(
+                    lists: frame.savedFlow.lists + 1,
+                    inset: frame.savedFlow.inset + frame.indent,
+                    ink: frame.savedFlow.ink,
+                    cols: frame.savedFlow.cols,
+                    lead: nil
+                )
+                frame.pendingItem = (k: k, gapMt: gapMt, task: nil, isDeepTail: true)
+                stack.append(.blocks(BlocksFrame(
+                    blocks: item,
+                    pre: ipre?.inner,
+                    maps: imap,
+                    names: renderedKeys(count: item.count, keys: []),
+                    topLevel: false,
+                    inItem: true,
+                    openTail: itemOpenTail,
+                    allowMemo: false,
+                    lastDir: nil,
+                    curCol: col().wFull()
+                )))
+                return
+            }
+
+            let task: MarkdownTaskState? = taskIdx < doc.tasks.count ? doc.tasks[taskIdx] : nil
+            let lead: Lead
+            if let task {
+                lead = .task(task.checked)
+            } else if let start = frame.start {
+                lead = .number(start + UInt64(k))
+            } else {
+                lead = .bullet
+            }
+            let beforeBreaks: UInt8 = (k == 0 && frame.savedFlow.lists == 0) ? 2 : 1
+            flow = FlowState(
+                lists: frame.savedFlow.lists + 1,
+                inset: frame.savedFlow.inset + frame.indent,
+                ink: frame.savedFlow.ink,
+                cols: frame.savedFlow.cols + lead.width,
+                lead: (frame.savedFlow.cols, lead, beforeBreaks)
+            )
+
+            if task == nil && frame.allowMemo && !itemOpenTail {
+                let srcAt = nextSource
+                let srcN = ipre.map { Int($0.srcN) } ?? item.reduce(0) { $0 + MarkdownMemoMeta.sourceCount($1) }
+                let taskAt = nextTask
+                let taskN = ipre.map { Int($0.taskN) } ?? item.reduce(0) { $0 + MarkdownMemoMeta.taskCount($1) }
+                if let digest = settledItemDigest(
+                    item, pre: ipre, imap: imap,
+                    srcRange: (srcAt, srcN), taskRange: (taskAt, taskN)
+                ) {
+                    let body = buildMemoisedItemBody(
+                        item: item, ipre: ipre, imap: imap,
+                        srcAt: srcAt, srcN: srcN, taskAt: taskAt, taskN: taskN, digest: digest
+                    )
+                    let marker = renderListMarker(start: frame.start, k: k, indent: frame.indent, space: frame.space)
+                    let rowEl: El<State> = row()
+                        .key("i\(k)")
+                        .role(.listItem)
+                        .positionInSet(k + 1, size: frame.realN)
+                        .wFull()
+                        .child(withReveal(marker).a11yHidden())
+                        .child(body)
+                    frame.listCol.children.append(gapMt > 0 ? rowEl.mt(gapMt) : rowEl)
+                    continue
+                }
+            }
+
+            frame.pendingItem = (k: k, gapMt: gapMt, task: task, isDeepTail: false)
+            stack.append(.blocks(BlocksFrame(
+                blocks: item,
+                pre: ipre?.inner,
+                maps: imap,
+                names: renderedKeys(count: item.count, keys: []),
+                topLevel: false,
+                inItem: true,
+                openTail: itemOpenTail,
+                allowMemo: frame.allowMemo,
+                lastDir: nil,
+                curCol: col().wFull()
+            )))
+            return
+        }
+
+        stack.removeLast()
+        flow = frame.savedFlow
+        ret = frame.listCol.markdownDirection(frame.listDir)
+    }
+
+    private func renderListMarker(start: UInt64?, k: Int, indent: Float, space: Float) -> El<State> {
+        if start == nil && s.listOutside {
+            return el().w(indent).h(s.body.linePx()).child(el().outsideListDisc(s.body).bg(s.muted))
+        }
+        let label = start.map { "\($0 + UInt64(k))." } ?? "•"
+        let words: El<State> = text(label).font(s.body).color(s.muted).exactLines().w(indent)
+        return s.listOutside ? words.textAlign(.trailing).pr(space) : words.textAlign(.center)
+    }
+
+    /// Renders a past-bound deep-tail block as one selectable, searchable, copyable plain card
+    /// preceded by a visible, unselectable `RuneLabel.moreNestedLines(lines)` marker (`#1122`).
+    private func renderDeepTail(_ inl: MarkdownInline, lines: Int, map: MarkdownSpanMap) -> El<State> {
+        let chunkCap = 32 * 1024
+        let pad = String(repeating: " ", count: flow.cols)
+        let label = RuneLabels.shared.label(for: .moreNestedLines(lines))
+        let header: El<State> = el()
+            .key("more")
+            .role(.group)
+            .label(label)
+            .wFull()
+            .child(withReveal(text(label)).font(s.codeBlock).color(s.muted).wFull().a11yHidden())
+        let allHl = makeTextHighlights(for: inl.text, map: map)
+        let ink = flow.ink ?? s.text
+        var card: El<State> = col()
+            .key("deep-tail")
+            .wFull()
+            .gap(4)
+            .px(10)
+            .py(8)
+            .rounded(6)
+            .bg(s.codeBlockFill)
+            .border(0.5, s.codeBlockBorder)
+            .borderLayout()
+            .child(header)
+
+        let full = inl.text
+        let fullBytes = Array(full.utf8)
+        var start = 0
+        var chunkIdx = 0
+        while start < fullBytes.count || chunkIdx == 0 {
+            let maxEnd = min(start + chunkCap, fullBytes.count)
+            let end: Int
+            if maxEnd == fullBytes.count {
+                end = fullBytes.count
+            } else if let relNl = fullBytes[start..<maxEnd].lastIndex(of: 0x0A) {
+                end = relNl
+            } else {
+                let floored = floorUTF8Boundary(full, byte: maxEnd)
+                end = floored > start ? floored : ceilUTF8Boundary(full, byte: maxEnd + 1)
+            }
+            let slice = utf8Slice(full, range: start..<end) ?? ""
+            let chunkHl: [TextHighlight] = allHl.compactMap { h in
+                let a = max(h.byteRange.lowerBound, start)
+                let b = min(h.byteRange.upperBound, end)
+                guard a < b else { return nil }
+                var copy = h
+                copy.byteRange = (a - start)..<(b - start)
+                return copy
+            }
+            let isLast = end >= fullBytes.count
+            let rawNode = withReveal(
+                tabbedRich(slice, spans: [TextSpan(slice, color: ink)], highlights: chunkHl, style: s.codeBlock, color: ink)
+            )
+                .wFull()
+                .copyPrefix(pad)
+                .copyBreaks(chunkIdx == 0 ? 2 : 1, isLast ? 2 : 1)
+            let node = applySelect(rawNode).key("c\(chunkIdx)")
+            card.children.append(node)
+            chunkIdx += 1
+            if isLast { break }
+            start = (end < fullBytes.count && fullBytes[end] == 0x0A) ? (end + 1) : end
+        }
+        return card
+    }
+
+    private func leafBlock(_ b: MarkdownDocBlock, pre: MarkdownPreBlock?, map: MarkdownBlockMap) -> El<State> {
+        if case let .para(inl) = b, case let .deepTail(lines, tailMap) = map {
+            return renderDeepTail(inl, lines: lines, map: tailMap)
+        }
         let inlMap: MarkdownSpanMap? = if case let .inline(m) = map { m } else { nil }
         let codeMap: MarkdownSpanMap? = if case let .code(m) = map { m } else { nil }
 
@@ -5310,11 +7476,19 @@ private final class MarkdownRenderer<State> {
             let idx = nextSource
             nextSource += 1
             let srcMeta = (idx < doc.sources.count && doc.sources[idx].length == code.utf8.count) ? doc.sources[idx] : nil
-            let card = renderCode(code, source: srcMeta, map: codeMap)
             if let frameFn = view.codeFrameHandler {
-                return col().wFull().child(frameFn(card.key("card"), MarkdownCodeFrameContext(index: idx, source: code, language: srcMeta?.language, open: srcMeta?.open ?? false)))
+                let card: El<State>
+                if let digest = settledCodeCardDigest(code, source: srcMeta, map: codeMap) {
+                    card = cachedSubtree(digest) {
+                        Markdown.noteBlockBuild()
+                        return self.renderCode(code, source: srcMeta, map: codeMap).key("card")
+                    }
+                } else {
+                    card = renderCode(code, source: srcMeta, map: codeMap).key("card")
+                }
+                return col().wFull().child(frameFn(card, MarkdownCodeFrameContext(index: idx, source: code, language: srcMeta?.language, open: srcMeta?.open ?? false)))
             }
-            return card
+            return renderCode(code, source: srcMeta, map: codeMap)
 
         case let .diff(src):
             return renderDiff(src, map: codeMap)
@@ -5327,41 +7501,17 @@ private final class MarkdownRenderer<State> {
 
         case let .table(t):
             let (hm, rm): ([MarkdownSpanMap], [[MarkdownSpanMap]]) = if case let .table(head, rows) = map { (head, rows) } else { ([], []) }
-            return renderTable(t, headMaps: hm, rowMaps: rm)
-
-        case let .list(start, items):
-            return renderList(start: start, items: items, itemMaps: (map.listMaps ?? []))
-
-        case let .quote(inner):
-            let savedFlow = flow
-            let savedTaskIdx = nextTask
-            flow = FlowState(lists: savedFlow.lists, inset: savedFlow.inset + s.quote.width + s.quote.pad, ink: s.quote.text ?? savedFlow.ink, cols: savedFlow.cols, lead: nil)
-            let innerMaps = map.quoteMaps ?? []
-            let drawn = blocksIn(inner, maps: innerMaps, keys: [], topLevel: false, inItem: false)
-            flow = savedFlow
-            return quoteFrame(drawn, blocks: inner, taskIndex: savedTaskIdx, dir: dir)
+            return renderTable(t, pre: pre?.table, headMaps: hm, rowMaps: rm)
 
         case let .image(src, alt, title):
             return renderImage(src: src, alt: alt, title: title)
 
         case .rule:
             return s.rule.a <= 0 ? el().wFull().h(0) : el().wFull().h(0.5).bg(s.rule)
-        }
-    }
 
-    private func quoteFrame(_ drawn: El<State>, blocks: [MarkdownDocBlock], taskIndex: Int, dir: MarkdownDirection?) -> El<State> {
-        let qEl: El<State> = row()
-            .role(.blockquote)
-            .wFull()
-            .child(el().w(s.quote.width).hFull().rounded(min(s.quote.width / 2.0, 1.0)).bg(s.quoteRule))
-            .child(drawn.grow(1).shrink(1).pl(s.quote.pad))
-            .markdownDirection(dir)
-        if let qFrame = view.quoteFrameHandler {
-            var tIdx = taskIndex
-            let plain = MarkdownPlain.render(blocks: blocks, tasks: doc.tasks, nextTask: &tIdx)
-            return col().wFull().child(qFrame(qEl, MarkdownQuoteFrameContext(text: plain)))
+        case .list, .quote:
+            preconditionFailure("Containers handled iteratively in runFrames")
         }
-        return qEl
     }
 
     private func renderImage(src: String, alt: String, title: String) -> El<State> {
@@ -5743,7 +7893,9 @@ private final class MarkdownRenderer<State> {
         }
 
         let hls = makeTextHighlights(for: code, map: map)
-        let richCode = withReveal(tabbedRich(code, spans: spans, highlights: hls, style: s.codeBlock, color: ink)).copyBreaks(2, 2)
+        let richCode = withReveal(
+            tabbedRich(code, spans: spans, highlights: hls, style: s.codeBlock, color: ink).byLine()
+        ).copyBreaks(2, 2)
         let frame: El<State> = col()
             .role(.code)
             .dir(.ltr)
@@ -5825,78 +7977,12 @@ private final class MarkdownRenderer<State> {
         return col().wFull().child(renderCode(src, source: source, map: map).key("source"))
     }
 
-    private func renderList(start: UInt64?, items: [[MarkdownDocBlock]], itemMaps: [[MarkdownBlockMap]]) -> El<State> {
-        let indent: Float
-        if let nested = s.listNested, flow.lists > 0 {
-            indent = start != nil ? nested[1] : nested[0]
-        } else {
-            indent = s.listIndent
-        }
-
-        let outsideMarkerSpace: Float
-        if start != nil && s.listOutside {
-            outsideMarkerSpace = TextMeasure.measure("x x", style: s.body).x - TextMeasure.measure("xx", style: s.body).x
-        } else {
-            outsideMarkerSpace = 0
-        }
-
-        var c: El<State> = col().role(.list).wFull()
-        let n = items.count
-        for (k, item) in items.enumerated() {
-            let imap = k < itemMaps.count ? itemMaps[k] : []
-            let task = nextTask < doc.tasks.count ? doc.tasks[nextTask] : nil
-            nextTask += 1
-            let saved = flow
-            let lead: Lead
-            if let task {
-                lead = .task(task.checked)
-            } else if let start {
-                lead = .number(start + UInt64(k))
-            } else {
-                lead = .bullet
-            }
-            let beforeBreaks: UInt8 = (k == 0 && saved.lists == 0) ? 2 : 1
-            flow = FlowState(
-                lists: saved.lists + 1,
-                inset: saved.inset + indent,
-                ink: saved.ink,
-                cols: saved.cols + lead.width,
-                lead: (saved.cols, lead, beforeBreaks)
-            )
-
-            let topGap: Float = k == 0 ? 0 : s.listGap
-            let rowEl: El<State>
-            if let task {
-                rowEl = renderTaskItem(k: k, n: n, indent: indent, item: item, itemMaps: imap, markerOffset: task.markerOffset, checked: task.checked)
-            } else {
-                let marker: El<State>
-                if start == nil && s.listOutside {
-                    marker = el().w(indent).h(s.body.linePx()).child(el().outsideListDisc(s.body).bg(s.muted))
-                } else {
-                    let label = start.map { "\($0 + UInt64(k))." } ?? "•"
-                    let words: El<State> = text(label).font(s.body).color(s.muted).exactLines().w(indent)
-                    marker = s.listOutside ? words.textAlign(.trailing).pr(outsideMarkerSpace) : words.textAlign(.center)
-                }
-                rowEl = row()
-                    .key("i\(k)")
-                    .role(.listItem)
-                    .positionInSet(k + 1, size: n)
-                    .wFull()
-                    .child(withReveal(marker).a11yHidden())
-                    .child(blocksIn(item, maps: imap, keys: [], topLevel: false, inItem: true).grow(1).shrink(1))
-            }
-            flow = saved
-            c.children.append(topGap > 0 ? rowEl.mt(topGap) : rowEl)
-        }
-        return c
-    }
-
-    private func renderTaskItem(
+    private func renderTaskItemBody(
         k: Int,
         n: Int,
         indent: Float,
         item: [MarkdownDocBlock],
-        itemMaps: [MarkdownBlockMap],
+        itemBody: El<State>,
         markerOffset: Int,
         checked: Bool
     ) -> El<State> {
@@ -5937,7 +8023,7 @@ private final class MarkdownRenderer<State> {
             .focusable(interactive)
             .wFull()
             .child(control)
-            .child(blocksIn(item, maps: itemMaps, keys: [], topLevel: false, inItem: true).grow(1).shrink(1))
+            .child(itemBody.grow(1).shrink(1))
         if let onTask = view.onTaskHandler, interactive {
             let bKey = currentBlockKey
             r = r.onClick { state, tx in
@@ -5947,10 +8033,16 @@ private final class MarkdownRenderer<State> {
         return r
     }
 
-    private func renderTable(_ t: MarkdownTableAST, headMaps: [MarkdownSpanMap], rowMaps: [[MarkdownSpanMap]]) -> El<State> {
+    private func renderTable(
+        _ t: MarkdownTableAST,
+        pre: MarkdownPreTable?,
+        headMaps: [MarkdownSpanMap],
+        rowMaps: [[MarkdownSpanMap]]
+    ) -> El<State> {
         let n = max(t.align.count, max(t.head.count, 1))
-        let settledRows = (t.open && view.config.isStreaming) ? Array(t.rows.dropLast()) : t.rows
-        let colWidths = measureTableColumns(t, colCount: n, settledRows: settledRows)
+        let settledCount = (t.open && view.config.isStreaming) ? max(0, t.rows.count - 1) : t.rows.count
+        let settledRows = Array(t.rows.prefix(settledCount))
+        let colWidths = measureTableColumns(t, pre: pre, colCount: n, settledRows: settledRows)
         let total = colWidths.natural.reduce(0, +)
 
         let ring: Color? = s.tableFrame?.ring ?? s.tableOutline
@@ -5977,17 +8069,60 @@ private final class MarkdownRenderer<State> {
         let tableFeatures = s.tableTabular ? "tnum" : baseTableFont.features
         let headFont = TextStyle(size: baseTableFont.size, weight: s.tableHeadWeight ?? s.strongWeight, lineHeight: baseTableFont.lineHeight, family: baseTableFont.family, features: tableFeatures)
         let bodyFont = TextStyle(size: baseTableFont.size, weight: baseTableFont.weight, lineHeight: baseTableFont.lineHeight, letterSpacing: baseTableFont.letterSpacing, italic: baseTableFont.italic, family: baseTableFont.family, features: tableFeatures)
-        let headRow = renderTableRow(cells: t.head, maps: headMaps, table: t, widths: fixedWidths, natural: colWidths.natural, minWidths: colWidths.min, font: headFont, color: s.tableHeadText, pad: headPad, cellRole: .columnHeader).key("th")
+        let tableDir = MarkdownBidi.tableDirection(t)
+
+        func buildHead() -> El<State> {
+            renderTableRow(cells: t.head, maps: headMaps, table: t, widths: fixedWidths, natural: colWidths.natural, minWidths: colWidths.min, font: headFont, color: s.tableHeadText, pad: headPad, cellRole: .columnHeader).key("th")
+        }
+
+        func buildRow(_ i: Int, _ cells: [MarkdownInline]) -> El<State> {
+            let rmap = i < rowMaps.count ? rowMaps[i] : []
+            return renderTableRow(cells: cells, maps: rmap, table: t, widths: fixedWidths, natural: colWidths.natural, minWidths: colWidths.min, font: bodyFont, color: s.text, pad: s.tablePad, cellRole: .gridCell).key("r\(i)")
+        }
 
         if let bodyLook = s.tableBody {
+            let round = ring != nil || fill != nil
+            let r = max(0, 6.0 - inset)
+            let headRow: El<State>
+            if let digest = settledTableRowDigest(
+                cells: t.head, pre: pre?.head, maps: headMaps, align: t.align, tableDir: tableDir,
+                natural: colWidths.natural, minWidths: colWidths.min, widths: fixedWidths,
+                font: headFont, color: s.tableHeadText, pad: headPad, cellRoleTag: 1, key: "th",
+                extraTag: 1, extraBool: round, extraA: r
+            ) {
+                headRow = cachedSubtree(digest) {
+                    Markdown.noteBlockBuild()
+                    return buildHead()
+                }
+            } else {
+                headRow = buildHead()
+            }
             frame = frame.child(headRow)
             if !t.rows.isEmpty {
                 var rowsCol: El<State> = col().key("tbc").wFull()
                 for (i, cells) in t.rows.enumerated() {
+                    let bordered = i + 1 < t.rows.count
+                    let settled = !view.config.isStreaming || !t.open || bordered
                     let rmap = i < rowMaps.count ? rowMaps[i] : []
-                    var rowEl = renderTableRow(cells: cells, maps: rmap, table: t, widths: fixedWidths, natural: colWidths.natural, minWidths: colWidths.min, font: bodyFont, color: s.text, pad: s.tablePad, cellRole: .gridCell).key("r\(i)")
-                    if i + 1 < t.rows.count {
-                        rowEl = rowEl.borderSides(bottom: 0.5, color: s.tableRule).borderLayout()
+                    let rpre: MarkdownPreRow? = pre.flatMap { i < $0.rows.count ? $0.rows[i] : nil }
+                    let rkey = "r\(i)"
+                    func styledRow() -> El<State> {
+                        let rowEl = buildRow(i, cells)
+                        return bordered ? rowEl.borderSides(bottom: 0.5, color: s.tableRule).borderLayout() : rowEl
+                    }
+                    let rowEl: El<State>
+                    if settled, let digest = settledTableRowDigest(
+                        cells: cells, pre: rpre, maps: rmap, align: t.align, tableDir: tableDir,
+                        natural: colWidths.natural, minWidths: colWidths.min, widths: fixedWidths,
+                        font: bodyFont, color: s.text, pad: s.tablePad, cellRoleTag: 2, key: rkey,
+                        extraTag: 2, extraBool: bordered
+                    ) {
+                        rowEl = cachedSubtree(digest) {
+                            Markdown.noteBlockBuild()
+                            return styledRow()
+                        }
+                    } else {
+                        rowEl = styledRow()
                     }
                     rowsCol = rowsCol.child(rowEl)
                 }
@@ -5995,12 +8130,45 @@ private final class MarkdownRenderer<State> {
                 frame = frame.child(card)
             }
         } else {
-            frame = frame.child(headRow.bg(s.tableHeadFill))
+            let r = max(0, 6.0 - inset)
+            let b = t.rows.isEmpty ? r : 0.0
+            let headRow: El<State>
+            if let digest = settledTableRowDigest(
+                cells: t.head, pre: pre?.head, maps: headMaps, align: t.align, tableDir: tableDir,
+                natural: colWidths.natural, minWidths: colWidths.min, widths: fixedWidths,
+                font: headFont, color: s.tableHeadText, pad: headPad, cellRoleTag: 1, key: "th",
+                extraTag: 3, extraBool: ring != nil, extraA: r, extraB: b
+            ) {
+                headRow = cachedSubtree(digest) {
+                    Markdown.noteBlockBuild()
+                    return buildHead().bg(self.s.tableHeadFill)
+                }
+            } else {
+                headRow = buildHead().bg(s.tableHeadFill)
+            }
+            frame = frame.child(headRow)
             for (i, cells) in t.rows.enumerated() {
                 let sepColor = (i == 0 ? s.tableHeadRule : nil) ?? s.tableRule
                 frame = frame.child(el().key("s\(i)").wFull().h(0.5).bg(sepColor).a11yHidden())
+                let settled = !view.config.isStreaming || !t.open || i + 1 < t.rows.count
                 let rmap = i < rowMaps.count ? rowMaps[i] : []
-                frame = frame.child(renderTableRow(cells: cells, maps: rmap, table: t, widths: fixedWidths, natural: colWidths.natural, minWidths: colWidths.min, font: bodyFont, color: s.text, pad: s.tablePad, cellRole: .gridCell).key("r\(i)"))
+                let rpre: MarkdownPreRow? = pre.flatMap { i < $0.rows.count ? $0.rows[i] : nil }
+                let rkey = "r\(i)"
+                let rowEl: El<State>
+                if settled, let digest = settledTableRowDigest(
+                    cells: cells, pre: rpre, maps: rmap, align: t.align, tableDir: tableDir,
+                    natural: colWidths.natural, minWidths: colWidths.min, widths: fixedWidths,
+                    font: bodyFont, color: s.text, pad: s.tablePad, cellRoleTag: 2, key: rkey,
+                    extraTag: 4
+                ) {
+                    rowEl = cachedSubtree(digest) {
+                        Markdown.noteBlockBuild()
+                        return buildRow(i, cells)
+                    }
+                } else {
+                    rowEl = buildRow(i, cells)
+                }
+                frame = frame.child(rowEl)
             }
             if ring == nil {
                 frame = frame.child(el().key("s-end").wFull().h(0.5).bg((t.rows.isEmpty ? s.tableHeadRule : nil) ?? s.tableRule).a11yHidden())
@@ -6062,40 +8230,90 @@ private final class MarkdownRenderer<State> {
         return r
     }
 
+    /// Column widths from the header and every settled row, backed by 128-bit `WIDTHS` and per-row
+    /// `ROW_WIDTHS` caches so streaming appends measure only the newly settled row (`O(1)` per row, #1130).
     private func measureTableColumns(
         _ t: MarkdownTableAST,
+        pre: MarkdownPreTable?,
         colCount n: Int,
         settledRows: [[MarkdownInline]]
-    ) -> (natural: [Float], min: [Float], fit: [Float]) {
-        func measureLines(_ rows: [[MarkdownInline]], font: TextStyle) -> ([Float], [Float], [Float]) {
+    ) -> MarkdownTableColumns {
+        let rawTableFont = s.tableFont ?? s.body
+        let tableFeatures = s.tableTabular ? "tnum" : rawTableFont.features
+        let baseFont = TextStyle(size: rawTableFont.size, weight: rawTableFont.weight, lineHeight: rawTableFont.lineHeight, letterSpacing: rawTableFont.letterSpacing, italic: rawTableFont.italic, family: rawTableFont.family, features: tableFeatures)
+        let headFont = TextStyle(size: baseFont.size, weight: s.tableHeadWeight ?? s.strongWeight, lineHeight: baseFont.lineHeight, family: baseFont.family, features: tableFeatures)
+        let epoch = Rune.fontEpoch()
+        let headPad = s.tableHeadPad ?? s.tablePad
+
+        let headRKey = tableRowWidthKey(cells: t.head, pre: pre?.head, colCount: n, font: headFont, epoch: epoch)
+        var bodyRKeys: [MarkdownDigest128] = []
+        bodyRKeys.reserveCapacity(settledRows.count)
+        for (i, row) in settledRows.enumerated() {
+            let rpre: MarkdownPreRow? = pre.flatMap { i < $0.rows.count ? $0.rows[i] : nil }
+            bodyRKeys.append(tableRowWidthKey(cells: row, pre: rpre, colCount: n, font: baseFont, epoch: epoch))
+        }
+
+        var kh = MarkdownPairHasher()
+        kh.writeInt(n)
+        kh.writeDigest(headRKey)
+        kh.writeInt(bodyRKeys.count)
+        for rk in bodyRKeys { kh.writeDigest(rk) }
+        kh.writeFloat(s.tableMinColumn)
+        kh.writeInt(s.tablePad.count)
+        for p in s.tablePad { kh.writeFloat(p) }
+        kh.writeInt(headPad.count)
+        for p in headPad { kh.writeFloat(p) }
+        kh.writeBool(s.tableFlushLeft)
+        let tableKey = kh.finish128()
+
+        let caches = MarkdownTableWidthCaches.shared
+        if let hit = caches.widths.get(tableKey),
+           hit.natural.count == n && hit.min.count == n && hit.fit.count == n {
+            return hit
+        }
+
+        func measureRow(_ cells: [MarkdownInline], rkey: MarkdownDigest128, font: TextStyle) -> MarkdownTableRowWidths {
+            if let hit = caches.rowWidths.get(rkey),
+               hit.natural.count == n && hit.fit.count == n {
+                return hit
+            }
+            Markdown.noteTableRowMeasurement()
             var natural = Array(repeating: Float(0), count: n)
             var fit = Array(repeating: Float(0), count: n)
-            for row in rows {
-                for j in 0..<min(n, row.count) {
-                    let inl = row[j]
-                    if inl.text.isEmpty { continue }
-                    let spans = buildTextSpans(inl, font: font, baseColor: s.text)
-                    // Unrounded, as a browser's table layout sums them; a hair over, so a cell at
-                    // its column's natural width never wraps its last word (`table.rs` widths,
-                    // `rune::text::content_widths`: min-content and max-content of the cell).
-                    let (minW, maxW) = TextMeasure.contentWidths(inl.text, spans: spans, style: font)
-                    let hits = MarkdownTableCodePad.hits(inl)
-                    let pad: (Bool) -> Float = { $0 ? self.s.inlineCodePad : 0 }
-                    natural[j] = max(natural[j], maxW + pad(hits.last) + 0.01)
-                    fit[j] = max(fit[j], minW + pad(hits.word) + 0.01)
+            for j in 0..<min(n, cells.count) {
+                let inl = cells[j]
+                if inl.text.isEmpty { continue }
+                let spans = buildTextSpans(inl, font: font, baseColor: s.text)
+                let (minW, maxW) = TextMeasure.contentWidths(inl.text, spans: spans, style: font)
+                let hits = MarkdownTableCodePad.hits(inl)
+                let padVal: (Bool) -> Float = { $0 ? self.s.inlineCodePad : 0 }
+                natural[j] = maxW + padVal(hits.last) + 0.01
+                fit[j] = minW + padVal(hits.word) + 0.01
+            }
+            let rw = MarkdownTableRowWidths(natural: natural, fit: fit)
+            caches.rowWidths.insert(rkey, value: rw, bytes: 8 * n + 48)
+            return rw
+        }
+
+        func foldRows(_ keys: [MarkdownDigest128], _ rows: [[MarkdownInline]], font: TextStyle) -> ([Float], [Float], [Float]) {
+            var natural = Array(repeating: Float(0), count: n)
+            var fit = Array(repeating: Float(0), count: n)
+            for idx in 0..<min(keys.count, rows.count) {
+                let rw = measureRow(rows[idx], rkey: keys[idx], font: font)
+                if rw.natural.count == n && rw.fit.count == n {
+                    for j in 0..<n {
+                        natural[j] = max(natural[j], rw.natural[j])
+                        fit[j] = max(fit[j], rw.fit[j])
+                    }
                 }
             }
             let mins = fit.map { min($0, s.tableMinColumn) }
             return (natural, mins, fit)
         }
 
-        let rawTableFont = s.tableFont ?? s.body
-        let tableFeatures = s.tableTabular ? "tnum" : rawTableFont.features
-        let baseFont = TextStyle(size: rawTableFont.size, weight: rawTableFont.weight, lineHeight: rawTableFont.lineHeight, letterSpacing: rawTableFont.letterSpacing, italic: rawTableFont.italic, family: rawTableFont.family, features: tableFeatures)
-        let headFont = TextStyle(size: baseFont.size, weight: s.tableHeadWeight ?? s.strongWeight, lineHeight: baseFont.lineHeight, family: baseFont.family, features: tableFeatures)
-        let (hn, hm, hf) = measureLines([t.head], font: headFont)
-        let (bn, bm, bf) = measureLines(settledRows, font: baseFont)
-        let headPadX = (s.tableHeadPad ?? s.tablePad)[0]
+        let (hn, hm, hf) = foldRows([headRKey], [t.head], font: headFont)
+        let (bn, bm, bf) = foldRows(bodyRKeys, settledRows, font: baseFont)
+        let headPadX = headPad[0]
         let bodyPadX = s.tablePad[0]
         let hasBody = !settledRows.isEmpty
 
@@ -6106,6 +8324,9 @@ private final class MarkdownRenderer<State> {
         var nat: [Float] = []
         var mins: [Float] = []
         var fits: [Float] = []
+        nat.reserveCapacity(n)
+        mins.reserveCapacity(n)
+        fits.reserveCapacity(n)
         for j in 0..<n {
             let hp = pad(j, headPadX)
             let bp = pad(j, bodyPadX)
@@ -6113,7 +8334,9 @@ private final class MarkdownRenderer<State> {
             mins.append(hasBody ? max(hm[j] + hp, bm[j] + bp) : (hm[j] + hp))
             fits.append(hasBody ? max(hf[j] + hp, bf[j] + bp) : (hf[j] + hp))
         }
-        return (nat, mins, fits)
+        let cols = MarkdownTableColumns(natural: nat, min: mins, fit: fits)
+        caches.widths.insert(tableKey, value: cols, bytes: 12 * n + 64)
+        return cols
     }
 
     private func autoLayoutColumns(natural: [Float], fit: [Float], avail: Float, fullWidth: Bool) -> [Float] {

@@ -98,6 +98,16 @@ void rune_android_free_string(char *value) { free(value); }
 // its context and window surface and never terminates another client's display.
 static EGLDisplay process_display = EGL_NO_DISPLAY;
 
+EGLDisplay rune_android_shared_egl_display(void) {
+    if (process_display == EGL_NO_DISPLAY) {
+        EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        if (display == EGL_NO_DISPLAY || !eglInitialize(display, NULL, NULL))
+            return EGL_NO_DISPLAY;
+        process_display = display;
+    }
+    return process_display;
+}
+
 static void release_surface(Host *h) {
     if (h->display != EGL_NO_DISPLAY) {
         const EGLDisplay previous_display = eglGetCurrentDisplay();
@@ -140,13 +150,9 @@ static int create_surface(Host *h) {
     const EGLint context_attrs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
     EGLConfig config;
     EGLint count, format;
-    if (process_display == EGL_NO_DISPLAY) {
-        EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-        if (display == EGL_NO_DISPLAY || !eglInitialize(display, NULL, NULL))
-            goto failed;
-        process_display = display;
-    }
-    h->display = process_display;
+    h->display = rune_android_shared_egl_display();
+    if (h->display == EGL_NO_DISPLAY)
+        goto failed;
     if (!eglBindAPI(EGL_OPENGL_ES_API) || !eglChooseConfig(h->display, attrs, &config, 1, &count) || !count ||
         !eglGetConfigAttrib(h->display, config, EGL_NATIVE_VISUAL_ID, &format) ||
         ANativeWindow_setBuffersGeometry(h->window, 0, 0, format) != 0)
@@ -226,8 +232,8 @@ static int dispatch_ready(int fd, int events, void *data) {
     return 1;
 }
 
-static void attach_main_queue(ALooper *looper) {
-    if (drain_dispatch)
+void rune_android_attach_main_queue(ALooper *looper) {
+    if (drain_dispatch || !looper)
         return;
     int (*get_handle)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "_dispatch_get_main_queue_handle_4CF");
     void (*drain)(void *) = (void (*)(void *))dlsym(RTLD_DEFAULT, "_dispatch_main_queue_callback_4CF");
@@ -598,7 +604,7 @@ int32_t rune_android_attach(void *raw, void *state, RuneAndroidCallbacks callbac
     }
     a->instance = h;
     config(a);
-    attach_main_queue(h->looper);
+    rune_android_attach_main_queue(h->looper);
     ANativeActivityCallbacks *cb = a->callbacks;
     cb->onDestroy = destroy;
     cb->onResume = resume;

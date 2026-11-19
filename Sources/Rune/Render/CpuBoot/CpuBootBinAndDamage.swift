@@ -203,15 +203,27 @@ public enum CpuBootBin {
                             continue
                         case .flat:
                             bounds[n] = .zero
+                            let i = scene.instances[n]
+                            let scissor: SIMD4<Int32>
+                            if i.clip == NO_CLIP {
+                                scissor = inside ?? SIMD4<Int32>(0, 0, Int32(w), Int32(h))
+                            } else {
+                                let sx0 = Int32(min(max(floorf(i.clip.x), 0.0), Float(w)))
+                                let sy0 = Int32(min(max(floorf(i.clip.y), 0.0), Float(h)))
+                                let sx1 = Int32(min(max(ceilf(i.clip.z), 0.0), Float(w)))
+                                let sy1 = Int32(min(max(ceilf(i.clip.w), 0.0), Float(h)))
+                                let s = (sx1 > sx0 && sy1 > sy0) ? SIMD4<Int32>(sx0, sy0, sx1, sy1) : .zero
+                                scissor = inside.map { cut(s, $0) } ?? s
+                            }
+                            stack.append((scissor, within[n]))
                         case .render:
                             bounds[n] = inside.map { cut(l.bounds, $0) } ?? l.bounds
                             stack.append((bounds[n], p))
                         }
-                    } else if l.show == .render {
-                        bounds[n] = stack.popLast()?.0 ?? .zero
-                        within[n] = stack.last?.1 ?? topLayer
                     } else {
-                        bounds[n] = .zero
+                        let popped = stack.popLast()
+                        bounds[n] = (l.show == .render) ? (popped?.0 ?? .zero) : .zero
+                        within[n] = stack.last?.1 ?? topLayer
                     }
                 } else if let inside {
                     bounds[n] = cut(bounds[n], inside)
@@ -221,7 +233,10 @@ public enum CpuBootBin {
 
             var blurs: [(UInt32, CpuBootBackdrop.Record)] = []
             var quiet = [Bool](repeating: false, count: tiles)
+            var blurSeen = 0
             for (idx, inst) in scene.instances.enumerated() where inst.params.y == KIND_BACKDROP_BLUR {
+                guard blurSeen < MAX_BACKDROP_BLURS else { break }
+                blurSeen += 1
                 bounds[idx] = CpuBootBackdrop.bounds(inst, viewport: (w, h))
                 if let rec = CpuBootBackdrop.plan(inst, viewport: (w, h)) {
                     for t in regionTiles(rec.region, cols: cols, rows: rows) {
@@ -317,6 +332,17 @@ public enum CpuBootBin {
             )
         }
 
+        /// Whether a layer's clip can be applied as a hardware scissor without isolating into an
+        /// offscreen target: unclipped, or an integer-aligned square rectangle with no fade (`#1212`).
+        public static func isScissorClip(_ clip: SIMD4<Float>, fade: SIMD4<UInt32>) -> Bool {
+            if clip == NO_CLIP { return true }
+            return fade == .zero
+                && abs(clip.x - clip.x.rounded()) < 1e-3
+                && abs(clip.y - clip.y.rounded()) < 1e-3
+                && abs(clip.z - clip.z.rounded()) < 1e-3
+                && abs(clip.w - clip.w.rounded()) < 1e-3
+        }
+
         private static func planLayers(_ instances: [RenderInstance], viewport: (UInt32, UInt32)) -> ([PlannedLayer], [UInt32: UInt32]) {
             struct Open {
                 var at: Int
@@ -344,7 +370,8 @@ public enum CpuBootBin {
                     let additive = i.params.x == 1.0
                     let additiveParent = parent.map { plans[$0].additive } ?? false
                     let hole = cache ? SIMD4<Float>.zero : i.radii
-                    let flat = !cache && opacity == 1.0 && !additive && !additiveParent && i.fade.w == 0 && i.clip == NO_CLIP && hole.w == 0.0
+                    let flat = !cache && opacity == 1.0 && !additive && !additiveParent && i.fade.w == 0
+                        && isScissorClip(i.clip, fade: i.fade) && hole.w == 0.0
                     let show: LayerShow = hidden ? .hidden : (flat ? .flat : .render)
                     scope[UInt32(idx)] = UInt32(plans.count)
                     open.append(Open(
@@ -464,7 +491,10 @@ public enum CpuBootDamage {
     static func hashInstance(_ scene: CpuBootScene, bins: CpuBootBin.Bins, index: Int,
                              atlas: inout CpuBootAtlasDamage) -> InstanceHash {
         let inst = scene.instances[index]
+        let b = bins.bounds[index]
         var h = hashWords(of: inst)
+        h = mixHash(mixHash(mixHash(mixHash(h, UInt32(bitPattern: b.x)), UInt32(bitPattern: b.y)),
+                            UInt32(bitPattern: b.z)), UInt32(bitPattern: b.w))
         if inst.params.y == KIND_IMAGE || inst.params.y == KIND_GLYPH {
             let texels = atlas.sample(inst)
             h = mixHash(mixHash(h, UInt32(truncatingIfNeeded: texels)), UInt32(truncatingIfNeeded: texels >> 32))
@@ -478,7 +508,6 @@ public enum CpuBootDamage {
             h = mixHash(h, UInt32(truncatingIfNeeded: l.bounds.w))
             h = mixHash(h, l.additive ? 1 : 0)
         }
-        let b = bins.bounds[index]
         var flat = SIMD4<Int32>.zero
         var solid = false
         var flatColor: UInt64 = 0
@@ -519,7 +548,8 @@ public enum CpuBootDamage {
         h = mixHash(h, bins.quiet[tile] ? 1 : 0)
         for n in bins.tile(tile) {
             let ih = each[Int(n)]
-            let flat = ih.flat.x <= rx0 && ih.flat.y <= ry0 && ih.flat.z >= rx1 && ih.flat.w >= ry1
+            let coversBounds = ih.bounds.x <= rx0 && ih.bounds.y <= ry0 && ih.bounds.z >= rx1 && ih.bounds.w >= ry1
+            let flat = coversBounds && ih.flat.x <= rx0 && ih.flat.y <= ry0 && ih.flat.z >= rx1 && ih.flat.w >= ry1
             let token = flat ? ih.flatColor : ih.full
             h = ((h << 7 | h >> 57) ^ token) &* 0x517c_c1b7_2722_0a95
         }

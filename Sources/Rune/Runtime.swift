@@ -952,6 +952,11 @@ public final class Runtime<State> {
     internal var pendingCaretFollow: Bool = false
     internal var scrollRequestsState = ScrollRequestsState()
     internal var scrollGlidingPaths: Set<String> = []
+    /// Chromium-style notched mouse wheel glide toggle (`Runtime::set_wheel_glide`, `#1150`).
+    internal var wheelGlideEnabled: Bool = true
+    internal var wheelCurvesY: [String: WheelCurve] = [:]
+    internal var wheelCurvesX: [String: WheelCurve] = [:]
+    private var lastWheelGlideTime: Double? = nil
     internal var directScrolledPaths: Set<String> = []
     internal var virtualLists: [String: RuntimeVirtualListState] = [:]
     private var singleVirtualPath: String?
@@ -2373,6 +2378,9 @@ public final class Runtime<State> {
         }()
         let touchMoved = stepTouchScrollFrame(at: animNow, dt: scrollDt)
         scrollStore.sample(at: animNow)
+        let wheelGlideDt = lastWheelGlideTime.map { max(0.0, animNow - $0) } ?? 0.0
+        lastWheelGlideTime = animNow
+        let wheelGlideMoved = stepWheelGlides(dt: wheelGlideDt, catchUp: false, at: now)
         if !pendingScrollJumpPaths.isEmpty {
             scrollMovedByHand.formUnion(pendingScrollJumpPaths)
             pendingScrollJumpPaths.removeAll(keepingCapacity: true)
@@ -2447,7 +2455,7 @@ public final class Runtime<State> {
         } else if !needsCommit && !directScrolledPaths.isEmpty && !scrollStore.isAnimating {
             directScrolledPaths.removeAll(keepingCapacity: true)
         }
-        let isScrolling = isInitiallyScrolling || scrollMovedSinceLastFrame || touchMoved || scrollStore.isAnimating
+        let isScrolling = isInitiallyScrolling || scrollMovedSinceLastFrame || touchMoved || scrollStore.isAnimating || wheelGlideMoved || hasActiveWheelGlides
         if isScrolling {
             frameHadScrollSinceLastFrame = true
             layoutFeedback.step(.reopened)
@@ -2557,12 +2565,13 @@ public final class Runtime<State> {
             || tooltipFading(at: now)
             || hasActiveSelectableEdgeScroll
             || !activeTextFlights.isEmpty
+            || hasActiveWheelGlides
             || hasMovingScaleSettle
             || activeWordReveals
         var sources: UInt32 = 0
         if tracksAnimating || tooltipFading(at: now) { sources |= AnimSource.tracks }
         if growthMoving || slackMoving || growthRows.values.contains(where: { $0.track.moving }) || growthStacks.values.contains(where: { !$0.pendingHeights.isEmpty || !$0.closing.isEmpty || !$0.runs.isEmpty }) || kitHooks.growthStacks.values.contains(where: { !$0.closing.isEmpty }) { sources |= AnimSource.growth }
-        if scrollStore.isAnimating || isTouchScrollActive || hasActiveSelectableEdgeScroll { sources |= AnimSource.scroll }
+        if scrollStore.isAnimating || isTouchScrollActive || hasActiveSelectableEdgeScroll || hasActiveWheelGlides { sources |= AnimSource.scroll }
         if activeWordReveals { sources |= AnimSource.reveal }
         if liveStore.isAnimating || liveActive { sources |= AnimSource.live }
         if virtualFill.isFilling { sources |= AnimSource.virtualFill }
@@ -2583,8 +2592,10 @@ public final class Runtime<State> {
             elSliceRenderState.groupRestIds.remove(id)
             atBottomStates.removeValue(forKey: id)
             farFromBottomStates.removeValue(forKey: id)
+            loopRuntime.tracks.removeValue(forKey: id)
         }
         if !finishedExitedIds.isEmpty {
+            wordRevealStore.capOrphans(mountedIds: Set(nodeIndexById.keys))
             let keep = liveLane.dirty
             rebuildLiveSubscriptionsIncludingExiting()
             liveLane.pruned(keep)
@@ -9641,8 +9652,12 @@ public final class Runtime<State> {
                     } else {
                         let hasSpans = (resolvedText.spans?.isEmpty == false)
                         let shapeMaxW: Float? = (resolvedText.style.wrap == .noWrap && resolvedText.style.maxLines == 0) ? nil : wrapWidth
+                        let byLineReq = Self.staticByLineParagraphRequest(
+                            nodeId: snap.nodeId, el: el, style: resolvedText.style,
+                            spans: resolvedText.spans, pills: resolvedText.pills
+                        )
                         let box = GlyphAtlas.withBaseInk(defaultTextColor, mode: inkMode) {
-                            resolvePaintTextLayout(
+                            let resolved = resolvePaintTextLayout(
                                 snapId: snap.nodeId,
                                 isInput: false,
                                 isExiting: p.isExiting,
@@ -9655,8 +9670,10 @@ public final class Runtime<State> {
                                 glidePx: glidePx,
                                 isSecure: resolvedText.isSecure,
                                 pretty: resolvedText.pretty,
+                                paragraphs: byLineReq,
                                 rasterWindow: rasterWindow(for: devClip)
                             )
+                            return byLineReq != nil ? prepareVisibleParagraphs(in: resolved, field: snap.nodeId, window: rasterWindow(for: devClip)) : resolved
                         }
                         labelBox = box
                         shaped = box.shaped
@@ -9898,7 +9915,22 @@ public final class Runtime<State> {
                         let textShownY0 = (!textRotated && !textInCache) ? max(glyphClip.y, -filterMargin) : glyphClip.y
                         let textShownY1 = (!textRotated && !textInCache) ? min(glyphClip.y + glyphClip.w, Float(devH) + filterMargin) : (glyphClip.y + glyphClip.w)
                         let glyphsToEmit: ArraySlice<PositionedGlyph>
-                        if let labelBox, labelBox.rasterWindow == nil, !wrapTruncateLayer {
+                        let labelHasParagraphs = labelBox?.paragraphs != nil
+                        if let labelBox, let pl = labelBox.paragraphs {
+                            let ls = pl.scale
+                            let labelBaseLinePt = resolvedText.style.lineHeight ?? resolvedText.style.size
+                            let labelSpanMaxPt = resolvedText.spans?.compactMap(\.size).max() ?? 0
+                            let labelEmPt = max(max(resolvedText.style.size, labelBaseLinePt), labelSpanMaxPt)
+                            let rowPad = 2.0 * labelEmPt * ls + 2.0 / max(1e-4, pxScale)
+                            let rows: (Float, Float) = (!textRotated && abs(scaleVec.y) > 1e-4)
+                                ? (
+                                    ((devClip.y / pxScale - restOriginY) / scaleVec.y) * ls - rowPad,
+                                    (((devClip.y + devClip.w) / pxScale - restOriginY) / scaleVec.y) * ls + rowPad
+                                )
+                                : (-Float.infinity, Float.infinity)
+                            if pl.waiting { textRows[snap.nodeId] = rows }
+                            glyphsToEmit = pl.glyphs(top: rows.0, bottom: rows.1, using: textSystem, inks: labelBox.spanInks)[...]
+                        } else if let labelBox, labelBox.rasterWindow == nil, !wrapTruncateLayer {
                             let (lblBandTop, lblBandBot): (Float, Float) = (!textRotated && abs(scaleVec.y) > 1e-4)
                                 ? (
                                     (devClip.y / pxScale - restOriginY) / scaleVec.y - 2.0,
@@ -9919,7 +9951,7 @@ public final class Runtime<State> {
                             glyphsToEmit = shaped.glyphs[...]
                         }
                         let placements = TextBoxGeometry.GlyphPlacementBatch(shaped: shaped, atlas: textSystem.glyphAtlas,
-                                                                             exact: textRestsExact || raster != nil)
+                                                                             exact: !labelHasParagraphs && (textRestsExact || raster != nil))
                         defer { placements?.finish() }
                         var baselineLine = 0
                         for gi in glyphsToEmit.indices {
@@ -9927,8 +9959,10 @@ public final class Runtime<State> {
                             let (g, placement) = TextBoxGeometry.paintGlyph(
                                 inkGlyph, index: gi, shaped: shaped, origin: SIMD2<Float>(labelRestX, restOriginY) * pxScale,
                                 scale: SIMD2<Float>(scaleVec.x, scaleVec.y), pixelScale: pxScale,
-                                restsExact: textRestsExact, baselines: roundedBaselines, line: &baselineLine, atlas: textSystem.glyphAtlas,
-                                raster: raster, placements: placements
+                                restsExact: textRestsExact && !labelHasParagraphs,
+                                baselines: labelHasParagraphs ? [] : roundedBaselines,
+                                line: &baselineLine, atlas: textSystem.glyphAtlas,
+                                raster: labelHasParagraphs ? nil : raster, placements: placements
                             )
                             let gx = placement.x, gy = placement.y, gh = placement.w
                             if !textRotated && (gy + gh < textShownY0 || gy > textShownY1 ||
@@ -10911,14 +10945,15 @@ public final class Runtime<State> {
     }
 
     internal func anchorRect(forKey key: String) -> MotionRect? {
-        let suffix = "/" + key
-        let node: FlatNode?
-        if key.contains("/") {
-            node = flatNodes.first(where: { $0.path == key || $0.path.hasSuffix(suffix) })
-        } else {
-            node = flatNodes.first(where: { matchesAuthoredKey($0.key, key) })
+        guard !key.isEmpty,
+              let idx = flatNodes.indices.first(where: { i in
+                  let n = flatNodes[i]
+                  return selectsElementSelector(key, path: n.path, key: n.key) && !subtreeExiting(i)
+              }) else {
+            return nil
         }
-        guard let matched = node, !matched.effectiveInert else { return nil }
+        let matched = flatNodes[idx]
+        guard !matched.effectiveInert else { return nil }
         return presentedRectByPath[matched.path] ?? matched.targetRect
     }
 
@@ -14276,7 +14311,7 @@ public final class Runtime<State> {
 
         let leafEl = flatNodes[idx].el
         if leafEl.attachedCursor == nil {
-            if leafEl.handlers.editLens != nil || leafEl.role == ElementRole.textInput || leafEl.isSelectable {
+            if leafEl.handlers.editLens != nil || leafEl.role == ElementRole.textInput || leafEl.role == ElementRole.searchbox || leafEl.isSelectable {
                 return .text
             }
             if leafEl.role == ElementRole.link || leafEl.a11yHref != nil {
@@ -14618,10 +14653,18 @@ public final class Runtime<State> {
     }
 
     internal func findFocusGroupAncestor(of idx: Int) -> Int? {
-        var cur: Int? = idx
-        while let i = cur {
-            if flatNodes[i].el.focusGroup {
+        guard flatNodes.indices.contains(idx) else { return nil }
+        if flatNodes[idx].el.focusGroup { return idx }
+        var cur = flatNodes[idx].parentIndex
+        while let i = cur, flatNodes.indices.contains(i) {
+            let el = flatNodes[i].el
+            if el.focusGroup {
                 return i
+            }
+            // A control nested inside a focusable item of a focus group (e.g. a close button
+            // inside a tab) is its own Tab stop, not a member of that group (`focus.rs::focus_group`, #1219).
+            if nodeTakesFocus(el) || el.handlers.editLens != nil {
+                return nil
             }
             cur = flatNodes[i].parentIndex
         }

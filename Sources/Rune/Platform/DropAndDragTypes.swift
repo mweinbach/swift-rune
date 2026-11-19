@@ -210,19 +210,47 @@ extension DragImage {
         return [x0, y0, x1 - x0, y1 - y0]
     }
 
-    /// Converts premultiplied RGBA/BGRA readback pixels to straight RGBA (`drag_out/mod.rs::to_straight_rgba`).
-    public static func toStraightRGBA(_ pixels: inout [UInt8], bgra: Bool) {
+    /// Converts premultiplied RGBA/BGRA readback pixels to straight RGBA (`drag_out/mod.rs::to_straight_rgba`, `#1212`).
+    ///
+    /// On `*Srgb` targets (`srgbTarget == true`) the bytes hold `srgbEncode(linearRGB * a)` and are
+    /// un-premultiplied in linear light; on non-sRGB targets (`srgb_blend`) they divide directly.
+    /// Fully transparent pixels always zero their RGB channels.
+    public static func toStraightRGBA(_ pixels: inout [UInt8], bgra: Bool, srgbTarget: Bool = false) {
         let count = pixels.count - (pixels.count % 4)
-        for i in stride(from: 0, to: count, by: 4) {
-            if bgra {
+        if bgra {
+            for i in stride(from: 0, to: count, by: 4) {
                 pixels.swapAt(i, i + 2)
             }
-            let a = pixels[i + 3]
-            if a != 0 && a != 255 {
-                let alpha = UInt32(a)
-                for c in 0..<3 {
-                    let v = (UInt32(pixels[i + c]) * 255 + alpha / 2) / alpha
-                    pixels[i + c] = UInt8(min(255, v))
+        }
+        if srgbTarget {
+            for i in stride(from: 0, to: count, by: 4) {
+                let aByte = pixels[i + 3]
+                if aByte == 0 {
+                    pixels[i] = 0
+                    pixels[i + 1] = 0
+                    pixels[i + 2] = 0
+                } else if aByte < 255 {
+                    let a = Float(aByte) / 255.0
+                    for c in 0..<3 {
+                        let lin = srgbDecode(Float(pixels[i + c]) / 255.0) / a
+                        let clamped = min(1.0, max(0.0, lin))
+                        pixels[i + c] = UInt8(min(255, max(0, Int((srgbEncode(clamped) * 255.0).rounded()))))
+                    }
+                }
+            }
+        } else {
+            for i in stride(from: 0, to: count, by: 4) {
+                let a = pixels[i + 3]
+                if a == 0 {
+                    pixels[i] = 0
+                    pixels[i + 1] = 0
+                    pixels[i + 2] = 0
+                } else if a != 255 {
+                    let alpha = UInt32(a)
+                    for c in 0..<3 {
+                        let v = (UInt32(pixels[i + c]) * 255 + alpha / 2) / alpha
+                        pixels[i + c] = UInt8(min(255, v))
+                    }
                 }
             }
         }

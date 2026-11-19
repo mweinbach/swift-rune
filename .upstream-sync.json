@@ -1,9 +1,9 @@
 {
   "swiftExecutables" : 99,
   "swiftTargets" : 19,
-  "syncedAt" : "2026-11-18T01:55:23Z",
-  "syncedCommit" : "532993160d5f41f288dc17f0f1b3fa28f38976ea",
-  "syncedCommitDate" : "2026-11-17T19:25:56-06:00",
-  "syncedCommitSubject" : "Image: disable external file and nested-SVG resolution in `usvg` (#1146)",
+  "syncedAt" : "2026-11-19T16:07:49Z",
+  "syncedCommit" : "eb9f11047bbe2b3927ad4b65ffcf7bfef4d3deb8",
+  "syncedCommitDate" : "2026-11-18T22:20:34-06:00",
+  "syncedCommitSubject" : "fix(runtime): make drifted hit-testing, scroll, focus and accessibility paths use the canonical rule (#1219)",
   "upstreamRepo" : "https:\/\/github.com\/anomalyco\/rune"
 }

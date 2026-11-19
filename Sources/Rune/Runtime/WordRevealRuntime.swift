@@ -304,6 +304,19 @@ internal struct WordRevealStore: Sendable {
         }
     }
 
+    /// Caps orphaned reveal states that are no longer mounted in `mountedIds` to `REVEALS_KEPT` (`#1216`).
+    mutating func capOrphans(mountedIds: Set<NodeId>) {
+        guard !phases.isEmpty else {
+            revealsKept.removeAll(keepingCapacity: true)
+            return
+        }
+        var orphans = Set<NodeId>()
+        for id in phases.keys where !mountedIds.contains(id) {
+            orphans.insert(id)
+        }
+        boundKept(orphans: orphans)
+    }
+
     private mutating func forget(_ id: NodeId) {
         phases.removeValue(forKey: id)
         texts.removeValue(forKey: id)

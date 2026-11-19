@@ -69,14 +69,15 @@ internal struct AccessibilityNameSource {
         return name.isEmpty ? nil : name
     }
 
-    /// Look for a referenced key inside the nearest common ancestor first.
+    /// Look for a referenced key inside the nearest common ancestor first, skipping excluded (e.g. exiting) nodes (`#1219`).
     static func relatedIndex<Children: Sequence>(
-        _ key: String, from index: Int, parent: (Int) -> Int?, children: (Int) -> Children, keyAt: (Int) -> String?
+        _ key: String, from index: Int, parent: (Int) -> Int?, children: (Int) -> Children, keyAt: (Int) -> String?,
+        isExcluded: (Int) -> Bool = { _ in false }
     ) -> Int? where Children.Element == Int {
         func find(in scope: Int) -> Int? {
             for child in children(scope) {
-                if child != index, matchesAuthoredKey(keyAt(child), key) { return child }
-                if let found = find(in: child) { return found }
+                if child != index, !isExcluded(child), matchesAuthoredKey(keyAt(child), key) { return child }
+                if !isExcluded(child), let found = find(in: child) { return found }
             }
             return nil
         }

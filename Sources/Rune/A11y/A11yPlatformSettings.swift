@@ -73,7 +73,7 @@ public enum AccessibilityRoleRules {
         hasText: @autoclosure () -> Bool, hasImage: @autoclosure () -> Bool,
         terminal: @autoclosure () -> Bool = false
     ) -> ElementRole? {
-        if input { return .textInput }
+        if input { return role == .searchbox ? .searchbox : .textInput }
         switch role {
         case .group:
             if modal { return .dialog }
@@ -88,6 +88,8 @@ public enum AccessibilityRoleRules {
             if pressable() { return .splitter }
         case .presentation:
             break
+        case .searchbox:
+            if keyed { return .group }
         default:
             return role
         }

@@ -10,9 +10,19 @@ struct RuneAndroidSemantics {
     jmethodID attach, publish, reader;
 };
 
+static JNIEnv *semantics_env(ANativeActivity *a) {
+    if (!a) return NULL;
+    if (a->vm) {
+        JNIEnv *env = NULL;
+        if ((*a->vm)->GetEnv(a->vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK && env)
+            return env;
+    }
+    return a->env;
+}
+
 static jboolean on_action(JNIEnv *env, jobject receiver, jlong peer, jstring op, jint node, jbyteArray payload) {
     RuneAndroidSemantics *bridge = (RuneAndroidSemantics *)(intptr_t)peer;
-    if (!bridge || !op || !(*env)->IsSameObject(env, receiver, bridge->activity->clazz)) return JNI_FALSE;
+    if (!bridge || !op || !bridge->activity || !(*env)->IsSameObject(env, receiver, bridge->activity->clazz)) return JNI_FALSE;
     const char *name = (*env)->GetStringUTFChars(env, op, NULL);
     if (!name) return JNI_FALSE;
     jsize size = payload ? (*env)->GetArrayLength(env, payload) : 0;
@@ -25,11 +35,12 @@ static jboolean on_action(JNIEnv *env, jobject receiver, jlong peer, jstring op,
 
 RuneAndroidSemantics *rune_android_semantics_open(void *opaque, void *context, RuneAndroidSemanticAction action) {
     ANativeActivity *a = opaque;
-    if (!a || !action) return NULL;
-    JNIEnv *env = a->env;
+    if (!a || !a->clazz || !action) return NULL;
+    JNIEnv *env = semantics_env(a);
+    if (!env) return NULL;
     jclass cls = (*env)->GetObjectClass(env, a->clazz);
     if (!cls) return NULL;
-    // Register on the declaring class when the embedding app subclasses RuneActivity.
+    // Register on the declaring class when the embedding app subclasses RuneActivity or RuneSurfaceView.
     jmethodID declared = (*env)->GetMethodID(env, cls, "runeHostClass", "()Ljava/lang/Class;");
     jclass host = declared ? (jclass)(*env)->CallObjectMethod(env, a->clazz, declared) : NULL;
     if (!host || (*env)->ExceptionCheck(env)) {
@@ -64,15 +75,18 @@ RuneAndroidSemantics *rune_android_semantics_open(void *opaque, void *context, R
 
 void rune_android_semantics_close(RuneAndroidSemantics *bridge) {
     if (!bridge) return;
-    JNIEnv *env = bridge->activity->env;
-    (*env)->CallVoidMethod(env, bridge->activity->clazz, bridge->attach, (jlong)0);
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    JNIEnv *env = semantics_env(bridge->activity);
+    if (env && bridge->activity && bridge->activity->clazz && bridge->attach) {
+        (*env)->CallVoidMethod(env, bridge->activity->clazz, bridge->attach, (jlong)0);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    }
     free(bridge);
 }
 
 int32_t rune_android_semantics_reader(RuneAndroidSemantics *bridge) {
     if (!bridge) return 0;
-    JNIEnv *env = bridge->activity->env;
+    JNIEnv *env = semantics_env(bridge->activity);
+    if (!env || !bridge->activity || !bridge->activity->clazz || !bridge->reader) return 0;
     jboolean enabled = (*env)->CallBooleanMethod(env, bridge->activity->clazz, bridge->reader);
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return 0; }
     return enabled;
@@ -80,7 +94,8 @@ int32_t rune_android_semantics_reader(RuneAndroidSemantics *bridge) {
 
 void rune_android_semantics_publish(RuneAndroidSemantics *bridge, int32_t tree, const uint8_t *json, int32_t length) {
     if (!bridge || !json || length <= 0) return;
-    JNIEnv *env = bridge->activity->env;
+    JNIEnv *env = semantics_env(bridge->activity);
+    if (!env || !bridge->activity || !bridge->activity->clazz || !bridge->publish) return;
     jbyteArray array = (*env)->NewByteArray(env, length);
     if (array) {
         (*env)->SetByteArrayRegion(env, array, 0, length, (const jbyte *)json);

@@ -466,6 +466,11 @@ public enum Display: UInt8, Sendable, Equatable, Hashable {
     case none
 }
 
+public enum BoxGenerationMode: UInt8, Sendable, Equatable, Hashable {
+    case normal
+    case none
+}
+
 public enum Position: UInt8, Sendable, Equatable, Hashable {
     case `static`
     case relative
@@ -541,40 +546,118 @@ public enum FlexWrap: UInt8, Sendable, Equatable, Hashable {
     case wrapReverse
 }
 
-public enum AlignmentSafety: Sendable, Equatable, Hashable {
-    case `default`
-    case unsafe
-    case safe
+public enum AlignmentSafety: UInt8, Sendable, Equatable, Hashable {
+    case `default` = 0
+    case unsafe = 1
+    case safe = 2
 }
 
-public enum AlignItems: UInt8, Sendable, Equatable, Hashable {
-    case normal
-    case start
-    case end
-    case flexStart
-    case flexEnd
-    case selfStart
-    case selfEnd
-    case center
-    case baseline
-    case stretch
+public enum AlignItemsKeyword: UInt8, Sendable, Equatable, Hashable {
+    case normal = 0
+    case start = 1
+    case end = 2
+    case flexStart = 3
+    case flexEnd = 4
+    case selfStart = 5
+    case selfEnd = 6
+    case center = 7
+    case baseline = 8
+    case stretch = 9
+}
+
+/// CSS Box Alignment item value pairing a keyword with overflow safety (`default`, `unsafe`, `safe`),
+/// matching Taffy 0.15's `AlignItems { keyword, safety }`.
+public struct AlignItems: Sendable, Equatable, Hashable {
+    public var keyword: AlignItemsKeyword
+    public var safety: AlignmentSafety
+
+    @inlinable
+    public init(keyword: AlignItemsKeyword, safety: AlignmentSafety = .default) {
+        self.keyword = keyword
+        self.safety = safety
+    }
+
+    public static let normal = AlignItems(keyword: .normal)
+    public static let start = AlignItems(keyword: .start)
+    public static let end = AlignItems(keyword: .end)
+    public static let flexStart = AlignItems(keyword: .flexStart)
+    public static let flexEnd = AlignItems(keyword: .flexEnd)
+    public static let selfStart = AlignItems(keyword: .selfStart)
+    public static let selfEnd = AlignItems(keyword: .selfEnd)
+    public static let center = AlignItems(keyword: .center)
+    public static let baseline = AlignItems(keyword: .baseline)
+    public static let stretch = AlignItems(keyword: .stretch)
+
+    @inlinable
+    public static func safe(_ keyword: AlignItemsKeyword) -> AlignItems {
+        AlignItems(keyword: keyword, safety: .safe)
+    }
+
+    @inlinable
+    public static func unsafe(_ keyword: AlignItemsKeyword) -> AlignItems {
+        AlignItems(keyword: keyword, safety: .unsafe)
+    }
+
+    @inlinable
+    public func withSafety(_ safety: AlignmentSafety) -> AlignItems {
+        AlignItems(keyword: keyword, safety: safety)
+    }
 }
 
 public typealias AlignSelf = AlignItems
 public typealias JustifyItems = AlignItems
 public typealias JustifySelf = AlignItems
 
-public enum AlignContent: UInt8, Sendable, Equatable, Hashable {
-    case normal
-    case start
-    case end
-    case flexStart
-    case flexEnd
-    case center
-    case stretch
-    case spaceBetween
-    case spaceEvenly
-    case spaceAround
+public enum AlignContentKeyword: UInt8, Sendable, Equatable, Hashable {
+    case normal = 0
+    case start = 1
+    case end = 2
+    case flexStart = 3
+    case flexEnd = 4
+    case center = 5
+    case stretch = 6
+    case spaceBetween = 7
+    case spaceEvenly = 8
+    case spaceAround = 9
+}
+
+/// CSS Box Alignment content distribution value pairing a keyword with overflow safety
+/// (`default`, `unsafe`, `safe`), matching Taffy 0.15's `AlignContent { keyword, safety }`.
+public struct AlignContent: Sendable, Equatable, Hashable {
+    public var keyword: AlignContentKeyword
+    public var safety: AlignmentSafety
+
+    @inlinable
+    public init(keyword: AlignContentKeyword, safety: AlignmentSafety = .default) {
+        self.keyword = keyword
+        self.safety = safety
+    }
+
+    public static let normal = AlignContent(keyword: .normal)
+    public static let start = AlignContent(keyword: .start)
+    public static let end = AlignContent(keyword: .end)
+    public static let flexStart = AlignContent(keyword: .flexStart)
+    public static let flexEnd = AlignContent(keyword: .flexEnd)
+    public static let center = AlignContent(keyword: .center)
+    public static let stretch = AlignContent(keyword: .stretch)
+    public static let spaceBetween = AlignContent(keyword: .spaceBetween)
+    public static let spaceEvenly = AlignContent(keyword: .spaceEvenly)
+    public static let spaceAround = AlignContent(keyword: .spaceAround)
+
+    @inlinable
+    public static func safe(_ keyword: AlignContentKeyword) -> AlignContent {
+        AlignContent(keyword: keyword, safety: .safe)
+    }
+
+    @inlinable
+    public static func unsafe(_ keyword: AlignContentKeyword) -> AlignContent {
+        AlignContent(keyword: keyword, safety: .unsafe)
+    }
+
+    @inlinable
+    public func withSafety(_ safety: AlignmentSafety) -> AlignContent {
+        AlignContent(keyword: keyword, safety: safety)
+    }
 }
 
 public typealias JustifyContent = AlignContent

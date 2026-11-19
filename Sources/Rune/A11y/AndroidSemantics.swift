@@ -44,7 +44,7 @@ final class AndroidSemanticTree {
             let checked = node.toggled?.rawValue ?? ([ElementRole.checkbox, .switchControl, .radio, .menuItemCheckbox, .menuItemRadio].contains(node.role)
                 ? (node.value == "mixed" ? "mixed" : (node.value == "true" || node.isSelected ? "true" : "false")) : nil)
             var selection: [Int]?
-            if !node.isSecure, [.textInput, .multilineTextInput].contains(node.role), let value = node.value,
+            if !node.isSecure, [.textInput, .multilineTextInput, .searchbox].contains(node.role), let value = node.value,
                let range = node.textSelection, range.count == 4 {
                 selection = [range[1], range[3]].map { ImeUTF16Bridge.utf16Offset(in: value, fromUTF8Offset: $0) }
             }

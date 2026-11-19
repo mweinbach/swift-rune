@@ -13,9 +13,11 @@ public enum AccessibilityActionValue: Sendable, Equatable {
 
 public extension AccessibilityTreeBuilder {
     /// The role an editable text field reads as (`a11y/roles.rs:27-31`): a secure field is a
-    /// password input, a field that is not single-line a multi-line text input, else a text input.
-    static func textFieldRole(secure: Bool, multiline: Bool) -> ElementRole {
+    /// password input, a searchbox stays a searchbox, a field that is not single-line is a
+    /// multi-line text input, else a text input.
+    static func textFieldRole(secure: Bool, multiline: Bool, authoredRole: ElementRole = .textInput) -> ElementRole {
         if secure { return .passwordInput }
+        if authoredRole == .searchbox { return .searchbox }
         return multiline ? .multilineTextInput : .textInput
     }
 

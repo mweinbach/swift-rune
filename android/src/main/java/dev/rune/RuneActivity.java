@@ -64,7 +64,7 @@ public class RuneActivity extends NativeActivity {
         }
     }
 
-    static final class RuneView extends View {
+    static final class RuneView extends View implements RuneHostBridge {
         final RuneActivity activity;
         final RuneNodes nodes;
         final RuneField field;
@@ -82,6 +82,10 @@ public class RuneActivity extends NativeActivity {
         }
         @Override public boolean onCheckIsTextEditor() { return field != null && field.active(); }
         @Override public InputConnection onCreateInputConnection(EditorInfo info) { return field.connect(info); }
-        InputMethodManager ime() { return (InputMethodManager)getContext().getSystemService(Context.INPUT_METHOD_SERVICE); }
+        @Override public View hostView() { return this; }
+        @Override public InputMethodManager ime() { return (InputMethodManager)getContext().getSystemService(Context.INPUT_METHOD_SERVICE); }
+        @Override public boolean runeAction(String op, int id, JSONObject args) { return activity.runeAction(op, id, args); }
+        @Override public boolean isRuneReaderActive() { return activity.isRuneReaderActive(); }
+        @Override public boolean clearFocusOnEditorBlur() { return true; }
     }
 }

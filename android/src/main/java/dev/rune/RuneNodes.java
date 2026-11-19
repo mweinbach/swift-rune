@@ -18,7 +18,8 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 final class RuneNodes extends AccessibilityNodeProvider {
-    private final RuneActivity.RuneView view;
+    private final RuneHostBridge host;
+    private final View view;
     private final Map<Integer, Node> nodes = new LinkedHashMap<>();
     private final List<Integer> roots = new ArrayList<>();
     private int a11yFocus = 0, inputFocus = 0, hover = 0;
@@ -52,7 +53,10 @@ final class RuneNodes extends AccessibilityNodeProvider {
         }
     }
 
-    RuneNodes(RuneActivity.RuneView view) { this.view = view; }
+    RuneNodes(RuneHostBridge host) {
+        this.host = host;
+        this.view = host.hostView();
+    }
 
     void update(JSONObject packet) throws JSONException {
         JSONArray source = packet.getJSONArray("nodes");
@@ -247,17 +251,17 @@ final class RuneNodes extends AccessibilityNodeProvider {
                 if (args == null || n.data.optBoolean("secure") || !n.action("set-value")) return false;
                 payload.put("anchor", args.getInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, -1));
                 payload.put("focus", args.getInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, -1));
-                return view.activity.runeAction("selectText", id, payload);
+                return host.runeAction("selectText", id, payload);
             default: return false;
             }
         } catch (JSONException error) { return false; }
-        if (!n.action(op) || !view.activity.runeAction(op, id, payload)) return false;
+        if (!n.action(op) || !host.runeAction(op, id, payload)) return false;
         if (action == AccessibilityNodeInfo.ACTION_CLICK) event(id, AccessibilityEvent.TYPE_VIEW_CLICKED);
         return true;
     }
 
     boolean hover(MotionEvent e) {
-        if (!view.activity.isRuneReaderActive()) return false;
+        if (!host.isRuneReaderActive()) return false;
         int kind = e.getActionMasked();
         if (kind != MotionEvent.ACTION_HOVER_MOVE && kind != MotionEvent.ACTION_HOVER_ENTER && kind != MotionEvent.ACTION_HOVER_EXIT) return false;
         int touched = 0;
@@ -279,7 +283,7 @@ final class RuneNodes extends AccessibilityNodeProvider {
     }
 
     private void deliver(int id, AccessibilityEvent e) {
-        if (view.getParent() == null || !view.activity.isRuneReaderActive()) return;
+        if (view.getParent() == null || !host.isRuneReaderActive()) return;
         e.setPackageName(view.getContext().getPackageName());
         Node n = nodes.get(id);
         if (n != null) e.setClassName(className(n.data.optString("role")));
@@ -294,7 +298,8 @@ final class RuneNodes extends AccessibilityNodeProvider {
         case "switch": return "android.widget.Switch";
         case "checkbox": case "menu-item-check-box": return "android.widget.CheckBox";
         case "radio": case "menu-item-radio": return "android.widget.RadioButton";
-        case "textbox": case "multiline-text-input": case "password-input": return "android.widget.EditText";
+        case "textbox": case "searchbox": case "multiline-text-input": case "password-input": case "terminal": return "android.widget.EditText";
+        case "spinbutton": return "android.widget.NumberPicker";
         case "slider": return "android.widget.SeekBar";
         case "progressbar": return "android.widget.ProgressBar";
         case "img": case "icon": return "android.widget.ImageView";

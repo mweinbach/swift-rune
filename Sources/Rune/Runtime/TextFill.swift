@@ -91,4 +91,28 @@ extension Runtime {
               resolved.blocks.allSatisfy({ $0 == .paragraph }) else { return nil }
         return ParagraphRequest(field: field.rawValue, forced: resolved.style.direction, startFlow: start, highlights: el.textHighlights ?? [])
     }
+
+    /// Paragraph request for a static multi-line text marked with `El.byLine()` (`#1133`),
+    /// such as Markdown fenced code blocks. Reuses unchanged line layouts across streaming commits.
+    internal static func staticByLineParagraphRequest(
+        nodeId: NodeId,
+        el: El<State>,
+        style: TextStyle,
+        spans: [TextSpan]?,
+        pills: [PillChip]
+    ) -> ParagraphRequest? {
+        guard el.isByLine, !el.isSecure, pills.isEmpty,
+              style.maxLines == 0, style.wrap != .ellipsis,
+              ParagraphRequest.supports(spans) else {
+            return nil
+        }
+        let flow = style.direction ?? .ltr
+        return ParagraphRequest(
+            field: nodeId.rawValue,
+            forced: flow,
+            startFlow: flow,
+            highlights: el.textHighlights ?? [],
+            byLine: true
+        )
+    }
 }

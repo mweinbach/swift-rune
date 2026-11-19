@@ -391,6 +391,7 @@ public struct TaffyTree: Sendable {
 }
 
 private final class TaffyTreeAdapter: LayoutTree {
+    var containerDepth: Int = 0
     var nodes: [TreeNodeData] = []
     var roundedCount = 0
     let measureLeaf: (@Sendable (NodeId, LayoutInput, TaffyStyle) -> LayoutOutput)?

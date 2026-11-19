@@ -791,7 +791,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         (CACurrentMediaTime() - startTime) * timeScale
     }
 
-    fileprivate func currentElapsedTime() -> Double {
+    internal func currentElapsedTime() -> Double {
         nowSeconds()
     }
 

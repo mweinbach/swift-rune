@@ -16,47 +16,95 @@ private actor GenerationCounter {
 
 private let sharedGen = GenerationCounter()
 
-private func makeRenderFrame(from scene: OracleScene, glyphGeneration: UInt64) -> RenderFrame {
-    var instances: [RenderInstance] = []
-    instances.reserveCapacity(scene.primitives.count)
-    for p in scene.primitives {
-        let kind = p.params.count > 1 ? p.params[1] : 0
-        let rect = SIMD4<Float>(p.rect[0], p.rect[1], p.rect[2], p.rect[3])
-        let radii = SIMD4<Float>(p.radii[0], p.radii[1], p.radii[2], p.radii[3])
-        let fill = SIMD4<Float>(p.fill[0], p.fill[1], p.fill[2], p.fill[3])
-        let params = SIMD4<Float>(p.params[0], p.params[1], p.params[2], p.params[3])
-        let uv = SIMD4<Float>(p.uv[0], p.uv[1], p.uv[2], p.uv[3])
-        let clip = SIMD4<Float>(p.clip[0], p.clip[1], p.clip[2], p.clip[3])
-        let fadeWidth = SIMD4<Float>(p.fade[0], p.fade[1], p.fade[2], p.fade[3])
-        let fadeOrigin: SIMD4<Float> = if let o = p.fadeOrigin, o.count >= 4 {
-            SIMD4<Float>(o[0], o[1], o[2], o[3])
-        } else {
-            clip
-        }
-        var packedFade = packFade(width: fadeWidth, origin: fadeOrigin, clip: clip)
-        let border: SIMD4<Float>
-        if kind == 8.0 {
-            let clipRadii = SIMD4<Float>(p.border[0], p.border[1], p.border[2], p.border[3])
-            packedFade.w = packClipRadii(clip: clip, radii: clipRadii)
-            if let t = p.turn, t.count >= 3 {
-                border = SIMD4<Float>(0, t[0], t[1], t[2])
-            } else {
-                border = .zero
-            }
-        } else {
-            border = SIMD4<Float>(p.border[0], p.border[1], p.border[2], p.border[3])
-        }
-        instances.append(RenderInstance(
-            rect: rect,
-            radii: radii,
-            fill: fill,
-            border: border,
-            params: params,
-            uv: uv,
-            clip: clip,
-            fade: packedFade
-        ))
+private func oraclePrimitive(from inst: RenderInstance, node: UInt32, source: String) -> OraclePrimitive {
+    let (fadeW, off) = unpackFade(inst.fade)
+    let fade = [fadeW.x, fadeW.y, fadeW.z, fadeW.w]
+    let clip = [inst.clip.x, inst.clip.y, inst.clip.z, inst.clip.w]
+    let isLayer = inst.params.y == 8.0
+    let border: [Float]
+    if isLayer {
+        let cr = unpackClipRadii(inst.fade.w)
+        border = [cr.x, cr.y, cr.z, cr.w]
+    } else {
+        border = [inst.border.x, inst.border.y, inst.border.z, inst.border.w]
     }
+    let fadeOrigin: [Float] = [
+        clip[0] - off.x * abs(fade[0]),
+        clip[1] - off.y * abs(fade[1]),
+        clip[2] + off.z * abs(fade[2]),
+        clip[3] + off.w * abs(fade[3]),
+    ]
+    let turn: [Float]? = (isLayer && inst.border.y != 0.0)
+        ? [inst.border.y, inst.border.z, inst.border.w]
+        : nil
+    let clipRadii: [Float]? = (!isLayer && inst.fade.w != 0)
+        ? {
+            let cr = unpackClipRadii(inst.fade.w)
+            return [cr.x, cr.y, cr.z, cr.w]
+        }()
+        : nil
+    return OraclePrimitive(
+        node: node,
+        source: source,
+        rect: [inst.rect.x, inst.rect.y, inst.rect.z, inst.rect.w],
+        radii: [inst.radii.x, inst.radii.y, inst.radii.z, inst.radii.w],
+        fill: [inst.fill.x, inst.fill.y, inst.fill.z, inst.fill.w],
+        border: border,
+        params: [inst.params.x, inst.params.y, inst.params.z, inst.params.w],
+        uv: [inst.uv.x, inst.uv.y, inst.uv.z, inst.uv.w],
+        clip: clip,
+        fade: fade,
+        fadeOrigin: fadeOrigin,
+        turn: turn,
+        clipRadii: clipRadii
+    )
+}
+
+private func renderInstance(from p: OraclePrimitive) -> RenderInstance {
+    let kind = p.params.count > 1 ? p.params[1] : 0
+    let rect = SIMD4<Float>(p.rect[0], p.rect[1], p.rect[2], p.rect[3])
+    let radii = SIMD4<Float>(p.radii[0], p.radii[1], p.radii[2], p.radii[3])
+    let fill = SIMD4<Float>(p.fill[0], p.fill[1], p.fill[2], p.fill[3])
+    let params = SIMD4<Float>(p.params[0], p.params[1], p.params[2], p.params[3])
+    let uv = SIMD4<Float>(p.uv[0], p.uv[1], p.uv[2], p.uv[3])
+    let clip = SIMD4<Float>(p.clip[0], p.clip[1], p.clip[2], p.clip[3])
+    let fadeWidth = SIMD4<Float>(p.fade[0], p.fade[1], p.fade[2], p.fade[3])
+    let fadeOrigin: SIMD4<Float> = if let o = p.fadeOrigin, o.count >= 4 {
+        SIMD4<Float>(o[0], o[1], o[2], o[3])
+    } else {
+        clip
+    }
+    var packedFade = packFade(width: fadeWidth, origin: fadeOrigin, clip: clip)
+    let border: SIMD4<Float>
+    if kind == 8.0 {
+        let r = p.clipRadii ?? p.border
+        let clipRadii = SIMD4<Float>(r[0], r[1], r[2], r[3])
+        packedFade.w = packClipRadii(clip: clip, radii: clipRadii)
+        if let t = p.turn, t.count >= 3 {
+            border = SIMD4<Float>(0, t[0], t[1], t[2])
+        } else {
+            border = .zero
+        }
+    } else {
+        border = SIMD4<Float>(p.border[0], p.border[1], p.border[2], p.border[3])
+        if let r = p.clipRadii, r.count == 4 {
+            packedFade.w = packClipRadii(clip: clip, radii: SIMD4<Float>(r[0], r[1], r[2], r[3]))
+        }
+    }
+    return RenderInstance(
+        rect: rect,
+        radii: radii,
+        fill: fill,
+        border: border,
+        params: params,
+        uv: uv,
+        clip: clip,
+        fade: packedFade
+    )
+}
+
+private func makeRenderFrame(from scene: OracleScene, glyphGeneration: UInt64) -> RenderFrame {
+    let instances = scene.primitives.map(renderInstance(from:))
 
     let clear = scene.clear.count == 4
         ? SIMD4<Float>(scene.clear[0], scene.clear[1], scene.clear[2], scene.clear[3])
@@ -636,43 +684,7 @@ struct MetalDifferentialTests {
 
     private static func makeOracleScene(from rf: RenderFrame, prefix: String) -> OracleScene {
         let primitives: [OraclePrimitive] = rf.instances.enumerated().map { idx, inst in
-            let kind = inst.params.y
-            let clip = [inst.clip.x, inst.clip.y, inst.clip.z, inst.clip.w]
-            let isLayer = kind == 8.0
-            let radii: [Float] = isLayer ? [0, 0, 0, 0] : [inst.radii.x, inst.radii.y, inst.radii.z, inst.radii.w]
-            let border: [Float] = isLayer
-                ? OraclePrimitive.unpackClipRadii(inst.fade.w)
-                : [inst.border.x, inst.border.y, inst.border.z, inst.border.w]
-            let uv: [Float] = isLayer ? [0, 0, 0, 0] : [inst.uv.x, inst.uv.y, inst.uv.z, inst.uv.w]
-            let fadeInfo: ([Float], [Float]?) = {
-                if isLayer { return ([0, 0, 0, 0], nil) }
-                let (w, off) = OraclePrimitive.unpackFade([inst.fade.x, inst.fade.y, inst.fade.z, inst.fade.w])
-                if w == [0, 0, 0, 0] { return (w, nil) }
-                let origin: [Float] = [
-                    clip[0] - off[0] * abs(w[0]),
-                    clip[1] - off[1] * abs(w[1]),
-                    clip[2] + off[2] * abs(w[2]),
-                    clip[3] + off[3] * abs(w[3]),
-                ]
-                return (w, origin)
-            }()
-            let turn: [Float]? = (isLayer && (inst.border.y != 0 || inst.border.z != 0 || inst.border.w != 0))
-                ? [inst.border.y, inst.border.z, inst.border.w]
-                : nil
-            return OraclePrimitive(
-                node: UInt32(idx + 1),
-                source: "\(prefix)/\(idx)",
-                rect: [inst.rect.x, inst.rect.y, inst.rect.z, inst.rect.w],
-                radii: radii,
-                fill: [inst.fill.x, inst.fill.y, inst.fill.z, inst.fill.w],
-                border: border,
-                params: [inst.params.x, inst.params.y, inst.params.z, inst.params.w],
-                uv: uv,
-                clip: clip,
-                fade: fadeInfo.0,
-                fadeOrigin: fadeInfo.1,
-                turn: turn
-            )
+            oraclePrimitive(from: inst, node: UInt32(idx + 1), source: "\(prefix)/\(idx)")
         }
         return OracleScene(
             width: UInt32(rf.width),
@@ -771,6 +783,231 @@ struct MetalDifferentialTests {
         let gpuScrolled = try gpu.renderOffscreen(scrolledRF)
         let diffScrolled = Oracle.compare(scene: scrolledOracle, cpu: cpuScrolled, gpu: gpuScrolled.rgba, tolerance: 2)
         #expect(diffScrolled.outlierPixels == 0, "scrolled multi-line text CPU vs GPU: \(diffScrolled)")
+    }
+
+    @Test("differential.rs:509 cpu_gpu_plus_lighter_layers")
+    func cpuGpuPlusLighterLayers() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = 48
+        scene.height = 48
+        // Coloured background, then a PlusLighter dissolve layer with opacity 0.7 containing two
+        // overlapping rects whose sum saturates past 1.0, plus a nested opaque SourceOver layer
+        // (which must isolate rather than flatten into the additive parent).
+        let bg = RenderInstance(
+            rect: SIMD4<Float>(0, 0, 48, 48),
+            radii: .zero,
+            fill: SIMD4<Float>(0.1, 0.2, 0.5, 1.0),
+            border: .zero,
+            params: SIMD4<Float>(0, KIND_RECT, 0, 1.0),
+            uv: .zero,
+            clip: NO_CLIP,
+            fade: .zero
+        )
+        let layerOpen = RenderInstance.beginLayer(
+            bounds: SIMD4<Float>(4, 4, 40, 40),
+            clip: NO_CLIP,
+            spec: LayerSpec(opacity: 0.7, blend: .plusLighter)
+        )
+        let childA = RenderInstance(
+            rect: SIMD4<Float>(6, 6, 26, 26),
+            radii: SIMD4<Float>(repeating: 4.0),
+            fill: SIMD4<Float>(0.6, 0.15, 0.05, 0.65),
+            border: .zero,
+            params: SIMD4<Float>(0, KIND_RECT, 0, 1.0),
+            uv: .zero,
+            clip: NO_CLIP,
+            fade: .zero
+        )
+        let childB = RenderInstance(
+            rect: SIMD4<Float>(16, 16, 26, 26),
+            radii: SIMD4<Float>(repeating: 4.0),
+            fill: SIMD4<Float>(0.55, 0.45, 0.1, 0.6),
+            border: .zero,
+            params: SIMD4<Float>(0, KIND_RECT, 0, 1.0),
+            uv: .zero,
+            clip: NO_CLIP,
+            fade: .zero
+        )
+        let innerOpen = RenderInstance.beginLayer(
+            bounds: SIMD4<Float>(12, 24, 20, 16),
+            clip: NO_CLIP,
+            spec: LayerSpec()
+        )
+        let innerA = RenderInstance(
+            rect: SIMD4<Float>(12, 24, 14, 14),
+            radii: .zero,
+            fill: SIMD4<Float>(0.0, 0.4, 0.0, 0.5),
+            border: .zero,
+            params: SIMD4<Float>(0, KIND_RECT, 0, 1.0),
+            uv: .zero,
+            clip: NO_CLIP,
+            fade: .zero
+        )
+        let innerB = RenderInstance(
+            rect: SIMD4<Float>(18, 26, 14, 14),
+            radii: .zero,
+            fill: SIMD4<Float>(0.0, 0.4, 0.3, 0.5),
+            border: .zero,
+            params: SIMD4<Float>(0, KIND_RECT, 0, 1.0),
+            uv: .zero,
+            clip: NO_CLIP,
+            fade: .zero
+        )
+        let instances = [
+            bg,
+            layerOpen,
+            childA,
+            childB,
+            innerOpen,
+            innerA,
+            innerB,
+            RenderInstance.endLayer(),
+            RenderInstance.endLayer(),
+        ]
+        scene.primitives = instances.enumerated().map { idx, inst in
+            oraclePrimitive(from: inst, node: UInt32(idx + 1), source: "plus-lighter/\(idx)")
+        }
+        try scene.validate()
+        var cpu = OracleFrame(width: scene.width, height: scene.height, provenance: true)
+        cpu.render(scene)
+        let rf = makeRenderFrame(from: scene, glyphGeneration: await sharedGen.allocate())
+        let gpuFrame = try gpu.renderOffscreen(rf)
+        let report = Oracle.compare(scene: scene, cpu: cpu, gpu: gpuFrame.rgba, tolerance: 2)
+        #expect(report.outlierPixels == 0, "plus-lighter: \(report)")
+    }
+
+    @Test("differential.rs:597 cpu_gpu_continuous_corners")
+    func cpuGpuContinuousCorners() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = 64
+        scene.height = 64
+        let rect = RenderInstance(
+            rect: SIMD4<Float>(4, 4, 26, 26),
+            radii: SIMD4<Float>(repeating: -8.0),
+            fill: SIMD4<Float>(0.7, 0.2, 0.3, 0.9),
+            border: SIMD4<Float>(0.9, 0.8, 0.2, 0.9),
+            params: SIMD4<Float>(2.0, KIND_RECT, 0.0, 0.9),
+            uv: .zero,
+            clip: NO_CLIP,
+            fade: .zero
+        )
+        let grad = RenderInstance(
+            rect: SIMD4<Float>(34, 4, 26, 26),
+            radii: SIMD4<Float>(-10.0, 0.0, -6.0, 4.0),
+            fill: SIMD4<Float>(0.2, 0.6, 0.9, 1.0),
+            border: .zero,
+            params: SIMD4<Float>(0.0, KIND_GRADIENT, 0.0, 1.0),
+            uv: SIMD4<Float>(0.1, 0.2, 0.6, 1.0),
+            clip: NO_CLIP,
+            fade: .zero
+        )
+        let inset = RenderInstance(
+            rect: SIMD4<Float>(8, 34, 48, 24),
+            radii: SIMD4<Float>(repeating: -7.0),
+            fill: SIMD4<Float>(0.0, 0.0, 0.0, 0.6),
+            border: .zero,
+            params: SIMD4<Float>(2.0, KIND_INSET, 3.0, 1.0),
+            uv: SIMD4<Float>(1.0, 2.0, 0.0, 0.0),
+            clip: NO_CLIP,
+            fade: .zero
+        )
+        scene.primitives = [rect, grad, inset].enumerated().map { idx, inst in
+            oraclePrimitive(from: inst, node: UInt32(idx + 1), source: "continuous/\(idx)")
+        }
+        try scene.validate()
+        var cpu = OracleFrame(width: scene.width, height: scene.height, provenance: true)
+        cpu.render(scene)
+        let rf = makeRenderFrame(from: scene, glyphGeneration: await sharedGen.allocate())
+        let gpuFrame = try gpu.renderOffscreen(rf)
+        let report = Oracle.compare(scene: scene, cpu: cpu, gpu: gpuFrame.rgba, tolerance: 2)
+        #expect(report.outlierPixels == 0, "continuous-corners: \(report)")
+    }
+
+    @Test("differential.rs:646 cpu_gpu_linear_fade_offset")
+    func cpuGpuLinearFadeOffset() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = 64
+        scene.height = 64
+        let clip = SIMD4<Float>(12.0, 10.0, 52.0, 54.0)
+        // Negative widths select linear ramps; origin lies outside clip on all four edges so the
+        // ramp starts partially progressed at the hard clip boundary.
+        let fadeWidths = SIMD4<Float>(-16.0, -12.0, -20.0, -10.0)
+        let origin = SIMD4<Float>(4.0, 4.0, 62.0, 59.0)
+        let inst = RenderInstance(
+            rect: SIMD4<Float>(0, 0, 64, 64),
+            radii: .zero,
+            fill: SIMD4<Float>(0.85, 0.45, 0.2, 1.0),
+            border: .zero,
+            params: SIMD4<Float>(0, KIND_RECT, 0, 1.0),
+            uv: .zero,
+            clip: clip,
+            fade: packFade(width: fadeWidths, origin: origin, clip: clip)
+        )
+        let prim = oraclePrimitive(from: inst, node: 1, source: "linear-fade-offset")
+        // Round-trip must preserve the packed origin offsets, not flip them across the clip edge.
+        let roundtrip = renderInstance(from: prim)
+        #expect(roundtrip.fade.z == inst.fade.z, "linear fade origin offsets must survive round-trip")
+        scene.primitives = [prim]
+        try scene.validate()
+        var cpu = OracleFrame(width: scene.width, height: scene.height, provenance: true)
+        cpu.render(scene)
+        let rf = makeRenderFrame(from: scene, glyphGeneration: await sharedGen.allocate())
+        let gpuFrame = try gpu.renderOffscreen(rf)
+        let report = Oracle.compare(scene: scene, cpu: cpu, gpu: gpuFrame.rgba, tolerance: 2)
+        #expect(report.outlierPixels == 0, "linear-fade-offset: \(report)")
+    }
+
+    @Test("differential.rs:679 cpu_gpu_rounded_clip_on_primitive")
+    func cpuGpuRoundedClipOnPrimitive() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = 64
+        scene.height = 64
+        let clipA = SIMD4<Float>(4.0, 4.0, 28.0, 28.0)
+        var rectA = RenderInstance(
+            rect: SIMD4<Float>(0, 0, 32, 32),
+            radii: .zero,
+            fill: SIMD4<Float>(0.9, 0.3, 0.2, 1.0),
+            border: .zero,
+            params: SIMD4<Float>(0, KIND_RECT, 0, 1.0),
+            uv: .zero,
+            clip: clipA,
+            fade: .zero
+        )
+        rectA.fade.w = packClipRadii(clip: clipA, radii: SIMD4<Float>(repeating: 10.0))
+
+        let clipB = SIMD4<Float>(32.0, 4.0, 60.0, 32.0)
+        var rectB = RenderInstance(
+            rect: SIMD4<Float>(28, 0, 36, 36),
+            radii: .zero,
+            fill: SIMD4<Float>(0.2, 0.75, 0.4, 1.0),
+            border: .zero,
+            params: SIMD4<Float>(0, KIND_RECT, 0, 1.0),
+            uv: .zero,
+            clip: clipB,
+            fade: .zero
+        )
+        rectB.fade.w = packClipRadii(clip: clipB, radii: SIMD4<Float>(-10.0, -6.0, 0.0, -8.0))
+
+        let primA = oraclePrimitive(from: rectA, node: 1, source: "rounded-clip-uniform")
+        let primB = oraclePrimitive(from: rectB, node: 2, source: "rounded-clip-mixed")
+        #expect(renderInstance(from: primA).fade.w == rectA.fade.w, "uniform rounded clip must survive round-trip")
+        #expect(renderInstance(from: primB).fade.w == rectB.fade.w, "mixed continuous rounded clip must survive round-trip")
+        scene.primitives = [primA, primB]
+        try scene.validate()
+        var cpu = OracleFrame(width: scene.width, height: scene.height, provenance: true)
+        cpu.render(scene)
+        let rf = makeRenderFrame(from: scene, glyphGeneration: await sharedGen.allocate())
+        let gpuFrame = try gpu.renderOffscreen(rf)
+        let report = Oracle.compare(scene: scene, cpu: cpu, gpu: gpuFrame.rgba, tolerance: 2)
+        #expect(report.outlierPixels == 0, "rounded-clip-primitive: \(report)")
     }
 
     private static func runCLI(binaryURL: URL, arguments: [String]) throws -> (status: Int32, stdout: String, stderr: String) {

@@ -428,11 +428,15 @@ final class RetainedLayoutCoordinator {
                     }
                 }
                 hasher.combine(el.isRevealed)
+                hasher.combine(el.isByLine)
                 hasher.combine(resolved.truncateFade)
                 hasher.combine(resolved.pretty)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
                 let keep: TextKeep = resolved.isSecure ? .secret : .cached
                 let widthIndependent = labelKey != nil && resolved.style.wrap == .noWrap
+                let byLineReq = Runtime<State>.staticByLineParagraphRequest(
+                    nodeId: nodeId, el: el, style: resolved.style, spans: resolved.spans, pills: resolved.pills
+                )
                 let fn: Measure = { maxW, isRealLayout, textLayouts, nodeId in
                     if widthIndependent, let labelKey, let record = textLayouts?.map[nodeId],
                        !record.isInput, record.box.maxWidth == nil, record.box.shapeKey == labelKey {
@@ -451,22 +455,39 @@ final class RetainedLayoutCoordinator {
                     // device px (`compute_layout` / `relayout::lay_out_text`, #948).
                     let shapeMaxW: Float? = (resolved.style.wrap == .noWrap && resolved.style.maxLines == 0) ? nil : TextBoxGeometry.wrapWidth(maxW, scale: scale)
                     let hasSpans = (resolved.spans?.isEmpty == false)
-                    let box = textSystem.layoutKeyed(
-                        retaining: labelKey,
-                        intrinsicShapes: labelKey != nil && !widthIndependent ? textLayouts?.intrinsicShapes : nil,
-                        text: hasSpans ? "" : resolved.displayedText,
-                        spans: resolved.spans,
-                        pills: resolved.pills,
-                        style: resolved.style,
-                        maxWidth: shapeMaxW,
-                        pixelScale: scale,
-                        emitGlyphs: false,
-                        keep: keep,
-                        // Intrinsic probes and final layout have the same break for an ordinary
-                        // no-wrap label. Keep the first break for later Taffy probes and paint.
-                        countAsRebreak: (textLayouts != nil) && (isRealLayout || widthIndependent),
-                        pretty: resolved.pretty, forMeasurement: true
-                    )
+                    let box: TextLayoutBox
+                    if let byLineReq {
+                        box = textSystem.layoutInput(
+                            text: hasSpans ? "" : resolved.displayedText,
+                            spans: resolved.spans,
+                            pills: resolved.pills,
+                            style: resolved.style,
+                            maxWidth: shapeMaxW,
+                            pixelScale: scale,
+                            emitGlyphs: false,
+                            keep: keep,
+                            countAsRebreak: (textLayouts != nil) && (isRealLayout || widthIndependent),
+                            request: byLineReq,
+                            forMeasurement: true
+                        )
+                    } else {
+                        box = textSystem.layoutKeyed(
+                            retaining: labelKey,
+                            intrinsicShapes: labelKey != nil && !widthIndependent ? textLayouts?.intrinsicShapes : nil,
+                            text: hasSpans ? "" : resolved.displayedText,
+                            spans: resolved.spans,
+                            pills: resolved.pills,
+                            style: resolved.style,
+                            maxWidth: shapeMaxW,
+                            pixelScale: scale,
+                            emitGlyphs: false,
+                            keep: keep,
+                            // Intrinsic probes and final layout have the same break for an ordinary
+                            // no-wrap label. Keep the first break for later Taffy probes and paint.
+                            countAsRebreak: (textLayouts != nil) && (isRealLayout || widthIndependent),
+                            pretty: resolved.pretty, forMeasurement: true
+                        )
+                    }
                     if !resolved.isSecure, isRealLayout || widthIndependent, let collector = textLayouts {
                         collector.map[nodeId] = TextLayoutRecord(box: box, isInput: false)
                     }

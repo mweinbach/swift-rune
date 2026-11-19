@@ -633,16 +633,20 @@ struct ElSlicePictureScaleTests {
             }
             _ = rt.frame(at: 0)
             let nodes = rt.elements()
-            func rect(_ key: String) throws -> [Float] {
-                try #require(nodes.first { $0.key == key }).target
+            func rect(_ key: String) -> [Float] {
+                guard let info = nodes.first(where: { $0.key == key }) else {
+                    Issue.record("missing node with key \(key)")
+                    return [0, 0, 0, 0]
+                }
+                return info.target
             }
-            let plain = try rect("plain"), filled = try rect("filled")
-            let space = try rect("space"), empty = try rect("empty")
+            let plain = rect("plain"), filled = rect("filled")
+            let space = rect("space"), empty = rect("empty")
             #expect(filled[2] == plain[2])
             #expect(empty[2] == space[2])
             #expect(filled[1] == 20 && empty[1] == 20)
-            #expect(try rect("large")[1] == 10)
-            #expect(try rect("multiline")[3] == 40)
+            #expect(rect("large")[1] == 10)
+            #expect(rect("multiline")[3] == 40)
         }
     }
 

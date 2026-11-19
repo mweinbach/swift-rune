@@ -361,7 +361,7 @@ public enum AccessibilityDump {
     static func writeShallow<Fields: AccessibilityDumpFields>(
         _ node: AccessibilityNode, isRoot: Bool, forBrowser: Bool, syntheticPath: String?, to fields: inout Fields
     ) throws(Fields.Failure) {
-        let defaultRole = (node.isSecure && node.role == .textInput) ? ElementRole.passwordInput.rawValue : node.role.rawValue
+        let defaultRole = (node.isSecure && (node.role == .textInput || node.role == .searchbox)) ? ElementRole.passwordInput.rawValue : node.role.rawValue
         let resolvedRole = (forBrowser ? node.webDocument?.role : nil) ?? defaultRole
         try fields.set(.key, node.id)
         try fields.set(.role, resolvedRole)

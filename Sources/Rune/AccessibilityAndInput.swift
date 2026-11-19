@@ -394,8 +394,8 @@ public enum AccessibilityTreeBuilder {
             fieldSelection = isSecure ? nil : [0, edit.anchor, 0, edit.cursor]
         }
 
-        let resolvedRole: ElementRole = element.handlers.editLens != nil || (element.role == .textInput && (isSecure || multiline))
-            ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: multiline)
+        let resolvedRole: ElementRole = element.handlers.editLens != nil || ((element.role == .textInput || element.role == .searchbox) && (isSecure || multiline))
+            ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: multiline, authoredRole: element.role)
             : semanticRole
         let labelledByText = relatedWords(key: element.a11yLabelledBy, ancestors: ancestors)
         let describedByText = relatedWords(key: element.a11yDescribedBy, ancestors: ancestors)
@@ -524,6 +524,8 @@ public enum AppKitAccessibilityMapper {
         let name: String
         switch role {
         case .dialog, .alertDialog: return .dialog
+        case .searchbox: return .searchField
+        case .article: name = "AXDocumentArticle"
         case .banner: name = "AXLandmarkBanner"
         case .complementary: name = "AXLandmarkComplementary"
         case .contentInfo: name = "AXLandmarkContentInfo"
@@ -540,16 +542,17 @@ public enum AppKitAccessibilityMapper {
     public static func nsRole(for role: ElementRole) -> NSAccessibility.Role {
         switch role {
         case .scrollView: return .scrollArea
-        case .presentation, .group, .figure: return .group
+        case .presentation, .group, .figure, .article: return .group
         case .text: return .staticText
         case .button: return .button
         case .checkbox: return .checkBox
         case .switchControl: return .checkBox
         case .radio: return .radioButton
         case .tab: return .radioButton
-        case .textInput, .passwordInput: return .textField
-        case .multilineTextInput: return .textArea
+        case .textInput, .passwordInput, .searchbox: return .textField
+        case .multilineTextInput, .terminal: return .textArea
         case .slider: return .slider
+        case .spinbutton: return .incrementor
         case .progress: return .progressIndicator
         case .listItem: return .row
         case .heading: return NSAccessibility.Role(rawValue: AccessibilityHeading.macRoleName)
@@ -610,7 +613,7 @@ public enum AppKitAccessibilityMapper {
         reusing existing: RuneNSAccessibilityElement? = nil,
         viewToScreen: @autoclosure () -> CGAffineTransform = .identity
     ) -> RuneNSAccessibilityElement {
-        if !node.isSecure, node.role == .textInput || node.role == .multilineTextInput,
+        if !node.isSecure, node.role == .textInput || node.role == .multilineTextInput || node.role == .searchbox,
            let text = node.value, let selection = node.textSelection,
            selection.count == 4, selection[0] == 0, selection[2] == 0 {
             let snapshot = RuneAXTextField.Snapshot(text: text, anchor: selection[1], focus: selection[3],
@@ -795,8 +798,10 @@ public enum UIKitAccessibilityMapper {
         case .text, .listItem, .dialog, .alertDialog, .menu, .separator, .figure: return .staticText
         case .presentation, .scrollView, .menuBar, .toolbar, .list, .textInput, .passwordInput, .multilineTextInput,
              .group, .listbox, .tree, .table, .grid, .treeGrid, .row, .cell, .gridCell, .rowHeader, .columnHeader,
-             .navigation, .banner, .complementary, .contentInfo, .form, .main, .region, .search: return .none
-        case .splitter, .slider: return .adjustable
+             .navigation, .banner, .complementary, .contentInfo, .form, .main, .region, .search,
+             .article, .terminal: return .none
+        case .searchbox: return .searchField
+        case .splitter, .slider, .spinbutton: return .adjustable
         case .status, .progress: return [.staticText, .updatesFrequently]
         case .heading: return .header
         case .image, .icon: return .image
@@ -822,7 +827,7 @@ public enum UIKitAccessibilityMapper {
         case .table, .grid, .treeGrid: return .dataTable
         case .list, .listbox, .tree: return .list
         case .banner, .complementary, .contentInfo, .form, .main, .navigation, .region, .search: return .landmark
-        case .group: return .semanticGroup
+        case .group, .article, .terminal: return .semanticGroup
         default: return .none
         }
     }

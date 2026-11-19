@@ -15,6 +15,7 @@ private struct BlockItem {
     var canCollapseThrough: Bool = false
     var computedSize: Size<Float> = .zero
     var contentSize: Size<Float> = .zero
+    var scrollOverflowOrigin: Point<Float> = .zero
     var firstBaselineY: Float? = nil
     var yPosition: Float = 0
 }
@@ -56,21 +57,27 @@ internal func computeBlockLayout(
     )
     known = applyAspectRatio(known, style.aspectRatio)
 
-    // If ComputeSize and both dimensions are known, return early
-    if input.runMode == .computeSize, let w = known.width, let h = known.height {
-        let clamped = Size(
-            width: maybeClamp(Swift.max(w, pbSum.width + scrollbarSize.width), min: minSize.width, max: maxSize.width),
-            height: maybeClamp(Swift.max(h, pbSum.height + scrollbarSize.height), min: minSize.height, max: maxSize.height)
-        )
-        let ownMargin = style.resolvedMarginOrZero(parentWidth: parentSize.width)
-        return LayoutOutput(
-            size: clamped,
-            contentSize: clamped,
-            firstBaselines: Point(x: nil, y: nil),
-            topMargin: input.verticalMarginsAreCollapsible.start ? .fromMargin(ownMargin.top) : .zero,
-            bottomMargin: input.verticalMarginsAreCollapsible.end ? .fromMargin(ownMargin.bottom) : .zero,
-            marginsCanCollapseThrough: clamped.height == 0 && pbSum.height == 0
-        )
+    // If ComputeSize and requested dimension(s) are already known, return early (taffy 0.15 block.rs:435-446)
+    if input.runMode == .computeSize {
+        if let w = known.width, let h = known.height {
+            let clamped = Size(
+                width: maybeClamp(Swift.max(w, pbSum.width + scrollbarSize.width), min: minSize.width, max: maxSize.width),
+                height: maybeClamp(Swift.max(h, pbSum.height + scrollbarSize.height), min: minSize.height, max: maxSize.height)
+            )
+            let ownMargin = style.resolvedMarginOrZero(parentWidth: parentSize.width)
+            return LayoutOutput(
+                size: clamped,
+                contentSize: clamped,
+                firstBaselines: Point(x: nil, y: nil),
+                topMargin: input.verticalMarginsAreCollapsible.start ? .fromMargin(ownMargin.top) : .zero,
+                bottomMargin: input.verticalMarginsAreCollapsible.end ? .fromMargin(ownMargin.bottom) : .zero,
+                marginsCanCollapseThrough: clamped.height == 0 && pbSum.height == 0
+            )
+        }
+        if input.axis == .horizontal, let w = known.width {
+            let clampedW = maybeClamp(Swift.max(w, pbSum.width + scrollbarSize.width), min: minSize.width, max: maxSize.width)
+            return LayoutOutput.fromOuterSize(Size(width: clampedW, height: 0))
+        }
     }
 
     let contentBoxInset = Rect(
@@ -170,6 +177,18 @@ internal func computeBlockLayout(
         containerInnerW = Swift.max(0, clampedOuterW - innerGapW)
     }
 
+    // Short-circuit if computing size and only width (or both dimensions) is now known (taffy 0.15 block.rs:605-612).
+    if input.runMode == .computeSize {
+        let containerOuterW = maybeClamp(known.width ?? (containerInnerW + innerGapW), min: minSize.width, max: maxSize.width)
+        if let h = known.height {
+            let containerOuterH = maybeClamp(Swift.max(h, pbSum.height + scrollbarSize.height), min: minSize.height, max: maxSize.height)
+            return LayoutOutput.fromOuterSize(Size(width: containerOuterW, height: containerOuterH))
+        }
+        if input.axis == .horizontal {
+            return LayoutOutput.fromOuterSize(Size(width: containerOuterW, height: 0))
+        }
+    }
+
     let finalParentSize = Size<Float?>(width: containerInnerW, height: innerParentSize.height)
 
     // 2. Measure / layout each child vertically and perform margin collapsing
@@ -179,6 +198,8 @@ internal func computeBlockLayout(
     var firstChildTopMargin = CollapsibleMarginSet.zero
     var lastChildBottomMargin = CollapsibleMarginSet.zero
     var allChildrenCollapsedThrough = true
+    var contentMinX: Float = 0
+    var contentMinY: Float = 0
     var contentMaxX: Float = contentBoxInset.left
     var firstBaselineY: Float? = nil
 
@@ -247,6 +268,7 @@ internal func computeBlockLayout(
         item.margin = cMargin
         item.computedSize = Size(width: finalW, height: finalH)
         item.contentSize = childOut.contentSize
+        item.scrollOverflowOrigin = childOut.scrollOverflowOrigin
         item.firstBaselineY = childOut.firstBaselines.y
         item.marginTopSet = childOut.topMargin
         item.marginBottomSet = childOut.bottomMargin
@@ -329,6 +351,16 @@ internal func computeBlockLayout(
                 }
             }
 
+            contentMinX = Swift.min(contentMinX, x)
+            contentMinY = Swift.min(contentMinY, y)
+            if item.scrollOverflowOrigin != .zero {
+                if item.style.overflow.x == .visible {
+                    contentMinX = Swift.min(contentMinX, x + item.scrollOverflowOrigin.x)
+                }
+                if item.style.overflow.y == .visible {
+                    contentMinY = Swift.min(contentMinY, y + item.scrollOverflowOrigin.y)
+                }
+            }
             contentMaxX = Swift.max(contentMaxX, x + item.computedSize.width)
             if firstBaselineY == nil {
                 firstBaselineY = y + (item.firstBaselineY ?? item.computedSize.height)
@@ -367,6 +399,7 @@ internal func computeBlockLayout(
         size: Size(width: finalOuterW, height: finalOuterH),
         contentSize: finalContentSize,
         firstBaselines: Point(x: nil, y: firstBaselineY),
+        scrollOverflowOrigin: Point(x: contentMinX, y: contentMinY),
         topMargin: outTopMargin,
         bottomMargin: outBottomMargin,
         marginsCanCollapseThrough: allChildrenCollapsedThrough && pbSum.height == 0 && known.height == nil

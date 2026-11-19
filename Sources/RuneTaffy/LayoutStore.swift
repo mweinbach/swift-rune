@@ -541,6 +541,7 @@ extension LayoutEngine {
 }
 
 private final class LayoutStoreAdapter: LayoutTree {
+    var containerDepth: Int = 0
     var slots: [RetainedSlot] = []
     var roundedLayouts: [UInt32: Layout] = [:]
     let nodeIdx: [UInt32]

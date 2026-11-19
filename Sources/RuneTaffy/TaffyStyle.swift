@@ -19,27 +19,22 @@ private struct ExactBFloat: Sendable, Hashable {
 }
 
 private extension Dimension {
-    var packed: (Float, UInt8) {
+    var packedHot: (Float, UInt8)? {
         switch self {
         case .length(let n): (n, 0)
         case .percent(let n): (n, 1)
         case .auto: (0, 2)
         case .maxContent: (0, 3)
-        case .minContent: (0, 4)
-        case .fitContentPx(let n): (n, 5)
-        case .fitContentPercent(let n): (n, 6)
+        case .minContent, .fitContentPx, .fitContentPercent: nil
         }
     }
 
-    init(_ value: Float, tag: UInt8) {
-        switch tag {
+    init(_ value: Float, hotTag: UInt8) {
+        switch hotTag {
         case 0: self = .length(value)
         case 1: self = .percent(value)
         case 2: self = .auto
-        case 3: self = .maxContent
-        case 4: self = .minContent
-        case 5: self = .fitContentPx(value)
-        default: self = .fitContentPercent(value)
+        default: self = .maxContent
         }
     }
 }
@@ -57,6 +52,32 @@ private extension LengthPercentage {
     }
 }
 
+@inline(__always)
+private func packAlignItems(_ value: AlignItems?) -> UInt8 {
+    guard let value else { return 0x0F }
+    return (value.safety.rawValue << 4) | value.keyword.rawValue
+}
+
+@inline(__always)
+private func unpackAlignItems(_ raw: UInt8) -> AlignItems? {
+    guard let keyword = AlignItemsKeyword(rawValue: raw & 0x0F) else { return nil }
+    let safety = AlignmentSafety(rawValue: (raw >> 4) & 0b11) ?? .default
+    return AlignItems(keyword: keyword, safety: safety)
+}
+
+@inline(__always)
+private func packAlignContent(_ value: AlignContent?) -> UInt8 {
+    guard let value else { return 0x0F }
+    return (value.safety.rawValue << 4) | value.keyword.rawValue
+}
+
+@inline(__always)
+private func unpackAlignContent(_ raw: UInt8) -> AlignContent? {
+    guard let keyword = AlignContentKeyword(rawValue: raw & 0x0F) else { return nil }
+    let safety = AlignmentSafety(rawValue: (raw >> 4) & 0b11) ?? .default
+    return AlignContent(keyword: keyword, safety: safety)
+}
+
 /// Bit positions and widths of the fields sharing the eight-byte tag word.
 private struct StyleField {
     let shift: Int
@@ -67,31 +88,40 @@ private struct StyleField {
         mask = (1 << width) - 1
     }
 
-    // The size, min-size and max-size pairs occupy bits 0–17; padding units use 18–21.
-    static let display = Self(22, 3)
-    static let position = Self(25, 3)
-    static let direction = Self(28, 2)
-    static let wrap = Self(30, 2)
-    static let overflowX = Self(32, 2)
-    static let overflowY = Self(34, 2)
-    static let gapWidth = Self(36, 1)
-    static let gapHeight = Self(37, 1)
-    static let basisZero = Self(38, 1)
-    static let basisNegative = Self(39, 1)
-    static let alignItems = Self(40, 4)
-    static let alignSelf = Self(44, 4)
-    static let alignContent = Self(48, 4)
-    static let justifyContent = Self(52, 4)
-    static let extendedGap = Self(56, 1)
-    static let extendedGrow = Self(57, 1)
-    static let extendedShrink = Self(58, 1)
-    static let extendedBasis = Self(59, 1)
-    static let wholeRows = Self(60, 1)
+    // The size, min-size and max-size pairs occupy bits 0–11 (2 bits each); padding units use 12–15.
+    static let display = Self(16, 3)
+    static let position = Self(19, 2)
+    static let direction = Self(21, 2)
+    static let wrap = Self(23, 2)
+    static let overflowX = Self(25, 2)
+    static let overflowY = Self(27, 2)
+    static let gapWidth = Self(29, 1)
+    static let gapHeight = Self(30, 1)
+    static let basisZero = Self(31, 1)
+    static let wholeRows = Self(32, 1)
+    // Each alignment field packs 2 bits of AlignmentSafety (bits 4..5) + 4 bits of keyword (bits 0..3, 0xF = nil).
+    static let alignItems = Self(33, 6)
+    static let alignSelf = Self(39, 6)
+    static let alignContent = Self(45, 6)
+    static let justifyContent = Self(51, 6)
+    static let extendedGap = Self(57, 1)
+    static let extendedGrow = Self(58, 1)
+    static let extendedShrink = Self(59, 1)
+    static let extendedBasis = Self(60, 1)
+    static let basisNegative = Self(61, 1)
+    static let extendedDims = Self(62, 1)
 }
 
 private struct StyleTags: Sendable, Hashable {
-    // All six dimensions are auto (tag 2); optional alignment fields use 15 for nil.
-    private var bits: UInt64 = 0x00FF_FF00_0001_2492
+    // All six dimensions are auto (2-bit tag 2 -> 0x0AAA); optional alignment fields use 0x0F (default safety, nil keyword).
+    private static let defaultBits: UInt64 =
+        0x0AAA
+        | (UInt64(0x0F) << StyleField.alignItems.shift)
+        | (UInt64(0x0F) << StyleField.alignSelf.shift)
+        | (UInt64(0x0F) << StyleField.alignContent.shift)
+        | (UInt64(0x0F) << StyleField.justifyContent.shift)
+
+    private var bits: UInt64 = StyleTags.defaultBits
 
     subscript(_ field: StyleField) -> UInt8 {
         get { UInt8((bits >> field.shift) & field.mask) }
@@ -101,23 +131,18 @@ private struct StyleTags: Sendable, Hashable {
     }
 
     func dimensions(_ values: Size<Float>, at shift: Int) -> Size<Dimension> {
-        Size(width: Dimension(values.width, tag: self[StyleField(shift, 3)]),
-             height: Dimension(values.height, tag: self[StyleField(shift + 3, 3)]))
-    }
-
-    mutating func pack(_ dimensions: Size<Dimension>, at shift: Int) -> Size<Float> {
-        let (width, widthTag) = dimensions.width.packed
-        let (height, heightTag) = dimensions.height.packed
-        self[StyleField(shift, 6)] = widthTag | heightTag << 3
-        return Size(width: width, height: height)
+        Size(
+            width: Dimension(values.width, hotTag: self[StyleField(shift, 2)]),
+            height: Dimension(values.height, hotTag: self[StyleField(shift + 2, 2)])
+        )
     }
 
     func resolve(_ values: Size<Float>, at shift: Int, parent: Size<Float?>, adjustment: Size<Float>) -> Size<Float?> {
-        let units = self[StyleField(shift, 6)]
+        let units = self[StyleField(shift, 4)]
         if units == 0 {
             return Size(width: values.width + adjustment.width, height: values.height + adjustment.height)
         }
-        if units == 0b010_010 { return .none }
+        if units == 0b10_10 { return .none }
         func resolve(_ value: Float, unit: UInt8, parent: Float?, adjustment: Float) -> Float? {
             switch unit {
             case 0: return value + adjustment
@@ -125,14 +150,13 @@ private struct StyleTags: Sendable, Hashable {
             default: return nil
             }
         }
-        return Size(width: resolve(values.width, unit: units & 7, parent: parent.width, adjustment: adjustment.width),
-                    height: resolve(values.height, unit: units >> 3, parent: parent.height, adjustment: adjustment.height))
+        return Size(
+            width: resolve(values.width, unit: units & 0b11, parent: parent.width, adjustment: adjustment.width),
+            height: resolve(values.height, unit: units >> 2, parent: parent.height, adjustment: adjustment.height)
+        )
     }
 
-    // Rust retains the inner display of an expanded style when wrapping it for scrolling.
-    // Swift can keep intrinsic/fit-content keywords inline and still follow that rule.
-    var hasExtendedDimension: Bool { bits & 0x24924 != 0 }
-    var hasPercentPadding: Bool { bits & (0xF << 18) != 0 }
+    var hasPercentPadding: Bool { bits & (0xF << 12) != 0 }
 
     // Preserve signed zero when reading a flex basis, and Float's equality/hash for the style.
     private var equalityBits: UInt64 { bits & ~(UInt64(1) << StyleField.basisNegative.shift) }
@@ -157,10 +181,14 @@ private struct GridFields: Sendable, Hashable {
 
 /// Only allocated when a node uses a value outside the inline layout representation.
 private struct ExtendedStyle: Sendable, Hashable {
+    var position: Position?
     var boxSizing = BoxSizing.borderBox
     var scrollbarWidth: Float = 0
     var direction = Direction.ltr
     var textAlign = TextAlign.auto
+    var size: Size<Dimension>?
+    var minSize: Size<Dimension>?
+    var maxSize: Size<Dimension>?
     var aspectRatio: Float?
     var margin = Rect<LengthPercentageAuto>(all: .zero)
     var border = Rect<LengthPercentage>(all: .zero)
@@ -174,6 +202,7 @@ private struct ExtendedStyle: Sendable, Hashable {
     var grid: [GridFields] = []
     var itemIsTable = false
     var itemIsReplaced = false
+    var itemIsCompressibleReplaced = false
     var contain = Contain.none
 
     static let defaults = Self()
@@ -221,6 +250,29 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
         }
     }
 
+    private mutating func setDimension(
+        _ newValue: Size<Dimension>,
+        values: WritableKeyPath<TaffyStyle, Size<Float>>,
+        shift: Int,
+        extendedKey: WritableKeyPath<ExtendedStyle, Size<Dimension>?>
+    ) {
+        if let (w, wt) = newValue.width.packedHot, let (h, ht) = newValue.height.packedHot {
+            self[keyPath: values] = Size(width: w, height: h)
+            tags[StyleField(shift, 4)] = wt | (ht << 2)
+            if tags[.extendedDims] != 0 {
+                setExtended(extendedKey, nil)
+                let stillExtended = !extra.isEmpty
+                    && (extra[0].size != nil || extra[0].minSize != nil || extra[0].maxSize != nil)
+                tags[.extendedDims] = stillExtended ? 1 : 0
+            }
+        } else {
+            self[keyPath: values] = .zero
+            tags[StyleField(shift, 4)] = 0b10_10
+            setExtended(extendedKey, newValue)
+            tags[.extendedDims] = 1
+        }
+    }
+
     // MARK: - Core Layout Properties
 
     public var display: Display {
@@ -228,8 +280,30 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
         set { tags[.display] = newValue.rawValue }
     }
     public var position: Position {
-        get { Position(rawValue: tags[.position])! }
-        set { tags[.position] = newValue.rawValue }
+        get {
+            switch tags[.position] {
+            case 0: return .static
+            case 1: return .relative
+            case 2: return .absolute
+            default: return extra.isEmpty ? .static : (extra[0].position ?? .static)
+            }
+        }
+        set {
+            switch newValue {
+            case .static:
+                if tags[.position] == 3 { setExtended(\.position, nil) }
+                tags[.position] = 0
+            case .relative:
+                if tags[.position] == 3 { setExtended(\.position, nil) }
+                tags[.position] = 1
+            case .absolute:
+                if tags[.position] == 3 { setExtended(\.position, nil) }
+                tags[.position] = 2
+            case .fixed, .sticky:
+                setExtended(\.position, newValue)
+                tags[.position] = 3
+            }
+        }
     }
     public var overflow: Point<Overflow> {
         get { Point(x: Overflow(rawValue: tags[.overflowX])!, y: Overflow(rawValue: tags[.overflowY])!) }
@@ -242,29 +316,38 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
     // MARK: - Sizing and spacing
 
     public var size: Size<Dimension> {
-        get { tags.dimensions(sizeValues, at: 0) }
-        set { sizeValues = tags.pack(newValue, at: 0) }
+        get {
+            if tags[.extendedDims] != 0, let extended = extra[0].size { return extended }
+            return tags.dimensions(sizeValues, at: 0)
+        }
+        set { setDimension(newValue, values: \.sizeValues, shift: 0, extendedKey: \.size) }
     }
     public var minSize: Size<Dimension> {
-        get { tags.dimensions(minValues, at: 6) }
-        set { minValues = tags.pack(newValue, at: 6) }
+        get {
+            if tags[.extendedDims] != 0, let extended = extra[0].minSize { return extended }
+            return tags.dimensions(minValues, at: 4)
+        }
+        set { setDimension(newValue, values: \.minValues, shift: 4, extendedKey: \.minSize) }
     }
     public var maxSize: Size<Dimension> {
-        get { tags.dimensions(maxValues, at: 12) }
-        set { maxValues = tags.pack(newValue, at: 12) }
+        get {
+            if tags[.extendedDims] != 0, let extended = extra[0].maxSize { return extended }
+            return tags.dimensions(maxValues, at: 8)
+        }
+        set { setDimension(newValue, values: \.maxValues, shift: 8, extendedKey: \.maxSize) }
     }
     public var padding: Rect<LengthPercentage> {
         get {
-            Rect(left: LengthPercentage(paddingValues.left, tag: tags[StyleField(18, 1)]),
-                 right: LengthPercentage(paddingValues.right, tag: tags[StyleField(19, 1)]),
-                 top: LengthPercentage(paddingValues.top, tag: tags[StyleField(20, 1)]),
-                 bottom: LengthPercentage(paddingValues.bottom, tag: tags[StyleField(21, 1)]))
+            Rect(left: LengthPercentage(paddingValues.left, tag: tags[StyleField(12, 1)]),
+                 right: LengthPercentage(paddingValues.right, tag: tags[StyleField(13, 1)]),
+                 top: LengthPercentage(paddingValues.top, tag: tags[StyleField(14, 1)]),
+                 bottom: LengthPercentage(paddingValues.bottom, tag: tags[StyleField(15, 1)]))
         }
         set {
-            (paddingValues.left, tags[StyleField(18, 1)]) = newValue.left.packed
-            (paddingValues.right, tags[StyleField(19, 1)]) = newValue.right.packed
-            (paddingValues.top, tags[StyleField(20, 1)]) = newValue.top.packed
-            (paddingValues.bottom, tags[StyleField(21, 1)]) = newValue.bottom.packed
+            (paddingValues.left, tags[StyleField(12, 1)]) = newValue.left.packed
+            (paddingValues.right, tags[StyleField(13, 1)]) = newValue.right.packed
+            (paddingValues.top, tags[StyleField(14, 1)]) = newValue.top.packed
+            (paddingValues.bottom, tags[StyleField(15, 1)]) = newValue.bottom.packed
         }
     }
     public var gap: Size<LengthPercentage> {
@@ -374,20 +457,20 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
         }
     }
     public var alignItems: AlignItems? {
-        get { AlignItems(rawValue: tags[.alignItems]) }
-        set { tags[.alignItems] = newValue?.rawValue ?? 15 }
+        get { unpackAlignItems(tags[.alignItems]) }
+        set { tags[.alignItems] = packAlignItems(newValue) }
     }
     public var alignSelf: AlignSelf? {
-        get { AlignSelf(rawValue: tags[.alignSelf]) }
-        set { tags[.alignSelf] = newValue?.rawValue ?? 15 }
+        get { unpackAlignItems(tags[.alignSelf]) }
+        set { tags[.alignSelf] = packAlignItems(newValue) }
     }
     public var alignContent: AlignContent? {
-        get { AlignContent(rawValue: tags[.alignContent]) }
-        set { tags[.alignContent] = newValue?.rawValue ?? 15 }
+        get { unpackAlignContent(tags[.alignContent]) }
+        set { tags[.alignContent] = packAlignContent(newValue) }
     }
     public var justifyContent: JustifyContent? {
-        get { JustifyContent(rawValue: tags[.justifyContent]) }
-        set { tags[.justifyContent] = newValue?.rawValue ?? 15 }
+        get { unpackAlignContent(tags[.justifyContent]) }
+        set { tags[.justifyContent] = packAlignContent(newValue) }
     }
 
     // MARK: - Extended CSS properties
@@ -480,6 +563,34 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
         get { extra.isEmpty ? false : extra[0].itemIsReplaced }
         set { setExtended(\.itemIsReplaced, newValue) }
     }
+    /// Matches Taffy's `Style::item_is_compressible_replaced`.
+    public var itemIsCompressibleReplaced: Bool {
+        get { extra.isEmpty ? false : extra[0].itemIsCompressibleReplaced }
+        set { setExtended(\.itemIsCompressibleReplaced, newValue) }
+    }
+    /// Box generation mode matching `CoreStyle::box_generation_mode`.
+    public var boxGenerationMode: BoxGenerationMode {
+        display == .none ? .none : .normal
+    }
+    /// Whether this style is `display: block` (`CoreStyle::is_block`).
+    public var isBlock: Bool {
+        display == .block
+    }
+    /// Whether this item is replaced (`CoreStyle::is_replaced`).
+    public var isReplaced: Bool {
+        itemIsReplaced
+    }
+    /// Whether this item is a compressible replaced item (`CoreStyle::is_compressible_replaced`).
+    /// Reading matches upstream `rune-taffy`: true when either `itemIsReplaced` or
+    /// `itemIsCompressibleReplaced` is set. Setting updates `itemIsCompressibleReplaced`.
+    public var isCompressibleReplaced: Bool {
+        get { itemIsReplaced || itemIsCompressibleReplaced }
+        set { itemIsCompressibleReplaced = newValue }
+    }
+    /// Whether this item is a CSS table (`BlockItemStyle::is_table` / `OofItemStyle::is_table`).
+    public var isTable: Bool {
+        itemIsTable
+    }
     public var contain: Contain {
         get { extra.isEmpty ? .none : extra[0].contain }
         set { setExtended(\.contain, newValue) }
@@ -539,6 +650,7 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
         gridColumn: Line<GridPlacement> = Line(start: .auto, end: .auto),
         itemIsTable: Bool = false,
         itemIsReplaced: Bool = false,
+        itemIsCompressibleReplaced: Bool = false,
         contain: Contain = .none
     ) {
         self.display = display
@@ -581,6 +693,7 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
         self.gridColumn = gridColumn
         self.itemIsTable = itemIsTable
         self.itemIsReplaced = itemIsReplaced
+        self.itemIsCompressibleReplaced = itemIsCompressibleReplaced
         self.contain = contain
     }
 
@@ -718,6 +831,11 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
     }
 
     @inlinable
+    public mutating func setAlignContent(_ a: AlignContent) {
+        alignContent = a
+    }
+
+    @inlinable
     public mutating func setJustifyContent(_ j: JustifyContent) {
         justifyContent = j
     }
@@ -808,8 +926,7 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
     /// resets this style's outer box to fill that column (`flex: 1 1 auto`, `minSize: 0`).
     /// The wrapper keeps `overflow` too, matching upstream `CompactStyle::take_box_placement`.
     public mutating func takeBoxPlacement() -> TaffyStyle {
-        let usesInlinePlacement = extra.isEmpty && !tags.hasExtendedDimension
-            && display != .grid && position != .fixed && position != .sticky
+        let usesInlinePlacement = extra.isEmpty && display != .grid
         var outer = TaffyStyle.default
         outer.display = display == .none ? .none : .flex
         outer.flexDirection = .column
@@ -853,9 +970,15 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
 
     /// Applied only to the style copy seen by the parent flex column, before box-sizing adjustments.
     internal mutating func roundAbsoluteRowHeights() {
-        if tags[StyleField(3, 3)] == 0 { sizeValues.height = (sizeValues.height + 0.5).rounded(.down) }
-        if tags[StyleField(9, 3)] == 0 { minValues.height = (minValues.height + 0.5).rounded(.down) }
-        if tags[StyleField(15, 3)] == 0 { maxValues.height = (maxValues.height + 0.5).rounded(.down) }
+        if tags[.extendedDims] == 0 {
+            if tags[StyleField(2, 2)] == 0 { sizeValues.height = (sizeValues.height + 0.5).rounded(.down) }
+            if tags[StyleField(6, 2)] == 0 { minValues.height = (minValues.height + 0.5).rounded(.down) }
+            if tags[StyleField(10, 2)] == 0 { maxValues.height = (maxValues.height + 0.5).rounded(.down) }
+        } else {
+            if case .length(let h) = size.height { size.height = .length((h + 0.5).rounded(.down)) }
+            if case .length(let h) = minSize.height { minSize.height = .length((h + 0.5).rounded(.down)) }
+            if case .length(let h) = maxSize.height { maxSize.height = .length((h + 0.5).rounded(.down)) }
+        }
     }
 
     /// Amount to add to a content-box dimension to convert to border-box (or 0 if already border-box).
@@ -867,17 +990,36 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
         }
     }
 
-    /// Resolve numeric lengths/percentages from their inline tags, including the border-box adjustment.
+    /// Resolve numeric lengths/percentages from their inline tags (or extended storage),
+    /// including the border-box adjustment.
     internal func resolveSize(parent: Size<Float?>, adjustment: Size<Float>) -> Size<Float?> {
-        tags.resolve(sizeValues, at: 0, parent: parent, adjustment: adjustment)
+        if tags[.extendedDims] != 0, let extended = extra[0].size {
+            return Size(
+                width: extended.width.maybeResolve(parent.width).map { $0 + adjustment.width },
+                height: extended.height.maybeResolve(parent.height).map { $0 + adjustment.height }
+            )
+        }
+        return tags.resolve(sizeValues, at: 0, parent: parent, adjustment: adjustment)
     }
 
     internal func resolveMinSize(parent: Size<Float?>, adjustment: Size<Float>) -> Size<Float?> {
-        tags.resolve(minValues, at: 6, parent: parent, adjustment: adjustment)
+        if tags[.extendedDims] != 0, let extended = extra[0].minSize {
+            return Size(
+                width: extended.width.maybeResolve(parent.width).map { $0 + adjustment.width },
+                height: extended.height.maybeResolve(parent.height).map { $0 + adjustment.height }
+            )
+        }
+        return tags.resolve(minValues, at: 4, parent: parent, adjustment: adjustment)
     }
 
     internal func resolveMaxSize(parent: Size<Float?>, adjustment: Size<Float>) -> Size<Float?> {
-        tags.resolve(maxValues, at: 12, parent: parent, adjustment: adjustment)
+        if tags[.extendedDims] != 0, let extended = extra[0].maxSize {
+            return Size(
+                width: extended.width.maybeResolve(parent.width).map { $0 + adjustment.width },
+                height: extended.height.maybeResolve(parent.height).map { $0 + adjustment.height }
+            )
+        }
+        return tags.resolve(maxValues, at: 8, parent: parent, adjustment: adjustment)
     }
 
     internal func resolvedPadding(parentWidth: Float?) -> Rect<Float> {
@@ -905,6 +1047,107 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
         position == .absolute || position == .fixed
     }
 }
+
+// MARK: - Compact Layout Style Protocols (matching rune_taffy::style::traits)
+
+/// Core layout style interface matching `taffy::CoreStyle` implemented by `CompactStyle`.
+public protocol CoreLayoutStyle: Sendable {
+    var boxGenerationMode: BoxGenerationMode { get }
+    var isBlock: Bool { get }
+    var isCompressibleReplaced: Bool { get }
+    var isReplaced: Bool { get }
+    var boxSizing: BoxSizing { get }
+    var direction: Direction { get }
+    var overflow: Point<Overflow> { get }
+    var scrollbarWidth: Float { get }
+    var position: Position { get }
+    var inset: Rect<LengthPercentageAuto> { get }
+    var size: Size<Dimension> { get }
+    var minSize: Size<Dimension> { get }
+    var maxSize: Size<Dimension> { get }
+    var aspectRatio: Float? { get }
+    var margin: Rect<LengthPercentageAuto> { get }
+    var padding: Rect<LengthPercentage> { get }
+    var border: Rect<LengthPercentage> { get }
+    var contain: Contain { get }
+}
+
+/// Flexbox container style interface matching `taffy::FlexboxContainerStyle`.
+public protocol FlexboxContainerLayoutStyle: CoreLayoutStyle {
+    var flexDirection: FlexDirection { get }
+    var flexWrap: FlexWrap { get }
+    var gap: Size<LengthPercentage> { get }
+    var alignContent: AlignContent? { get }
+    var alignItems: AlignItems? { get }
+    var justifyContent: JustifyContent? { get }
+}
+
+/// Flexbox item style interface matching `taffy::FlexboxItemStyle`.
+public protocol FlexboxItemLayoutStyle: CoreLayoutStyle {
+    var flexBasis: Dimension { get }
+    var flexGrow: Float { get }
+    var flexShrink: Float { get }
+    var alignSelf: AlignSelf? { get }
+}
+
+/// Block container style interface matching `taffy::BlockContainerStyle`.
+public protocol BlockContainerLayoutStyle: CoreLayoutStyle {
+    var textAlign: TextAlign { get }
+    var alignContent: AlignContent? { get }
+    var justifyItems: JustifyItems? { get }
+}
+
+/// Block item style interface matching `taffy::BlockItemStyle`.
+public protocol BlockItemLayoutStyle: CoreLayoutStyle {
+    var isTable: Bool { get }
+    var alignSelf: AlignSelf? { get }
+    var justifySelf: JustifySelf? { get }
+}
+
+/// Grid container style interface matching `taffy::GridContainerStyle`.
+public protocol GridContainerLayoutStyle: CoreLayoutStyle {
+    var gridTemplateRows: [GridTemplateComponent] { get }
+    var gridTemplateColumns: [GridTemplateComponent] { get }
+    var gridAutoRows: [TrackSizingFunction] { get }
+    var gridAutoColumns: [TrackSizingFunction] { get }
+    var gridAutoFlow: GridAutoFlow { get }
+    var gap: Size<LengthPercentage> { get }
+    var alignContent: AlignContent? { get }
+    var justifyContent: JustifyContent? { get }
+    var alignItems: AlignItems? { get }
+    var justifyItems: JustifyItems? { get }
+    var gridTemplateAreas: [GridTemplateArea] { get }
+    var gridTemplateRowNames: [[String]] { get }
+    var gridTemplateColumnNames: [[String]] { get }
+}
+
+/// Grid item style interface matching `taffy::GridItemStyle`.
+public protocol GridItemLayoutStyle: CoreLayoutStyle {
+    var gridRow: Line<GridPlacement> { get }
+    var gridColumn: Line<GridPlacement> { get }
+    var alignSelf: AlignSelf? { get }
+    var justifySelf: JustifySelf? { get }
+}
+
+/// Out-of-flow item style interface matching `taffy::OofItemStyle`.
+public protocol OutOfFlowItemLayoutStyle: CoreLayoutStyle {
+    var alignSelf: AlignSelf? { get }
+    var justifySelf: JustifySelf? { get }
+    var isTable: Bool { get }
+    var gridRow: Line<GridPlacement> { get }
+    var gridColumn: Line<GridPlacement> { get }
+}
+
+extension TaffyStyle:
+    CoreLayoutStyle,
+    FlexboxContainerLayoutStyle,
+    FlexboxItemLayoutStyle,
+    BlockContainerLayoutStyle,
+    BlockItemLayoutStyle,
+    GridContainerLayoutStyle,
+    GridItemLayoutStyle,
+    OutOfFlowItemLayoutStyle
+{}
 
 public typealias CompactStyle = TaffyStyle
 public typealias Style = TaffyStyle

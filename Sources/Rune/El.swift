@@ -160,6 +160,9 @@ public struct WheelEvent: Sendable, Equatable {
     public var dx: Float
     public var dy: Float
     public var precise: Bool
+    /// Whole notches of a mouse wheel on a platform whose browsers ease them (Windows/Linux):
+    /// unclaimed deltas ease on Chromium's wheel curve (`Runtime.setWheelGlide`, `#1150`).
+    public var notch: Bool
     public var phase: GesturePhase
     public var mods: Mods
     public var momentum: Bool
@@ -170,6 +173,7 @@ public struct WheelEvent: Sendable, Equatable {
         dx: Float = 0,
         dy: Float = 0,
         precise: Bool = true,
+        notch: Bool = false,
         phase: GesturePhase = .changed,
         mods: Mods = .none,
         momentum: Bool = false,
@@ -179,11 +183,18 @@ public struct WheelEvent: Sendable, Equatable {
         self.dx = dx
         self.dy = dy
         self.precise = precise
+        self.notch = notch
         self.phase = phase
         self.mods = mods
         self.momentum = momentum
         self.x = x
         self.y = y
+    }
+
+    public func notch(_ value: Bool) -> WheelEvent {
+        var copy = self
+        copy.notch = value
+        return copy
     }
 }
 
@@ -977,6 +988,10 @@ public enum ElementRole: String, Sendable, Hashable, Codable {
     case code = "code"
     case blockquote = "blockquote"
     case table = "table"
+    case searchbox = "searchbox"
+    case spinbutton = "spinbutton"
+    case article = "article"
+    case terminal = "terminal"
 }
 
 /// Live property binding entry attached to an `El`.
@@ -1283,6 +1298,7 @@ final class ElColdData<State> {
     var placeholderFontBox: AnyObject? = nil
     var outsideListDiscFontBox: AnyObject? = nil
     var wrapGreedy: Bool = false
+    var byLine: Bool = false
     var caretColor: Color? = nil
     var selectionColor: Color? = nil
     var iconPayload: (SVGIcon, Float)? = nil
@@ -1459,6 +1475,7 @@ final class ElColdData<State> {
         c.placeholderFontBox = placeholderFontBox
         c.outsideListDiscFontBox = outsideListDiscFontBox
         c.wrapGreedy = wrapGreedy
+        c.byLine = byLine
         c.caretColor = caretColor
         c.selectionColor = selectionColor
         c.iconPayload = iconPayload
@@ -1659,6 +1676,8 @@ public struct El<State> {
         set { ensureCold().outsideListDiscFontBox = newValue.map(FontStyleBox.init) }
     }
     public var isWrapGreedy: Bool { get { _cold?.wrapGreedy ?? false } set { ensureCold().wrapGreedy = newValue } }
+    /// Shapes each newline-delimited line independently so streaming code blocks reuse unchanged lines (`El::by_line`, `#1133`).
+    public var isByLine: Bool { get { _cold?.byLine ?? false } set { ensureCold().byLine = newValue } }
     public var caretColor: Color? { get { _cold?.caretColor } set { ensureCold().caretColor = newValue } }
     public var selectionColor: Color? { get { _cold?.selectionColor } set { ensureCold().selectionColor = newValue } }
     public var iconPayload: (SVGIcon, Float)? { get { _cold?.iconPayload } set { ensureCold().iconPayload = newValue } }
@@ -2850,6 +2869,14 @@ public struct El<State> {
     public func wrapGreedy(_ enabled: Bool = true) -> Self {
         var copy = self
         copy.isWrapGreedy = enabled
+        return copy
+    }
+
+    /// Shapes each newline-delimited line as its own layout piece so streaming multi-line text
+    /// (such as Markdown code blocks) reuses unchanged lines across commits (`El::by_line`, `#1133`).
+    public func byLine(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.isByLine = enabled
         return copy
     }
 

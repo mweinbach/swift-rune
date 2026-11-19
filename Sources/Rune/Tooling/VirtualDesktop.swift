@@ -433,10 +433,15 @@ public enum DesktopComposite {
 
                 func sample(_ x: Int, _ y: Int, _ chIdx: Int) -> Double {
                     let base = (y * iw + x) * 4
-                    let c = Double(rgba[base + chIdx])
-                    if alreadyPremultiplied { return c }
-                    let a = Double(rgba[base + 3]) / 255.0
-                    return c * a
+                    let cByte = rgba[base + chIdx]
+                    if alreadyPremultiplied { return Double(cByte) }
+                    let aByte = rgba[base + 3]
+                    if aByte == 255 { return Double(cByte) }
+                    if aByte == 0 { return 0.0 }
+                    // Premultiply over black in linear light (`virtual_desktop/composite.rs::fit_backdrop`, #1212).
+                    let alpha = Float(aByte) / 255.0
+                    let lin = DragImage.srgbDecode(Float(cByte) / 255.0) * alpha
+                    return Double(DragImage.srgbEncode(min(1.0, max(0.0, lin))) * 255.0)
                 }
 
                 let dst = (dy * tw + dx) * 4

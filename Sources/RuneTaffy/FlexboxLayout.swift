@@ -35,7 +35,7 @@ private struct FlexItem {
     var resolvedMinimumMainSize: Float = 0
     var baseline: Float = 0
     func participatesInBaseline(_ ctx: FlexContainerContext) -> Bool {
-        ctx.isRow && alignSelf == .baseline && !marginIsAuto.top && !marginIsAuto.bottom
+        ctx.isRow && alignSelf.keyword == .baseline && !marginIsAuto.top && !marginIsAuto.bottom
     }
 
     var offsetMain: Float = 0
@@ -77,12 +77,14 @@ private struct FlexContainerContext {
 
     func resolvedCrossAlignment(for child: TaffyStyle) -> AlignSelf {
         let alignment = child.alignSelf ?? alignItems
-        switch alignment {
+        switch alignment.keyword {
         case .selfStart, .selfEnd:
             // Self-relative alignment uses the child's inline direction.
             let sameDirection = isRow || (child.direction == .rtl) == isRTLColumn
-            if alignment == .selfStart { return sameDirection ? .start : .end }
-            return sameDirection ? .end : .start
+            let resolved: AlignItemsKeyword = alignment.keyword == .selfStart
+                ? (sameDirection ? .start : .end)
+                : (sameDirection ? .end : .start)
+            return AlignSelf(keyword: resolved, safety: alignment.safety)
         default:
             return alignment
         }
@@ -169,11 +171,37 @@ private func prepareFlexbox(tree: any LayoutTree, node: NodeId, input: LayoutInp
     flexDetermineBaseSizes(tree: tree, ctx: ctx, items: &items)
 
     var (lines, resolvedInnerMain) = flexCollectLinesAndMainSize(tree: tree, ctx: ctx, items: items, input: input)
+    if input.runMode == .computeSize {
+        let mainAxisRequested = (input.axis == .horizontal && ctx.isRow) || (input.axis == .vertical && !ctx.isRow)
+        if mainAxisRequested {
+            let outerMain = maybeClamp(
+                ctx.known.main(direction: ctx.dir) ?? (resolvedInnerMain + ctx.innerPB.main(direction: ctx.dir)),
+                min: ctx.minSize.main(direction: ctx.dir),
+                max: ctx.maxSize.main(direction: ctx.dir)
+            )
+            var size = Size<Float>.zero
+            size.setMain(outerMain, direction: ctx.dir)
+            return .done(LayoutOutput.fromOuterSize(size))
+        }
+    }
     flexResolveFlexibleLengths(ctx: ctx, lines: lines, items: &items, resolvedInnerMain: resolvedInnerMain)
-    flexDetermineCrossSizes(tree: tree, ctx: ctx, items: &items, resolvedInnerMain: resolvedInnerMain)
+    flexDetermineCrossSizes(tree: tree, ctx: ctx, items: &items)
 
     flexMeasureBaselines(tree: tree, ctx: ctx, lines: lines, items: &items)
     let resolvedInnerCross = flexComputeLinesAndAlignContent(ctx: ctx, lines: &lines, items: items)
+    if input.runMode == .computeSize {
+        let outerWidth = maybeClamp(
+            ctx.known.width ?? ((ctx.isRow ? resolvedInnerMain : resolvedInnerCross) + ctx.innerPB.width),
+            min: ctx.minSize.width,
+            max: ctx.maxSize.width
+        )
+        let outerHeight = maybeClamp(
+            ctx.known.height ?? ((ctx.isRow ? resolvedInnerCross : resolvedInnerMain) + ctx.innerPB.height),
+            min: ctx.minSize.height,
+            max: ctx.maxSize.height
+        )
+        return .done(LayoutOutput.fromOuterSize(Size(width: outerWidth, height: outerHeight)))
+    }
     let (outerWidth, outerHeight, finalParentSize) = flexStretchAndPositionItems(
         ctx: ctx,
         lines: lines,
@@ -235,12 +263,20 @@ private func flexComputeContainerContext(
     let innerPB = Size(width: contentBoxInset.horizontalSum, height: contentBoxInset.verticalSum)
 
     var earlyReturn: LayoutOutput? = nil
-    if input.runMode == .computeSize, let w = known.width, let h = known.height {
-        let clamped = Size(
-            width: maybeClamp(Swift.max(w, pbSum.width + scrollbarSize.width), min: minSize.width, max: maxSize.width),
-            height: maybeClamp(Swift.max(h, pbSum.height + scrollbarSize.height), min: minSize.height, max: maxSize.height)
-        )
-        earlyReturn = LayoutOutput.fromOuterSize(clamped)
+    if input.runMode == .computeSize {
+        if let w = known.width, let h = known.height {
+            let clamped = Size(
+                width: maybeClamp(Swift.max(w, pbSum.width + scrollbarSize.width), min: minSize.width, max: maxSize.width),
+                height: maybeClamp(Swift.max(h, pbSum.height + scrollbarSize.height), min: minSize.height, max: maxSize.height)
+            )
+            earlyReturn = LayoutOutput.fromOuterSize(clamped)
+        } else if input.axis == .horizontal, let w = known.width {
+            let clampedW = maybeClamp(Swift.max(w, pbSum.width + scrollbarSize.width), min: minSize.width, max: maxSize.width)
+            earlyReturn = LayoutOutput.fromOuterSize(Size(width: clampedW, height: 0))
+        } else if input.axis == .vertical, let h = known.height {
+            let clampedH = maybeClamp(Swift.max(h, pbSum.height + scrollbarSize.height), min: minSize.height, max: maxSize.height)
+            earlyReturn = LayoutOutput.fromOuterSize(Size(width: 0, height: clampedH))
+        }
     }
 
     let availOuter = Size(
@@ -397,7 +433,7 @@ private func flexDetermineSingleItemBaseSize(
     } else if let sm = item.size.main(direction: dir) {
         basis = sm
     } else if let ratio = item.aspectRatio, ratio > 0, ratio.isFinite,
-              ctx.flexWrap == .noWrap, item.alignSelf == .stretch,
+              ctx.flexWrap == .noWrap, item.alignSelf.keyword == .stretch,
               let parentCross = nodeInnerSize.cross(direction: dir),
               let start = item.margin.crossStart(direction: dir), let end = item.margin.crossEnd(direction: dir) {
         let cross = maybeClamp(Swift.max(0, parentCross - start - end),
@@ -595,7 +631,7 @@ private func flexCollectLinesAndMainSize(
                         var childKnown = item.size
                         childKnown.setMain(nil, direction: dir)
                         let itemAlign = item.alignSelf
-                        if itemAlign == .stretch && childKnown.cross(direction: dir) == nil {
+                        if itemAlign.keyword == .stretch && childKnown.cross(direction: dir) == nil {
                             childKnown.setCross(childCrossAvail.intoOption(), direction: dir)
                         }
                         let measurement = computeNodeLayout(
@@ -789,15 +825,13 @@ private func flexResolveFlexibleLengths(
 private func flexDetermineCrossSizes(
     tree: any LayoutTree,
     ctx: FlexContainerContext,
-    items: inout [FlexItem],
-    resolvedInnerMain: Float
+    items: inout [FlexItem]
 ) {
     for idx in items.indices {
         flexDetermineSingleItemCrossSize(
             tree: tree,
             ctx: ctx,
-            item: &items[idx],
-            resolvedInnerMain: resolvedInnerMain
+            item: &items[idx]
         )
     }
 }
@@ -805,12 +839,10 @@ private func flexDetermineCrossSizes(
 private func flexDetermineSingleItemCrossSize(
     tree: any LayoutTree,
     ctx: FlexContainerContext,
-    item: inout FlexItem,
-    resolvedInnerMain: Float
+    item: inout FlexItem
 ) {
     let dir = ctx.dir
     let isRow = ctx.isRow
-    let containerCrossInner = ctx.nodeInnerSize.cross(direction: dir)
     let targetMain = item.targetSize.main(direction: dir)
     var targetCross = item.size.cross(direction: dir)
 
@@ -833,13 +865,10 @@ private func flexDetermineSingleItemCrossSize(
             node: item.node,
             input: LayoutInput(
                 runMode: .computeSize,
-                sizingMode: .inherentSize,
+                sizingMode: .contentSize,
                 axis: isRow ? .vertical : .horizontal,
                 knownDimensions: knownDims,
-                parentSize: Size(
-                    width: isRow ? resolvedInnerMain : containerCrossInner,
-                    height: isRow ? containerCrossInner : resolvedInnerMain
-                ),
+                parentSize: ctx.nodeInnerSize,
                 availableSpace: childAvail,
                 verticalMarginsAreCollapsible: .false
             )
@@ -926,9 +955,9 @@ private func flexComputeLinesAndAlignContent(
     if !lines.isEmpty {
         let freeCross = resolvedInnerCross - totalLinesCross
         let alignContent = ctx.alignContent
-        if lines.count == 1 && alignContent == .stretch {
+        if lines.count == 1 && alignContent.keyword == .stretch {
             lines[0].crossSize = Swift.max(lines[0].crossSize, resolvedInnerCross)
-        } else if freeCross > 0 && alignContent == .stretch {
+        } else if freeCross > 0 && alignContent.keyword == .stretch {
             let extraPerLine = freeCross / Float(lines.count)
             for l in lines.indices {
                 lines[l].crossSize += extraPerLine
@@ -940,7 +969,9 @@ private func flexComputeLinesAndAlignContent(
         var curCross: Float = 0
         var extraGap: Float = 0
 
-        switch alignContent {
+        let effectiveAlignContent: AlignContentKeyword =
+            (alignContent.safety == .safe && remCross < 0) ? .start : alignContent.keyword
+        switch effectiveAlignContent {
         case .flexStart, .normal, .stretch:
             curCross = ctx.isWrapReverse ? remCross : 0
         case .flexEnd:
@@ -995,7 +1026,7 @@ private func flexStretchAndPositionItems(
             let align = items[i].alignSelf
             let hasAutoCross = items[i].size.cross(direction: dir) == nil
             let noAutoCrossMargin = !items[i].marginIsAuto.crossStart(direction: dir) && !items[i].marginIsAuto.crossEnd(direction: dir)
-            if (align == .stretch || align == .normal) && hasAutoCross && noAutoCrossMargin {
+            if (align.keyword == .stretch || align.keyword == .normal) && hasAutoCross && noAutoCrossMargin {
                 let marginCross = (items[i].margin.crossStart(direction: dir) ?? 0) + (items[i].margin.crossEnd(direction: dir) ?? 0)
                 let stretched = maybeClamp(
                     Swift.max(0, line.crossSize - marginCross),
@@ -1060,7 +1091,9 @@ private func flexStretchAndPositionItems(
                 }
             }
         } else {
-            switch justify {
+            let effectiveJustify: AlignContentKeyword =
+                (justify.safety == .safe && freeMain < 0) ? .start : justify.keyword
+            switch effectiveJustify {
             case .flexStart, .normal, .stretch:
                 curMain = isMainReverse ? freeMain : 0
             case .flexEnd:
@@ -1123,7 +1156,9 @@ private func flexStretchAndPositionItems(
             } else {
                 let align = items[i].alignSelf
                 let startMargin = mCrossStart ?? 0
-                switch align {
+                let effectiveAlign: AlignItemsKeyword =
+                    (align.safety == .safe && freeCross < 0) ? .start : align.keyword
+                switch effectiveAlign {
                 case .flexStart, .normal, .stretch:
                     offsetInLine = reverseFlexCrossStart ? startMargin + freeCross : startMargin
                 case .flexEnd:
@@ -1161,6 +1196,8 @@ private func flexFinalizeChildrenAndOutput(
     outerWidth: Float,
     outerHeight: Float
 ) -> LayoutOutput {
+    var contentMinX: Float = 0
+    var contentMinY: Float = 0
     var contentMaxX: Float = ctx.contentBoxInset.left
     var contentMaxY: Float = ctx.contentBoxInset.top
     var firstBaselineY: Float? = nil
@@ -1179,6 +1216,8 @@ private func flexFinalizeChildrenAndOutput(
                 ctx: ctx,
                 item: items[idx],
                 finalParentSize: finalParentSize,
+                contentMinX: &contentMinX,
+                contentMinY: &contentMinY,
                 contentMaxX: &contentMaxX,
                 contentMaxY: &contentMaxY,
                 selectsBaseline: idx == firstBaselineIndex, firstBaselineY: &firstBaselineY
@@ -1192,12 +1231,13 @@ private func flexFinalizeChildrenAndOutput(
             width: Swift.max(outerWidth, contentMaxX + ctx.contentBoxInset.right),
             height: Swift.max(outerHeight, contentMaxY + ctx.contentBoxInset.bottom)
         ),
-        firstBaselines: Point(x: nil, y: firstBaselineY)
+        firstBaselines: Point(x: nil, y: firstBaselineY),
+        scrollOverflowOrigin: Point(x: contentMinX, y: contentMinY)
     )
 }
 
 private func flexFinalChildInput(target: Size<Float>, parent: Size<Float?>) -> LayoutInput {
-    LayoutInput(runMode: .performLayout, sizingMode: .inherentSize, axis: .both,
+    LayoutInput(runMode: .performLayout, sizingMode: .contentSize, axis: .both,
                 knownDimensions: Size(width: target.width, height: target.height), parentSize: parent,
                 availableSpace: Size(width: .definite(target.width), height: .definite(target.height)),
                 verticalMarginsAreCollapsible: .false)
@@ -1208,6 +1248,8 @@ private func flexLayoutSingleChild(
     ctx: FlexContainerContext,
     item: FlexItem,
     finalParentSize: Size<Float?>,
+    contentMinX: inout Float,
+    contentMinY: inout Float,
     contentMaxX: inout Float,
     contentMaxY: inout Float,
     selectsBaseline: Bool, firstBaselineY: inout Float?
@@ -1227,6 +1269,17 @@ private func flexLayoutSingleChild(
         y += offset.y
     }
 
+    contentMinX = Swift.min(contentMinX, x)
+    contentMinY = Swift.min(contentMinY, y)
+    if childOut.scrollOverflowOrigin != .zero {
+        let childOverflow = tree.style(item.node).overflow
+        if childOverflow.x == .visible {
+            contentMinX = Swift.min(contentMinX, x + childOut.scrollOverflowOrigin.x)
+        }
+        if childOverflow.y == .visible {
+            contentMinY = Swift.min(contentMinY, y + childOut.scrollOverflowOrigin.y)
+        }
+    }
     contentMaxX = Swift.max(contentMaxX, x + targetW)
     contentMaxY = Swift.max(contentMaxY, y + targetH)
     if selectsBaseline {
