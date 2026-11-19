@@ -18,6 +18,7 @@ public final class RuneMacView<State>: NSView {
     private let hostView: RuneMetalHostView<State>
     private let preferredSize: Vec2
     private var keyObservers: [NSObjectProtocol] = []
+    private var systemObserver: MacOSSystemObserver?
 
     /// Creates an embeddable AppKit view from an `AppSpec`.
     public convenience init(
@@ -142,10 +143,18 @@ public final class RuneMacView<State>: NSView {
         super.init(frame: initialFrame)
 
         addSubview(host)
+        appBuilder.sharedHandle.shared.setWaker(waker)
         waker.setCallback { [weak host] in
             DispatchQueue.main.async {
                 host?.requestRender()
             }
+        }
+        let forcedReducedMotion = parsed.reducedMotion
+        self.systemObserver = MacOSSystemObserver { [weak rt, weak host] in
+            guard let rt else { return }
+            rt.readSystemAccessibilitySettings(forceReducedMotion: forcedReducedMotion)
+            rt.markNeedsCommit()
+            host?.requestRender()
         }
         appBuilder.setupHook?(waker)
     }
@@ -208,6 +217,10 @@ public final class RuneMacView<State>: NSView {
             }
         }
         keyObservers = [becomeKey, resignKey]
+        let winScale = Float(max(0.5, window.backingScaleFactor))
+        if abs(runtime.windowScale() - winScale) > 1e-4 {
+            runtime.setWindowViewport(runtime.windowViewport(), pixelScale: winScale)
+        }
         runtime.dispatchFocus(window.isKeyWindow, at: hostView.currentElapsedTime())
         hostView.requestRender()
     }
