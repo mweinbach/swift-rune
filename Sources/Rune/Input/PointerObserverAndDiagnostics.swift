@@ -236,9 +236,15 @@ public enum KeyDiagnostics {
     }
 
     /// Returns `true` when no parent in `root` has two sibling children sharing a key (`key_diagnostics::clean`).
-    public static func clean<State>(_ root: El<State>) -> Bool {
-        var node = root
+    public static func clean<State>(_ root: borrowing El<State>) -> Bool {
+        if let owner = root.memoLayoutChildren, owner.matches(root.children) {
+            return !owner.traits.contains(.duplicateKeys) && !(checksSiblings(root) && owner.duplicateSiblings)
+        }
+        if checksSiblings(root) && !uniqueSiblings(root.children) { return false }
+        guard let first = root.children.first else { return true }
+        var node = first
         var siblings: [ArraySlice<El<State>>] = []
+        if root.children.count > 1 { siblings.append(root.children.dropFirst()) }
         while true {
             if let owner = node.memoLayoutChildren, owner.matches(node.children) {
                 if owner.traits.contains(.duplicateKeys) || (checksSiblings(node) && owner.duplicateSiblings) {

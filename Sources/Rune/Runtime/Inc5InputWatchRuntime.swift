@@ -863,13 +863,15 @@ extension Runtime {
         if pointerPosition.x > -9000 && pointerPosition.y > -9000 {
             // Hover-change observers follow their own drawn bounds, including overlapping siblings.
             var hits: [(index: Int, order: Int)] = []
+            let paintedSlots = hitGeometryByPath.indexedValues(at: layoutCommitGen)
+            let emptyPaintOrder = !hasPaintOrder
             flatNodes.withUnsafeBufferPointer { nodes in
                 for index in layoutObservers.hoverChanges where hoverAllowed(nodes[index]) {
-                    if let geometry = hitGeometryByPath[nodes[index].path] {
+                    if let geometry = paintedSlots?[index] ?? hitGeometryByPath[nodes[index].path] {
                         if !geometry.isExiting, geometry.opacity > 0.001, geometry.contains(pointerPosition) {
                             hits.append((index, geometry.paintOrder))
                         }
-                    } else if paintOrderPaths.isEmpty, nodes[index].el.opacity > 0.001, !hoverIsExiting(index),
+                    } else if emptyPaintOrder, nodes[index].el.opacity > 0.001, !hoverIsExiting(index),
                               hoverNodeContains(nodes[index]) {
                         hits.append((index, index))
                     }

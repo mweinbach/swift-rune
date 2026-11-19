@@ -100,11 +100,12 @@ internal struct KitUnseenPresenceState {
         private var cursor = 0
 
         mutating func begin() {
-            // Limit retained slots as a virtual list visits new rows. Stale entries expose
-            // no samples in the current frame, including between two successive commits.
+            // Limit retained slots as a virtual list visits new rows. Keep capacity for
+            // ordinary window sizes so steady scrolling does not repeatedly reallocate.
             if seen < entries.count / 2 || frame == .max {
-                entries.removeAll(keepingCapacity: false)
-                indices.removeAll(keepingCapacity: false)
+                let keep = entries.count <= 4096
+                entries.removeAll(keepingCapacity: keep)
+                indices.removeAll(keepingCapacity: keep)
             }
             frame &+= 1
             cursor = 0
@@ -545,43 +546,44 @@ extension Runtime {
         })
         let hasSticky = !cut && (!heldIndices.isEmpty || flatNodes.contains { $0.isSticky })
         var cumSticky = hasSticky ? [Vec2](repeating: .zero, count: flatNodes.count) : []
-
+        // `scene.commit` already wrote every resting property and frame directly when
+        // no animation tracks or screen-travel paths exist in the scene.
+        let mayNeedLandUnseen = scene.hasTrackOrTravel
         for i in flatNodes.indices {
-            let node = flatNodes[i]
-            let spec = specs[i]
-            let id = spec.id
+            let id = specs[i].id
             let scrollIndex: Int?
             let traits = layoutObservers.authored[i]
             if !traits.contains(.scrollViewport) {
-                scrollIndex = node.enclosingVScrollIndex ?? node.enclosingHScrollIndex
+                scrollIndex = flatNodes[i].enclosingVScrollIndex ?? flatNodes[i].enclosingHScrollIndex
             } else {
                 scrollIndex = i
-                next.scrolls[i] = .init(path: node.path, origin: spec.rect.origin,
-                                       offset: scrollOffsets[node.path] ?? .zero)
+                let path = flatNodes[i].path
+                next.scrolls[i] = .init(path: path, origin: specs[i].rect.origin,
+                                        offset: scrollOffsets[path] ?? .zero)
             }
-            let snapshot = UnseenPresenceState.Node(origin: spec.rect.origin, scrollIndex: scrollIndex, parent: spec.parent)
+            let snapshot = UnseenPresenceState.Node(origin: specs[i].rect.origin, scrollIndex: scrollIndex, parent: specs[i].parent)
             next.nodes.append(snapshot)
 
             guard !cut else { continue }
 
             var mySticky = Vec2.zero
             if hasSticky {
-                let sticky = node.isSticky
-                let parentShift = !sticky && node.paintTraits.contains(.anchoredOrModal) && node.el.anchor != nil
-                    ? .zero : (node.parentIndex.map { cumSticky[$0] } ?? .zero)
+                let sticky = flatNodes[i].isSticky
+                let parentShift = !sticky && flatNodes[i].paintTraits.contains(.anchoredOrModal) && flatNodes[i].el.anchor != nil
+                    ? .zero : (flatNodes[i].parentIndex.map { cumSticky[$0] } ?? .zero)
                 mySticky = sticky || heldIndices.contains(i)
                     ? computeStickyShift(nodeIndex: i, parentStickyShift: parentShift,
                                          nodes: flatNodes, rectOf: { $0.targetRect }).shift
                     : parentShift
                 cumSticky[i] = mySticky
             }
-            let clip = intersectRects(node.clipRect, spec.rect.offsetBy(mySticky))
+            let clip = intersectRects(flatNodes[i].clipRect, specs[i].rect.offsetBy(mySticky))
             let winClip = intersectRects(clip, winRect)
-            let inViewNow = (winClip.width > 0.001 && winClip.height > 0.001) || (traits.contains(.isolatedOrTransition) && node.el.isolatedLayer)
+            let inViewNow = (winClip.width > 0.001 && winClip.height > 0.001) || (traits.contains(.isolatedOrTransition) && flatNodes[i].el.isolatedLayer)
 
             if !inViewNow {
                 // 2. `enters_unseen`: newly mounted nodes clipped out of view land immediately at rest.
-                if traits.contains(.isolatedOrTransition), let trans = node.el.transition,
+                if traits.contains(.isolatedOrTransition), let trans = flatNodes[i].el.transition,
                    unseenPresence.indexById[id] == nil,
                    scene.phase(id) == .entering,
                    trans.insertion.pointOffset == .zero,
@@ -591,25 +593,26 @@ extension Runtime {
 
                 // 3. `unseen_before_and_after`: rows staying unseen snap their layout frame and visuals
                 // so offscreen reflow/colour changes do not animate invisibly (`unseen_presence.rs`).
-                if kitHooks.unseenPresence.frameById[id]?.inView == false {
+                if mayNeedLandUnseen, scene.mayNeedLandUnseen(id), kitHooks.unseenPresence.frameById[id]?.inView == false {
                     let parentOrigin: Vec2
-                    if let parent = node.parentIndex, specs[parent].id == spec.parent {
+                    if let parent = flatNodes[i].parentIndex, specs[parent].id == specs[i].parent {
                         parentOrigin = specs[parent].rect.origin
                     } else {
-                        parentOrigin = spec.parent.flatMap { nodeIndexById[$0] }.map { specs[$0].rect.origin } ?? .zero
+                        parentOrigin = specs[i].parent.flatMap { nodeIndexById[$0] }.map { specs[$0].rect.origin } ?? .zero
                     }
+                    let rect = specs[i].rect
                     let localFrame = MotionRect(
-                        left: spec.rect.left - parentOrigin.x,
-                        top: spec.rect.top - parentOrigin.y,
-                        right: spec.rect.right - parentOrigin.x,
-                        bottom: spec.rect.bottom - parentOrigin.y
+                        left: rect.left - parentOrigin.x,
+                        top: rect.top - parentOrigin.y,
+                        right: rect.right - parentOrigin.x,
+                        bottom: rect.bottom - parentOrigin.y
                     )
-                    scene.landUnseen(spec, localFrame: localFrame)
+                    scene.landUnseen(specs[i], localFrame: localFrame)
                 }
             } else if !reducedMotion,
-                      spec.transition != nil,
+                      specs[i].transition != nil,
                       kitHooks.unseenPresence.frameById[id]?.inView == false,
-                      let parent = spec.parent,
+                      let parent = specs[i].parent,
                       let previous = unseenPresence.node(id),
                       !unseenPresence.stayedInScrollSpace(previous, new: snapshot, in: next) {
                 // Only a previously unseen transition moving into view can need the set of

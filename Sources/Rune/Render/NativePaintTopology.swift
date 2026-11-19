@@ -93,9 +93,19 @@ extension Runtime {
         var childSlots: [Int] = []
         var exitingSlot: [NodeId: Int] = [:]
 
-        func children(of node: FlatNode) -> ArraySlice<Int> {
+        func children(of node: borrowing FlatNode) -> ArraySlice<Int> {
             let slot = exitingSlot.isEmpty ? node.index : (exitingSlot[node.nodeId] ?? node.index)
             return childSlots[childOffsets[slot]..<childOffsets[slot + 1]]
+        }
+
+        @inline(__always)
+        func children(at slot: Int) -> ArraySlice<Int> {
+            if slot >= 0 {
+                return childSlots[childOffsets[slot]..<childOffsets[slot + 1]]
+            }
+            let exitNode = exits[~slot]
+            let idx = exitingSlot[exitNode.nodeId] ?? exitNode.index
+            return childSlots[childOffsets[idx]..<childOffsets[idx + 1]]
         }
         var exits: [FlatNode] = []
         var dissolveIndices: [Int] = []

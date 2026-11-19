@@ -244,29 +244,45 @@ internal extension Runtime {
     /// Clears `focusable`/`focused`/`focusVisible` on link-bearing text nodes and emits
     /// individual `<parentPath>#link-<k>` `ElementInfo` entries (`links.rs:313-362`).
     func appendLinkElements(to infos: inout [ElementInfo]) {
-        appendLinkElements(to: &infos, path: { $0.path }, report: { $0 }, record: { $0 })
-    }
-
-    func appendLinkElements(to infos: inout [NativeElementReport<State>], poses: [String: RawPoseNodeData]) {
-        appendLinkElements(to: &infos, path: { $0.path }, report: { $0.report(poses: poses) },
-                           record: { .captured(CapturedElementReport($0)) })
-    }
-
-    private func appendLinkElements<Record>(
-        to infos: inout [Record], path: (Record) -> String,
-        report: (Record) -> ElementInfo, record: (ElementInfo) -> Record
-    ) {
         guard !linkBoxesByPath.isEmpty else { return }
         let baseCount = infos.count
+        appendLinkElements(
+            baseCount: baseCount,
+            path: { infos[$0].path },
+            report: { infos[$0] },
+            replaceParent: { infos[$0] = $1 },
+            appendChild: { infos.append($0) }
+        )
+    }
+
+    func appendLinkElements(to reports: inout NativeFrameReports<State>, poses: [String: RawPoseNodeData]) {
+        guard !linkBoxesByPath.isEmpty else { return }
+        let baseCount = reports.painted.count
+        appendLinkElements(
+            baseCount: baseCount,
+            path: { reports.path(at: $0) },
+            report: { reports.report(at: $0, poses: poses) },
+            replaceParent: { reports.captured[$0] = CapturedElementReport($1) },
+            appendChild: { reports.trailing.append(CapturedElementReport($0)) }
+        )
+    }
+
+    private func appendLinkElements(
+        baseCount: Int,
+        path: (Int) -> String,
+        report: (Int) -> ElementInfo,
+        replaceParent: (Int, ElementInfo) -> Void,
+        appendChild: (ElementInfo) -> Void
+    ) {
         for parentIdx in 0..<baseCount {
-            guard let boxes = linkBoxesByPath[path(infos[parentIdx])], !boxes.isEmpty else { continue }
-            var parent = report(infos[parentIdx])
+            guard let boxes = linkBoxesByPath[path(parentIdx)], !boxes.isEmpty else { continue }
+            var parent = report(parentIdx)
             let parentFocused = (focusedPath == parent.path) && !parent.exiting
             let parentFocusable = parent.focusable
             parent.focusable = false
             parent.focused = false
             parent.focusVisible = false
-            infos[parentIdx] = record(parent)
+            replaceParent(parentIdx, parent)
 
             let activeIdx = focusedLinkIndex ?? 0
             for box in boxes {
@@ -283,7 +299,7 @@ internal extension Runtime {
                     && linkIndex(atPath: parent.path, at: pointerPosition) == box.linkIndex
                 let words = parent.secure ? nil : box.sliceText
 
-                infos.append(record(ElementInfo(
+                appendChild(ElementInfo(
                     path: "\(parent.path)#link-\(box.linkIndex)",
                     key: box.link.id,
                     parentIndex: parentIdx,
@@ -324,7 +340,7 @@ internal extension Runtime {
                     a11yValue: nil,
                     a11yDescription: nil,
                     a11yHidden: parent.a11yHidden
-                )))
+                ))
             }
         }
     }

@@ -17,17 +17,46 @@ private struct AccessibilityTreeEdges {
     }
 
     var roots: [Int] = []
-    var children: [[Int]]
+    private var childOffsets: [Int] = []
+    private var childSlots: [Int] = []
 
     init(count: Int, parent: (Int) -> Int?) {
-        children = Array(repeating: [], count: count)
+        rebuild(count: count, parent: parent)
+    }
+
+    mutating func rebuild(count: Int, parent: (Int) -> Int?) {
+        roots.removeAll(keepingCapacity: true)
+        childOffsets.removeAll(keepingCapacity: true)
+        childOffsets.append(contentsOf: repeatElement(0, count: count + 1))
+        var totalChildren = 0
         for index in 0..<count {
-            if let p = parent(index), p != index, (0..<count).contains(p) {
-                children[p].append(index)
+            if let p = parent(index), p != index, p >= 0, p < count {
+                childOffsets[p + 1] += 1
+                totalChildren += 1
             } else {
                 roots.append(index)
             }
         }
+        for i in 0..<count {
+            childOffsets[i + 1] += childOffsets[i]
+        }
+        childSlots.removeAll(keepingCapacity: true)
+        childSlots.append(contentsOf: repeatElement(0, count: totalChildren))
+        if totalChildren > 0 {
+            var cursor = childOffsets
+            for index in 0..<count {
+                if let p = parent(index), p != index, p >= 0, p < count {
+                    let pos = cursor[p]
+                    childSlots[pos] = index
+                    cursor[p] = pos + 1
+                }
+            }
+        }
+    }
+
+    @inline(__always)
+    func children(of index: Int) -> ArraySlice<Int> {
+        childSlots[childOffsets[index]..<childOffsets[index + 1]]
     }
 
     static func hasAncestorOrSelf(_ index: Int, count: Int, parent: (Int) -> Int?, matching: (Int) -> Bool) -> Bool {
@@ -40,20 +69,26 @@ private struct AccessibilityTreeEdges {
         return false
     }
 
-    func project(_ indices: [Int], insideScroll: Bool, projection: (Int) -> Projection,
-                 build: (Int, Bool, ElementRole) -> AccessibilityNode) -> [AccessibilityNode] {
+    func project<Indices: Collection>(_ indices: Indices, insideScroll: Bool, projection: (Int) -> Projection,
+                 build: (Int, Bool, ElementRole) -> AccessibilityNode) -> [AccessibilityNode] where Indices.Element == Int {
         var nodes: [AccessibilityNode] = []
         nodes.reserveCapacity(indices.count)
-        func append(_ indices: [Int], insideScroll: Bool) {
-            for i in indices {
+        func append(_ range: ArraySlice<Int>, insideScroll: Bool) {
+            for i in range {
                 switch projection(i) {
                 case let .node(role): nodes.append(build(i, insideScroll, role))
-                case let .descendants(scrolls): append(children[i], insideScroll: insideScroll || scrolls)
+                case let .descendants(scrolls): append(children(of: i), insideScroll: insideScroll || scrolls)
                 case .hidden: continue
                 }
             }
         }
-        append(indices, insideScroll: insideScroll)
+        for i in indices {
+            switch projection(i) {
+            case let .node(role): nodes.append(build(i, insideScroll, role))
+            case let .descendants(scrolls): append(children(of: i), insideScroll: insideScroll || scrolls)
+            case .hidden: continue
+            }
+        }
         return nodes
     }
 }
@@ -164,7 +199,8 @@ private final class AccessibilityProjectionRead {
     fileprivate var slots: [Slot] = []
     fileprivate var retainedRanges: [(current: Range<Int>, previous: Range<Int>)] = []
     fileprivate var snapshot: UInt64 = 0
-    private var edges: AccessibilityTreeEdges?
+    private var edgesValid = false
+    private var edges = AccessibilityTreeEdges(count: 0) { _ in nil }
     private var previousWebFocus: Bool?
     private var pending: [(current: Range<Int>, previous: Range<Int>)]?
 
@@ -172,7 +208,7 @@ private final class AccessibilityProjectionRead {
         // Multiple commits may occur between accessibility reads, including memo settles.
         if pending != nil || ranges.isEmpty { slots = [] }
         pending = ranges
-        edges = nil
+        edgesValid = false
     }
 
     fileprivate func prepare(count: Int, webFocus: Bool, mount: (Int) -> Mount) -> AccessibilityTreeEdges {
@@ -189,11 +225,13 @@ private final class AccessibilityProjectionRead {
             pending = nil
             previousWebFocus = webFocus
         }
-        if let edges { return edges }
-        mounts = (0..<count).map(mount)
-        let built = AccessibilityTreeEdges(count: count) { mounts[$0].parent }
-        edges = built
-        return built
+        if edgesValid { return edges }
+        mounts.removeAll(keepingCapacity: true)
+        mounts.reserveCapacity(count)
+        for i in 0..<count { mounts.append(mount(i)) }
+        edges.rebuild(count: count) { mounts[$0].parent }
+        edgesValid = true
+        return edges
     }
 }
 
@@ -227,7 +265,7 @@ public extension AccessibilityTreeBuilder {
 
         func words(_ index: Int) -> String? {
             AccessibilityNameSource.words(of: index, source: { AccessibilityNameSource(elements[$0], securePaths: securePaths) },
-                                           children: { edges.children[$0] })
+                                           children: { edges.children(of: $0) })
         }
 
         func build(_ idx: Int, insideScroll: Bool, semanticRole: ElementRole) -> AccessibilityNode {
@@ -273,7 +311,7 @@ public extension AccessibilityTreeBuilder {
             func relatedWords(_ key: String?) -> String? {
                 guard let key else { return nil }
                 return AccessibilityNameSource.relatedIndex(key, from: idx, parent: { elements[$0].parentIndex },
-                    children: { edges.children[$0] }, keyAt: { elements[$0].key }).flatMap(words)
+                    children: { edges.children(of: $0) }, keyAt: { elements[$0].key }).flatMap(words)
             }
             let givenName = AccessibilityNameSource.nonblank(info.label) ?? relatedWords(input?.labelledBy)
             let role = semanticRole
@@ -307,7 +345,7 @@ public extension AccessibilityTreeBuilder {
                 isModal: input?.isModal == true,
                 isSecure: isSecure,
                 actions: actions,
-                children: controlChildren(edges.project(edges.children[idx], insideScroll: insideScroll || input?.scrolls == true, projection: projection, build: build),
+                children: controlChildren(edges.project(edges.children(of: idx), insideScroll: insideScroll || input?.scrolls == true, projection: projection, build: build),
                                           role: role, name: isSecure ? nil : controlName)
             )
             projected.runtimePath = info.path
@@ -458,31 +496,29 @@ public extension Runtime {
             return authoredProjection(i)
         }
         @inline(never) func authoredProjection(_ i: Int) -> AccessibilityTreeEdges.Projection {
-            let node = flatNodes[i]
-            let el = node.el
             let result: AccessibilityTreeEdges.Projection
-            if el.isA11yHidden || el.opacity <= 0.01 || node.key == "__v_top_spacer" || node.key == "__v_bot_spacer" {
+            if flatNodes[i].el.isA11yHidden || flatNodes[i].el.opacity <= 0.01 || flatNodes[i].key == "__v_top_spacer" || flatNodes[i].key == "__v_bot_spacer" {
                 result = .hidden
             } else {
-                let takesFocus = nodeTakesFocus(el, webFocus: webFocus)
-                let keyboardTarget = takesFocus && !node.effectiveInert && (el.role != .presentation || el.explicitlyFocusable)
-                if let role = AccessibilityRoleRules.projectedRole(for: el, takesFocus: takesFocus, keyboardTarget: keyboardTarget) {
+                let takesFocus = nodeTakesFocus(flatNodes[i].el, webFocus: webFocus)
+                let keyboardTarget = takesFocus && !flatNodes[i].effectiveInert && (flatNodes[i].el.role != .presentation || flatNodes[i].el.explicitlyFocusable)
+                if let role = AccessibilityRoleRules.projectedRole(for: flatNodes[i].el, takesFocus: takesFocus, keyboardTarget: keyboardTarget) {
                     result = .node(role)
                 } else {
-                    result = .descendants(scrolls: !el.layout.scrollAxes.isEmpty)
+                    result = .descendants(scrolls: !flatNodes[i].el.layout.scrollAxes.isEmpty)
                 }
             }
             changes += 1
             // LiveText updates the flat element in place and can add or remove an implicit text role.
-            if reuseSemantic, el.liveText == nil {
-                storage.slots[i] = .init(projection: result, inert: node.effectiveInert)
+            if reuseSemantic, flatNodes[i].el.liveText == nil {
+                storage.slots[i] = .init(projection: result, inert: flatNodes[i].effectiveInert)
             }
             return result
         }
 
         func a11yKeyed(from idx: Int, key: String) -> Int? {
             let match = AccessibilityNameSource.relatedIndex(key, from: idx, parent: { flatNodes[$0].parentIndex },
-                                                             children: { edges.children[$0] }, keyAt: { flatNodes[$0].key })
+                                                             children: { edges.children(of: $0) }, keyAt: { flatNodes[$0].key })
             guard let match, !AccessibilityTreeEdges.hasAncestorOrSelf(match, count: flatNodes.count,
                 parent: { flatNodes[$0].parentIndex }, matching: { isExiting(flatNodes[$0].nodeId) }) else { return nil }
             return match
@@ -491,7 +527,7 @@ public extension Runtime {
         func a11yWords(_ idx: Int) -> String? {
             AccessibilityNameSource.words(of: idx, source: { index in
                 AccessibilityNameSource(flatNodes[index].el, securePath: securePaths.contains(flatNodes[index].path))
-            }, children: { edges.children[$0] })
+            }, children: { edges.children(of: $0) })
         }
 
         let selectableRoles: Set<ElementRole> = [.listItem, .option, .tab, .treeItem, .gridCell, .row]
@@ -519,7 +555,7 @@ public extension Runtime {
                         guard let view = slot.template, view.snapshot == previousSnapshot else { return false }
                     }
                 }
-                for child in edges.children[i] {
+                for child in edges.children(of: i) {
                     if !validate(child, hidden: hiddenChildren) { return false }
                 }
                 return true
@@ -595,8 +631,8 @@ public extension Runtime {
                 cached.branch = nil
                 let wasPublished = cached.snapshot == previousSnapshot
                 let childRevision = changes
-                if !edges.children[idx].isEmpty {
-                    let children = edges.project(edges.children[idx], insideScroll: insideScroll, projection: projection, build: build)
+                if !edges.children(of: idx).isEmpty {
+                    let children = edges.project(edges.children(of: idx), insideScroll: insideScroll, projection: projection, build: build)
                     if !wasPublished || changes != childRevision {
                         cached.node.children = AccessibilityTreeBuilder.controlChildren(children, role: cached.node.role, name: cached.controlName)
                     }
@@ -672,7 +708,7 @@ public extension Runtime {
             )
             let resolvedLabel = controlName ?? (isSecure ? "Password" : (el.role == .textInput ? nil : richPlain))
             let hasLinks = hasActiveTextLinks(el)
-            var builtChildren = edges.project(edges.children[idx], insideScroll: insideScroll || hasScroll, projection: projection, build: build)
+            var builtChildren = edges.project(edges.children(of: idx), insideScroll: insideScroll || hasScroll, projection: projection, build: build)
             if let grid = el.terminalGridPayload {
                 let projected = AccessibilityTreeBuilder.projectTerminalGrid(grid, nodeId: nodeId, bounds: rect)
                 builtChildren.append(contentsOf: projected.children)
@@ -773,7 +809,7 @@ public extension Runtime {
             changes += 1
             if reuseSemantic, el.liveText == nil, !hasScroll, !hasLinks, editLens == nil, el.terminalGridPayload == nil,
                el.a11yLabelledBy == nil, el.a11yDescribedBy == nil, virtualOwner == nil, parentList == nil,
-               edges.children[idx].isEmpty || resolvedRole == .group || givenName != nil {
+               edges.children(of: idx).isEmpty || resolvedRole == .group || givenName != nil {
                 storage.slots[idx].template = .init(node: projected,
                     controlName: isSecure ? nil : controlName, insideScroll: insideScroll, snapshot: currentSnapshot)
             }

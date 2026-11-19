@@ -43,7 +43,11 @@ extension Scene {
         }
         endPath(i)
         nodes[i].frame = frame
-        trackSet(i, Props.FRAME, frame)
+        // Only update an existing FRAME track; resting nodes read `nodes[i].frame` directly
+        // without allocating a settled track in `store`.
+        if nodes[i].tracks[Int(Props.FRAME.id.rawValue)] != nil || store.has(id, Props.FRAME) {
+            trackSet(i, Props.FRAME, frame)
+        }
         nodes[i].dirty = true
     }
 

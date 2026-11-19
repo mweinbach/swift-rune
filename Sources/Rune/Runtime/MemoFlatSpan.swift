@@ -109,6 +109,11 @@ final class MemoFlatSpan<State> {
     // Only the commit that swapped in these nodes may certify their previous indices.
     private var appliedGeneration: UInt64?
     private var appliedStart = 0
+    // A sibling variant of a memoized virtual row may share identical node identities,
+    // observer roles, authored text/border ink and accessibility projection (for example,
+    // toggling text selectability across diff copy sides). Certify that pair once.
+    private weak var certifiedProjectionSibling: MemoFlatSpan<State>?
+    private weak var rejectedProjectionSibling: MemoFlatSpan<State>?
 
     func markApplied(start: Int, generation: UInt64) {
         appliedStart = start
@@ -118,6 +123,46 @@ final class MemoFlatSpan<State> {
     func appliedRange(at generation: UInt64) -> Range<Int>? {
         guard appliedGeneration == generation else { return nil }
         return appliedStart..<(appliedStart + nodes.count)
+    }
+
+    func sharesProjection(with other: MemoFlatSpan<State>) -> Bool {
+        if certifiedProjectionSibling === other { return true }
+        if rejectedProjectionSibling === other { return false }
+        guard nodes.count == other.nodes.count else {
+            rejectedProjectionSibling = other
+            return false
+        }
+        let compatible = nodes.indices.allSatisfy { i in
+            let a = nodes[i], b = other.nodes[i]
+            guard a.nodeId == b.nodeId, a.path == b.path, a.key == b.key,
+                  a.parentIndex.map({ $0 - rootIndex }) == b.parentIndex.map({ $0 - other.rootIndex }),
+                  a.effectiveInert == b.effectiveInert else { return false }
+            let ea = a.el, eb = b.el
+            guard LayoutObserverTraits(ea).bits == LayoutObserverTraits(eb).bits,
+                  ea.textColor == eb.textColor, ea.borderColor == eb.borderColor,
+                  ea.borderWidth == eb.borderWidth, ea.borderSides == eb.borderSides,
+                  ea.role == eb.role, ea.isA11yHidden == eb.isA11yHidden,
+                  ea.a11yDisabled == eb.a11yDisabled, ea.focusable == eb.focusable,
+                  ea.explicitlyFocusable == eb.explicitlyFocusable, ea.focusOptOut == eb.focusOptOut,
+                  ea.isModal == eb.isModal, ea.isSecure == eb.isSecure, ea.opacity == eb.opacity,
+                  ea.a11yLabel == eb.a11yLabel, ea.a11yHelp == eb.a11yHelp,
+                  ea.a11yDescription == eb.a11yDescription, ea.a11yValue == eb.a11yValue,
+                  ea.a11yChecked == eb.a11yChecked, ea.a11yExpanded == eb.a11yExpanded,
+                  ea.a11ySelected == eb.a11ySelected, ea.a11yLevel == eb.a11yLevel,
+                  ea.a11yPressable == eb.a11yPressable, ea.plainText == eb.plainText,
+                  ea.richSpans == eb.richSpans,
+                  ea.a11yPosInSet?.position == eb.a11yPosInSet?.position,
+                  ea.a11yPosInSet?.size == eb.a11yPosInSet?.size else { return false }
+            return true
+        }
+        if compatible {
+            certifiedProjectionSibling = other
+            other.certifiedProjectionSibling = self
+        } else {
+            rejectedProjectionSibling = other
+            other.rejectedProjectionSibling = self
+        }
+        return compatible
     }
 
     init?(_ capture: FlatMemoCapture<State>, flat: [Node], specs: [NodeSpec], instants: [Bool],

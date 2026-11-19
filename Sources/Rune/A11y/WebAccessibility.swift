@@ -1,60 +1,312 @@
 import Foundation
 import RuneMotion
 
-// Objective-C Foundation widens NSNumber(Float) before serializing as JSON. Swift
-// Foundation emits the shortest Float representation. Preserve both host contracts.
-#if canImport(ObjectiveC)
-private typealias WebAccessibilityNumber = Double
-#else
-private typealias WebAccessibilityNumber = Float
-#endif
-
-private func webAccessibilityBounds(_ bounds: SIMD4<Float>) -> [WebAccessibilityNumber] {
-    [WebAccessibilityNumber(bounds.x), WebAccessibilityNumber(bounds.y),
-     WebAccessibilityNumber(bounds.z), WebAccessibilityNumber(bounds.w)]
+private enum WebAccessibilityJSONError: Error {
+    case nonFiniteNumber
 }
 
-private struct WebAccessibilityEncodingFields: AccessibilityDumpFields {
-    var fields: KeyedEncodingContainer<AccessibilityDumpField>
+/// Direct UTF-8 JSON serializer for `WebAccessibilityPatch`. Matches Foundation's JSON
+/// representation (`withoutEscapingSlashes`, shortest finite decimal / integer output,
+/// strict non-finite rejection) without `JSONEncoder`'s per-field Codable overhead.
+private struct WebAccessibilityJSONWriter: AccessibilityDumpFields {
+    var bytes: [UInt8] = []
+    private var needsComma = false
 
-    mutating func set<Value: Encodable>(_ field: AccessibilityDumpField, _ value: Value) throws {
-        try fields.encode(value, forKey: field)
+    init(capacity: Int = 0) {
+        if capacity > 0 { bytes.reserveCapacity(capacity) }
     }
 
-    mutating func set(_ field: AccessibilityDumpField, _ value: Float) throws {
-        try fields.encode(WebAccessibilityNumber(value), forKey: field)
+    mutating func beginObject() {
+        bytes.append(0x7B) // {
+        needsComma = false
     }
 
-    mutating func setRange(_ range: A11yRange) throws {
-        try fields.encode([range.value, range.min, range.max, range.step], forKey: .range)
+    mutating func endObject() {
+        bytes.append(0x7D) // }
     }
 
-    mutating func setFont(_ font: WebDocumentAccessibilityNode.Font) throws {
-        var nested = Self(fields: fields.nestedContainer(keyedBy: AccessibilityDumpField.self, forKey: .font))
-        try font.write(to: &nested)
+    mutating func beginArray() {
+        bytes.append(0x5B) // [
+        needsComma = false
+    }
+
+    mutating func endArray() {
+        bytes.append(0x5D) // ]
+    }
+
+    @inline(__always)
+    mutating func writeCommaIfNeeded() {
+        if needsComma { bytes.append(0x2C) } // ,
+        needsComma = true
+    }
+
+    mutating func writeKey(_ key: String) {
+        writeCommaIfNeeded()
+        writeString(key)
+        bytes.append(0x3A) // :
+    }
+
+    mutating func writeASCIIKey(_ key: StaticString) {
+        writeCommaIfNeeded()
+        bytes.append(0x22)
+        key.withUTF8Buffer { bytes.append(contentsOf: $0) }
+        bytes.append(0x22)
+        bytes.append(0x3A)
+    }
+
+    mutating func writeFieldKey(_ field: AccessibilityDumpField) {
+        writeCommaIfNeeded()
+        bytes.append(0x22)
+        bytes.append(contentsOf: field.rawValue.utf8)
+        bytes.append(0x22)
+        bytes.append(0x3A)
+    }
+
+    mutating func writeString(_ value: String) {
+        bytes.append(0x22) // "
+        var s = value
+        s.withUTF8 { utf8 in
+            var start = 0
+            let count = utf8.count
+            for i in 0..<count {
+                let b = utf8[i]
+                if b < 0x20 || b == 0x22 || b == 0x5C {
+                    if i > start {
+                        bytes.append(contentsOf: utf8[start..<i])
+                    }
+                    switch b {
+                    case 0x22: bytes.append(0x5C); bytes.append(0x22) // \"
+                    case 0x5C: bytes.append(0x5C); bytes.append(0x5C) // \\
+                    case 0x08: bytes.append(0x5C); bytes.append(0x62) // \b
+                    case 0x0C: bytes.append(0x5C); bytes.append(0x66) // \f
+                    case 0x0A: bytes.append(0x5C); bytes.append(0x6E) // \n
+                    case 0x0D: bytes.append(0x5C); bytes.append(0x72) // \r
+                    case 0x09: bytes.append(0x5C); bytes.append(0x74) // \t
+                    default:
+                        let hex: (UInt8) -> UInt8 = { $0 < 10 ? 0x30 &+ $0 : 0x61 &+ ($0 &- 10) }
+                        bytes.append(0x5C); bytes.append(0x75) // \u
+                        bytes.append(0x30); bytes.append(0x30) // 00
+                        bytes.append(hex(b >> 4)); bytes.append(hex(b & 0x0F))
+                    }
+                    start = i + 1
+                }
+            }
+            if start < count {
+                bytes.append(contentsOf: utf8[start..<count])
+            }
+        }
+        bytes.append(0x22) // "
+    }
+
+    mutating func writeBool(_ value: Bool) {
+        if value {
+            bytes.append(contentsOf: [0x74, 0x72, 0x75, 0x65]) // true
+        } else {
+            bytes.append(contentsOf: [0x66, 0x61, 0x6C, 0x73, 0x65]) // false
+        }
+    }
+
+    mutating func writeNull() {
+        bytes.append(contentsOf: [0x6E, 0x75, 0x6C, 0x6C]) // null
+    }
+
+    mutating func writeInt(_ value: Int) {
+        writeInt64(Int64(value))
+    }
+
+    mutating func writeInt64(_ value: Int64) {
+        if value == 0 {
+            bytes.append(0x30)
+            return
+        }
+        var magnitude: UInt64
+        if value < 0 {
+            bytes.append(0x2D) // -
+            magnitude = UInt64(bitPattern: 0 &- value)
+        } else {
+            magnitude = UInt64(value)
+        }
+        var digits = (UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+                      UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+                      UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0),
+                      UInt8(0), UInt8(0), UInt8(0), UInt8(0), UInt8(0))
+        withUnsafeMutableBytes(of: &digits) { raw in
+            var idx = 20
+            while magnitude > 0 {
+                idx -= 1
+                raw[idx] = 0x30 &+ UInt8(magnitude % 10)
+                magnitude /= 10
+            }
+            bytes.append(contentsOf: raw[idx..<20])
+        }
+    }
+
+    mutating func writeDouble(_ raw: Double) throws(WebAccessibilityJSONError) {
+        guard raw.isFinite else { throw .nonFiniteNumber }
+        let value = raw == 0 ? 0.0 : raw
+        if value >= -9_007_199_254_740_992.0 && value <= 9_007_199_254_740_992.0 && value.rounded(.towardZero) == value {
+            writeInt64(Int64(value))
+            return
+        }
+        // Fast path for exact tenths (rounded accessibility bounds and scroll coordinates).
+        let scaled = value * 10.0
+        if scaled >= -900_719_925_474_099.0 && scaled <= 900_719_925_474_099.0 {
+            let nearest = scaled.rounded()
+            if nearest / 10.0 == value {
+                let tenth = Int64(nearest)
+                if tenth < 0 { bytes.append(0x2D) }
+                let absTenth = tenth < 0 ? UInt64(bitPattern: 0 &- tenth) : UInt64(tenth)
+                writeInt64(Int64(absTenth / 10))
+                let frac = UInt8(absTenth % 10)
+                if frac != 0 {
+                    bytes.append(0x2E) // .
+                    bytes.append(0x30 &+ frac)
+                }
+                return
+            }
+        }
+        bytes.append(contentsOf: String(value).utf8)
+    }
+
+    mutating func writeFloat(_ raw: Float) throws(WebAccessibilityJSONError) {
+        guard raw.isFinite else { throw .nonFiniteNumber }
+        #if canImport(ObjectiveC)
+        try writeDouble(Double(raw))
+        #else
+        let value = raw == 0 ? Float(0) : raw
+        if value >= -16_777_216.0 && value <= 16_777_216.0 && value.rounded(.towardZero) == value {
+            writeInt64(Int64(value))
+            return
+        }
+        let scaled = value * 10.0
+        if scaled >= -1_677_721.0 && scaled <= 1_677_721.0 {
+            let nearest = scaled.rounded()
+            if nearest / 10.0 == value {
+                let tenth = Int64(nearest)
+                if tenth < 0 { bytes.append(0x2D) }
+                let absTenth = tenth < 0 ? UInt64(bitPattern: 0 &- tenth) : UInt64(tenth)
+                writeInt64(Int64(absTenth / 10))
+                let frac = UInt8(absTenth % 10)
+                if frac != 0 {
+                    bytes.append(0x2E)
+                    bytes.append(0x30 &+ frac)
+                }
+                return
+            }
+        }
+        bytes.append(contentsOf: String(value).utf8)
+        #endif
+    }
+
+    mutating func writeBounds(_ bounds: SIMD4<Float>) throws(WebAccessibilityJSONError) {
+        bytes.append(0x5B) // [
+        try writeFloat(bounds.x)
+        bytes.append(0x2C)
+        try writeFloat(bounds.y)
+        bytes.append(0x2C)
+        try writeFloat(bounds.z)
+        bytes.append(0x2C)
+        try writeFloat(bounds.w)
+        bytes.append(0x5D) // ]
+    }
+
+    // MARK: - AccessibilityDumpFields
+
+    mutating func set(_ field: AccessibilityDumpField, _ value: String) throws(WebAccessibilityJSONError) {
+        writeFieldKey(field)
+        writeString(value)
+    }
+
+    mutating func set(_ field: AccessibilityDumpField, _ value: Bool) throws(WebAccessibilityJSONError) {
+        writeFieldKey(field)
+        writeBool(value)
+    }
+
+    mutating func set(_ field: AccessibilityDumpField, _ value: Int) throws(WebAccessibilityJSONError) {
+        writeFieldKey(field)
+        writeInt(value)
+    }
+
+    mutating func set(_ field: AccessibilityDumpField, _ value: Float) throws(WebAccessibilityJSONError) {
+        writeFieldKey(field)
+        try writeFloat(value)
+    }
+
+    mutating func set(_ field: AccessibilityDumpField, _ value: [String]) throws(WebAccessibilityJSONError) {
+        writeFieldKey(field)
+        bytes.append(0x5B)
+        for i in value.indices {
+            if i > 0 { bytes.append(0x2C) }
+            writeString(value[i])
+        }
+        bytes.append(0x5D)
+    }
+
+    mutating func set(_ field: AccessibilityDumpField, _ value: [Double]) throws(WebAccessibilityJSONError) {
+        writeFieldKey(field)
+        bytes.append(0x5B)
+        for i in value.indices {
+            if i > 0 { bytes.append(0x2C) }
+            try writeDouble(value[i])
+        }
+        bytes.append(0x5D)
+    }
+
+    mutating func set(_ field: AccessibilityDumpField, _ value: [Int]) throws(WebAccessibilityJSONError) {
+        writeFieldKey(field)
+        bytes.append(0x5B)
+        for i in value.indices {
+            if i > 0 { bytes.append(0x2C) }
+            writeInt(value[i])
+        }
+        bytes.append(0x5D)
+    }
+
+    mutating func setRange(_ range: A11yRange) throws(WebAccessibilityJSONError) {
+        writeFieldKey(.range)
+        bytes.append(0x5B)
+        try writeDouble(range.value)
+        bytes.append(0x2C)
+        try writeDouble(range.min)
+        bytes.append(0x2C)
+        try writeDouble(range.max)
+        bytes.append(0x2C)
+        if let step = range.step { try writeDouble(step) } else { writeNull() }
+        bytes.append(0x5D)
+    }
+
+    mutating func setFont(_ font: WebDocumentAccessibilityNode.Font) throws(WebAccessibilityJSONError) {
+        writeFieldKey(.font)
+        let outerComma = needsComma
+        beginObject()
+        try font.write(to: &self)
+        endObject()
+        needsComma = outerComma
     }
 }
 
-private struct WebAccessibilityPatchNode: Encodable {
+private struct WebAccessibilityPatchNode {
     let semantic: AccessibilityNode
     let path: String
     let bounds: SIMD4<Float>
 
-    func encode(to encoder: Encoder) throws {
-        var fields = WebAccessibilityEncodingFields(fields: encoder.container(keyedBy: AccessibilityDumpField.self))
-        try fields.set(.bounds, webAccessibilityBounds(bounds))
-        try AccessibilityDump.writeShallow(semantic, isRoot: false, forBrowser: true, syntheticPath: path, to: &fields)
+    func write(to writer: inout WebAccessibilityJSONWriter) throws(WebAccessibilityJSONError) {
+        writer.beginObject()
+        writer.writeFieldKey(.bounds)
+        try writer.writeBounds(bounds)
+        try AccessibilityDump.writeShallow(semantic, isRoot: false, forBrowser: true, syntheticPath: path, to: &writer)
+        writer.endObject()
     }
 }
 
 /// Keep patch collections in their concrete types all the way to the encoder. The full
 /// browser snapshot and announcements still share the ordinary Foundation dump schema.
-struct WebAccessibilityPatch: Encodable {
+struct WebAccessibilityPatch {
     var removed: [String]?
     var children: [String: [String]]?
     fileprivate var local: Bool?
     fileprivate var nodes: [WebAccessibilityPatchNode]?
-    fileprivate var bounds: [String: [WebAccessibilityNumber]]?
+    fileprivate var bounds: [String: SIMD4<Float>]?
 
     init(removed: [String]? = nil, children: [String: [String]]? = nil) {
         self.removed = removed
@@ -69,9 +321,64 @@ struct WebAccessibilityPatch: Encodable {
         guard removed != nil || children != nil || nodes != nil || bounds != nil || local != nil else {
             return try JSONSerialization.data(withJSONObject: fields)
         }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .withoutEscapingSlashes
-        var result = try encoder.encode(self)
+        let estimated = (nodes?.count ?? 0) * 192 + (bounds?.count ?? 0) * 64 + (removed?.count ?? 0) * 40 + (children?.count ?? 0) * 64 + 64
+        var writer = WebAccessibilityJSONWriter(capacity: estimated)
+        writer.beginObject()
+        if let removed {
+            writer.writeASCIIKey("removed")
+            writer.bytes.append(0x5B)
+            for i in removed.indices {
+                if i > 0 { writer.bytes.append(0x2C) }
+                writer.writeString(removed[i])
+            }
+            writer.bytes.append(0x5D)
+        }
+        if let children {
+            writer.writeASCIIKey("children")
+            writer.bytes.append(0x7B)
+            var firstParent = true
+            for (parent, list) in children {
+                if !firstParent { writer.bytes.append(0x2C) }
+                firstParent = false
+                writer.writeString(parent)
+                writer.bytes.append(0x3A)
+                writer.bytes.append(0x5B)
+                for i in list.indices {
+                    if i > 0 { writer.bytes.append(0x2C) }
+                    writer.writeString(list[i])
+                }
+                writer.bytes.append(0x5D)
+            }
+            writer.bytes.append(0x7D)
+        }
+        if let local {
+            writer.writeASCIIKey("local")
+            writer.writeBool(local)
+        }
+        if let nodes {
+            writer.writeASCIIKey("nodes")
+            writer.bytes.append(0x5B)
+            for i in nodes.indices {
+                if i > 0 { writer.bytes.append(0x2C) }
+                try nodes[i].write(to: &writer)
+            }
+            writer.bytes.append(0x5D)
+        }
+        if let bounds {
+            writer.writeASCIIKey("bounds")
+            writer.bytes.append(0x7B)
+            var firstBound = true
+            for (path, rect) in bounds {
+                if !firstBound { writer.bytes.append(0x2C) }
+                firstBound = false
+                writer.writeString(path)
+                writer.bytes.append(0x3A)
+                try writer.writeBounds(rect)
+            }
+            writer.bytes.append(0x7D)
+        }
+        writer.endObject()
+        var result = Data(writer.bytes)
         guard !fields.isEmpty else { return result }
         let rest = try JSONSerialization.data(withJSONObject: fields, options: .withoutEscapingSlashes)
         result.removeLast() // Closing brace of the nonempty patch object.
@@ -272,7 +579,7 @@ final class WebAccessibilityProjection {
     private func geometryDelta<State>(_ runtime: Runtime<State>, patch: inout WebAccessibilityPatch) -> Bool {
         // A virtual refill can replace mounted nodes; reproject their semantics if that happens.
         for record in geometry where runtime.flatNodes[record.runtimeIndex].path != record.path { return false }
-        var bounds: [String: [WebAccessibilityNumber]] = [:]
+        var bounds: [String: SIMD4<Float>] = [:]
         var nodes: [WebAccessibilityPatchNode] = []
         let presented = runtime.presentedRectByPath
         let slots = presented.indexedValues(at: runtime.layoutCommitGen)
@@ -307,7 +614,7 @@ final class WebAccessibilityProjection {
                     continue
                 }
             }
-            if moved { bounds[path] = webAccessibilityBounds(local) }
+            if moved { bounds[path] = local }
         }
         if !bounds.isEmpty { patch.bounds = bounds }
         if !nodes.isEmpty { patch.nodes = nodes }
@@ -317,7 +624,7 @@ final class WebAccessibilityProjection {
 
     private func delta<State>(_ root: AccessibilityNode, runtime: Runtime<State>, replace: Bool, patch: inout WebAccessibilityPatch) {
         var nodes: [WebAccessibilityPatchNode] = []
-        var bounds: [String: [WebAccessibilityNumber]] = [:]
+        var bounds: [String: SIMD4<Float>] = [:]
         var children: [String: [String]] = [:]
         var visitedCount = 0
         generation &+= 1
@@ -351,7 +658,7 @@ final class WebAccessibilityProjection {
                 // Only complete real-node geometry is eligible for branch reuse.
                 let entry = record.entry!
                 entry.visited = generation
-                if entry.bounds != local { bounds[record.path] = webAccessibilityBounds(local) }
+                if entry.bounds != local { bounds[record.path] = local }
                 entry.bounds = local
                 entry.geometryRange = (entry.geometryRange.lowerBound + shift)..<(entry.geometryRange.upperBound + shift)
             }
@@ -415,7 +722,7 @@ final class WebAccessibilityProjection {
                     prior.semantic = shallow
                     if !replace { nodes.append(WebAccessibilityPatchNode(semantic: shallow, path: path, bounds: local)) }
                 } else if !replace && prior.bounds != local {
-                    bounds[path] = webAccessibilityBounds(local)
+                    bounds[path] = local
                 }
                 prior.bounds = local
                 if let changedChildren {

@@ -8,7 +8,7 @@ import { mountRunePopup } from './rune-web-popup.mjs';
 import { mountRuneCursor } from './rune-web-cursor.mjs';
 import { mountRuneClipboard } from './rune-clipboard.mjs';
 import { mountRuneAccessibility } from './rune-web-accessibility.mjs';
-import { mountRuneTextFonts, runeTextFontsReady } from './rune-web-text.mjs';
+import { mountRuneTextFonts, runeTextFontsReady, withRuneTextSceneBatch } from './rune-web-text.mjs';
 import { createRuneImageDecoder } from './rune-web-images.mjs';
 export { createRuneTextImports, instantiateRuneBrowser } from './rune-web-text.mjs';
 
@@ -289,7 +289,10 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
     }
 
     let measuredLimit;
+    let cachedCanvasRect = null;
+    function invalidateCanvasRect() { cachedCanvasRect = null; }
     function updateSize(measure = true) {
+        if (measure !== false) cachedCanvasRect = null;
         if (!page && !resizeTo) return;
         const dpr = Math.max(0.5, window.devicePixelRatio || 1);
         const limit = gpu?.maxSize ?? 8192;
@@ -383,6 +386,7 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
             observer.observe(canvas);
         }
         updateSize();
+        accessibility?.place();
     }
 
     function drawFrame() {
@@ -391,10 +395,17 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
             firstFit = false;
             applyWindowHeight();
         }
+        // Align the accessibility mirror and refresh the cached canvas rect before
+        // syncAccessibility() mutates the mirror DOM so subsequent wheel/pointer events
+        // do not force a synchronous layout pass of the mirror.
+        accessibility?.place();
+        if (!cachedCanvasRect) cachedCanvasRect = canvas.getBoundingClientRect();
         const full = force;
         // The explicit CPU backend also supports reference-only surfaces for capture tools.
-        const length = gpu ? wasm.rune_web_scene(now(), full ? 1 : 0) :
-            transferCPU ? wasm.rune_web_cpu_frame(now(), full ? 1 : 0) : wasm.rune_web_frame(now());
+        const length = withRuneTextSceneBatch(() =>
+            gpu ? wasm.rune_web_scene(now(), full ? 1 : 0) :
+            transferCPU ? wasm.rune_web_cpu_frame(now(), full ? 1 : 0) : wasm.rune_web_frame(now())
+        );
         force = false;
         if (length < 0) {
             let reason = 'Rune could not render the browser frame';
@@ -468,7 +479,6 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
         }
         syncWindowTitle();
         applyWindowHeight();
-        accessibility?.place();
         readField();
         clipboard?.drain();
         syncPopup();
@@ -580,9 +590,11 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
         focusWindow.addEventListener('focus', syncWindowFocus, options);
         focusWindow.addEventListener('blur', syncWindowFocus, options);
         queueMicrotask(() => { if (!disposed) syncWindowFocus(); });
+        focusWindow.addEventListener('resize', invalidateCanvasRect, options);
+        focusWindow.addEventListener('scroll', invalidateCanvasRect, { ...options, capture: true, passive: true });
         if (!popup) canvas.addEventListener('contextmenu', event => event.preventDefault(), options);
         function localPoint(event) {
-            const rect = canvas.getBoundingClientRect();
+            const rect = cachedCanvasRect ?? (cachedCanvasRect = canvas.getBoundingClientRect());
             if (!rect.width || !rect.height) return null;
             return { x: (event.clientX - rect.left) * canvas.width / (rect.width * scale),
                      y: (event.clientY - rect.top) * canvas.height / (rect.height * scale) };
@@ -596,6 +608,7 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
         const buttons = ['primary', 'middle', 'secondary', 'back', 'forward'];
         for (const kind of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
             canvas.addEventListener(kind, event => {
+                if (kind === 'pointerdown') cachedCanvasRect = null;
                 const point = localPoint(event);
                 if (!point) return;
                 const secondary = event.button === 2 && popup && event.pointerType === 'mouse';

@@ -20,7 +20,7 @@ extension Runtime {
         let hasText = el.plainText != nil || el.richSpans != nil
         guard hasText == (reference.plainText != nil || reference.richSpans != nil) else { return false }
         if hasText {
-            let resolved = ElDisplayResolver.resolveText(el: copy el, rawText: el.plainText, isSecure: false,
+            let resolved = ElDisplayResolver.resolveText(el: el, rawText: el.plainText, isSecure: false,
                                                         fallbackDirection: el.textDirByParagraph ? nil : textFlow)
             guard el.children.isEmpty, !resolved.displayedText.isEmpty, resolved.advanceRun == nil,
                   resolved.style.wrap == .noWrap, resolved.style.maxLines == 0, !resolved.truncateFade,

@@ -90,9 +90,22 @@ struct RepeatedPickCandidates {
     }
 
     mutating func inputPaths(at point: Vec2, order: [String], geometry: FrameGeometry<HitGeometry>) -> [String] {
-        guard publishedHitSlots else { return order }
+        inputPaths(at: point, geometry: geometry, pathAt: { order[$0] }, fallback: { order })
+    }
+
+    mutating func inputPaths(
+        at point: Vec2,
+        geometry: FrameGeometry<HitGeometry>,
+        pathAt: (Int) -> String,
+        fallback: () -> [String]
+    ) -> [String] {
+        guard publishedHitSlots else { return fallback() }
         if let lastInput, lastInput.point == point { return lastInput.paths }
-        let paths = geometry.intersectingPaths(at: point, order: order)
+        guard let paths = geometry.intersectingPaths(at: point, pathAt: pathAt) else {
+            let all = fallback()
+            lastInput = (point, all)
+            return all
+        }
         lastInput = (point, paths)
         return paths
     }
@@ -135,15 +148,15 @@ private extension FrameGeometry where Value == HitGeometry {
 
     /// Scan contiguous paint geometry before resolving the few intersected paths in
     /// the current mount. A commit may have moved a path to a different mount slot.
-    func intersectingPaths(at point: Vec2, order: [String]) -> [String] {
+    func intersectingPaths(at point: Vec2, pathAt: (Int) -> String) -> [String]? {
         var hits: [Int] = []
         for case let hit? in boxes where hit.contains(point) {
             // A dense stack of overlapping nodes is cheaper to query in its original order.
-            if hits.count == 32 { return order }
+            if hits.count == 32 { return nil }
             hits.append(hit.paintOrder)
         }
         hits.sort()
-        return hits.map { order[$0] }
+        return hits.map(pathAt)
     }
 }
 
@@ -229,7 +242,10 @@ private func intersectHitRects(_ a: MotionRect, _ b: MotionRect) -> MotionRect {
 @inline(__always)
 func matchesAuthoredKey(_ key: String?, _ requested: String?) -> Bool {
     guard let key, let requested else { return false }
-    return key.utf8.elementsEqual(requested.utf8)
+    let a = key.utf8, b = requested.utf8
+    guard a.count == b.count else { return false }
+    if let lastA = a.last, let lastB = b.last, lastA != lastB { return false }
+    return a.elementsEqual(b)
 }
 
 /// Matches an element selector (`"knob"` or slash-path `"slider/knob"`) against a node's `path` and `key`,

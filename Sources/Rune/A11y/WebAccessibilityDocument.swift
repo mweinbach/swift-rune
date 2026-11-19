@@ -35,7 +35,6 @@ struct WebDocumentAccessibilityNode: Equatable, Sendable {
 
     func write<Fields: AccessibilityDumpFields>(to fields: inout Fields) throws(Fields.Failure) {
         if let anchor { try fields.set(.anchor, anchor) }
-        if let role { try fields.set(.role, role) }
         if selectable { try fields.set(.selectable, true) }
         if let text { try fields.set(.documentText, text) }
         if let inlineRange {

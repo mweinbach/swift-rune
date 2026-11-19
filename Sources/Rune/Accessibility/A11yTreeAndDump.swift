@@ -299,8 +299,13 @@ enum AccessibilityDumpField: String, CodingKey {
 
 protocol AccessibilityDumpFields {
     associatedtype Failure: Error
-    mutating func set<Value: Encodable>(_ field: AccessibilityDumpField, _ value: Value) throws(Failure)
+    mutating func set(_ field: AccessibilityDumpField, _ value: String) throws(Failure)
+    mutating func set(_ field: AccessibilityDumpField, _ value: Bool) throws(Failure)
+    mutating func set(_ field: AccessibilityDumpField, _ value: Int) throws(Failure)
     mutating func set(_ field: AccessibilityDumpField, _ value: Float) throws(Failure)
+    mutating func set(_ field: AccessibilityDumpField, _ value: [String]) throws(Failure)
+    mutating func set(_ field: AccessibilityDumpField, _ value: [Double]) throws(Failure)
+    mutating func set(_ field: AccessibilityDumpField, _ value: [Int]) throws(Failure)
     mutating func setRange(_ range: A11yRange) throws(Failure)
     mutating func setFont(_ font: WebDocumentAccessibilityNode.Font) throws(Failure)
 }
@@ -308,13 +313,13 @@ protocol AccessibilityDumpFields {
 private struct AccessibilityDictionaryFields: AccessibilityDumpFields {
     var values: [String: Any] = [:]
 
-    mutating func set<Value: Encodable>(_ field: AccessibilityDumpField, _ value: Value) {
-        values[field.rawValue] = value
-    }
-
-    mutating func set(_ field: AccessibilityDumpField, _ value: Float) {
-        values[field.rawValue] = value
-    }
+    mutating func set(_ field: AccessibilityDumpField, _ value: String) { values[field.rawValue] = value }
+    mutating func set(_ field: AccessibilityDumpField, _ value: Bool) { values[field.rawValue] = value }
+    mutating func set(_ field: AccessibilityDumpField, _ value: Int) { values[field.rawValue] = value }
+    mutating func set(_ field: AccessibilityDumpField, _ value: Float) { values[field.rawValue] = value }
+    mutating func set(_ field: AccessibilityDumpField, _ value: [String]) { values[field.rawValue] = value }
+    mutating func set(_ field: AccessibilityDumpField, _ value: [Double]) { values[field.rawValue] = value }
+    mutating func set(_ field: AccessibilityDumpField, _ value: [Int]) { values[field.rawValue] = value }
 
     mutating func setRange(_ range: A11yRange) {
         values["range"] = [range.value, range.min, range.max, range.step as Any? ?? NSNull()]
@@ -356,7 +361,8 @@ public enum AccessibilityDump {
     static func writeShallow<Fields: AccessibilityDumpFields>(
         _ node: AccessibilityNode, isRoot: Bool, forBrowser: Bool, syntheticPath: String?, to fields: inout Fields
     ) throws(Fields.Failure) {
-        let resolvedRole = (node.isSecure && node.role == .textInput) ? ElementRole.passwordInput.rawValue : node.role.rawValue
+        let defaultRole = (node.isSecure && node.role == .textInput) ? ElementRole.passwordInput.rawValue : node.role.rawValue
+        let resolvedRole = (forBrowser ? node.webDocument?.role : nil) ?? defaultRole
         try fields.set(.key, node.id)
         try fields.set(.role, resolvedRole)
         if let name = resolvedName(for: node) {

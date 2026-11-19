@@ -278,7 +278,19 @@ final class MemoBuildScope: @unchecked Sendable {
 
     func scopedId(for id: String) -> String {
         if prefixStack.isEmpty { return id }
+        if prefixStack.count == 1 { return prefixStack[0] + "/" + id }
         return (prefixStack + [id]).joined(separator: "/")
+    }
+
+    func resetForVirtualRow() {
+        prefixStack.removeAll(keepingCapacity: true)
+        seenScopedIds.removeAll(keepingCapacity: true)
+        cachedSlotIndex.removeAll(keepingCapacity: true)
+        readFrames.removeAll(keepingCapacity: true)
+        topLevelReads.removeAll(keepingCapacity: true)
+        nestedFrames.removeAll(keepingCapacity: true)
+        allTouchedScopedIds.removeAll(keepingCapacity: true)
+        regionWarnings.removeAll(keepingCapacity: true)
     }
 
     func record(_ read: MemoRead) {
@@ -384,6 +396,21 @@ public enum MemoScope {
             touchedIdsOut.ids = scope.allTouchedScopedIds
         }
         return try $current.withValue(scope, operation: body)
+    }
+
+    /// Binds one reusable `MemoBuildScope` for an entire indexed virtual list pass so each
+    /// row resets the active scope in place instead of pushing/popping `@TaskLocal` per row.
+    static func withVirtualListScope<R>(
+        cache: MemoCache,
+        envHash: UInt64,
+        geometry: MemoGeometry = MemoGeometry(),
+        pass: UInt64,
+        _ body: (MemoBuildScope) throws -> R
+    ) rethrows -> R {
+        let scope = MemoBuildScope(cache: cache, envHash: envHash, geometry: geometry, pass: pass)
+        return try $current.withValue(scope) {
+            try body(scope)
+        }
     }
 
     /// Runs `body` inside an active `MemoScope` backed by `cache` reusing `pass` without advancing `passCounter`.

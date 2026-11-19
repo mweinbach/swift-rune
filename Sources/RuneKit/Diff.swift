@@ -3632,12 +3632,11 @@ public struct DiffView<State>: Sendable {
         let changes: [Range<Int>]
         let document: UUID
         let source: DiffLineRef
-        let highlighter: Data
+        let highlighter: String
         let theme: SyntaxTheme
         let font: TextStyle
         let textColor: Color
         let wordColor: Color
-        let selection: Color?
         let tabSize: Int
         let wrap: Bool
     }
@@ -3658,22 +3657,24 @@ public struct DiffView<State>: Sendable {
         let source = DiffLineRef(side: sourceSide, line: line.lineNumber(for: sourceSide) ?? 1)
         let copy = state.copySide == side || (state.mode == .unified && line.kind == .context)
         let selection = copy ? kit.selection() : nil
+        // Keep text selection out of the syntax-highlighting memo key so toggling copy-side
+        // variants reuses the already highlighted and span-merged code element.
         let appearance = CodeAppearance(changes: changed, document: state.highlightVersion,
-                                        source: source, highlighter: Data(resolved.id.utf8), theme: syntaxTheme, font: kit.ty.diffCodeFont,
-                                        textColor: kit.c.textBase, wordColor: wordBg, selection: selection, tabSize: look.tabSize, wrap: wrap)
-        let codeEl: El<State> = memo(cellKey, deps: appearance) {
+                                        source: source, highlighter: resolved.id, theme: syntaxTheme, font: kit.ty.diffCodeFont,
+                                        textColor: kit.c.textBase, wordColor: wordBg, tabSize: look.tabSize, wrap: wrap)
+        var codeEl: El<State> = memo(cellKey, deps: appearance) {
             let highlights = state.highlights(file: file, side: source.side, line: source.line, using: resolved)
             let shown = DiffViewHelpers.formattedCode(line.text, tabSize: look.tabSize, wrap: wrap)
             let spans = DiffViewHelpers.mergeCodeSpans(code: shown.text, offsetMap: shown.sourceOffsets,
                                                        highlights: highlights, changedRanges: changed,
                                                        defaultColor: kit.c.textBase, syntaxTheme: syntaxTheme, wordBg: wordBg)
             var code: El<State> = rich(spans).font(kit.ty.diffCodeFont)
-            if let selection {
-                code = code.selectable()
-                code.selectionColor = selection
-                for range in shown.uncopied { code = code.uncopied(range) }
-            }
+            for range in shown.uncopied { code = code.uncopied(range) }
             return wrap ? code.wrapText().wFull() : code.noWrap()
+        }
+        if let selection {
+            codeEl = codeEl.selectable()
+            codeEl.selectionColor = selection
         }
         let events = eventSource
         let hoverHandler: (inout State, Bool, inout Tx) -> Void = { s, inside, tx in

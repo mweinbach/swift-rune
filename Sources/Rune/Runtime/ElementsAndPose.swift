@@ -277,8 +277,8 @@ extension Runtime {
         return false
     }
 
-    internal func computeOwnLiveIntent(el: El<State>) -> (bits: UInt32, motionLive: Bool) {
-        var bits: UInt32 = (el.runtimeExtras["motionGate.motionIntent"] as? UInt16).map(UInt32.init) ?? 0
+    internal func computeOwnLiveIntent(el: borrowing El<State>) -> (bits: UInt32, motionLive: Bool) {
+        var bits: UInt32 = (el.runtimeExtra("motionGate.motionIntent") as? UInt16).map(UInt32.init) ?? 0
         var motionLive = false
         for b in el.liveBindings where b.spring == nil {
             switch b.target {
@@ -298,13 +298,12 @@ extension Runtime {
         return (bits, motionLive)
     }
 
-    internal func computeInstantHoverGroupRule(snap: FlatNode) -> Bool {
+    internal func computeInstantHoverGroupRule(snap: borrowing FlatNode) -> Bool {
         guard snap.el.groupOpacity != nil else { return false }
         var cur = snap.parentIndex
         while let pIdx = cur, flatNodes.indices.contains(pIdx) {
-            let candidate = flatNodes[pIdx]
-            if candidate.el.hoverBg != nil || candidate.el.isHoverGroup {
-                let hc = candidate.el.hoverMotionSpec ?? hoverCurvesById[candidate.nodeId]
+            if flatNodes[pIdx].el.hoverBg != nil || flatNodes[pIdx].el.isHoverGroup {
+                let hc = flatNodes[pIdx].el.hoverMotionSpec ?? hoverCurvesById[flatNodes[pIdx].nodeId]
                 if let hc, case .instant = hc.enter.curve {
                     return true
                 }
@@ -313,7 +312,7 @@ extension Runtime {
                 }
                 return false
             }
-            cur = candidate.parentIndex
+            cur = flatNodes[pIdx].parentIndex
         }
         return false
     }
@@ -344,7 +343,7 @@ extension Runtime {
     }
 
     internal func inspectPaintedNode(
-        _ snap: FlatNode, el: El<State>, rotation: Float, scale: Float, shadows: [Shadow], liveShadowColor: Color?,
+        _ snap: borrowing FlatNode, el: borrowing El<State>, rotation: Float, scale: Float, shadows: [Shadow], liveShadowColor: Color?,
         spatialMoving: Bool, flightTarget: Bool, inFlight: Bool, growthMoving: Bool? = nil
     ) -> RawPoseNodeData {
         var nodeLoopPhase: Double?
@@ -362,9 +361,9 @@ extension Runtime {
             && (frameMovedScrollPaths.contains(snap.path) || slice2State.scrollModes[snap.path]?.hand.scrolling == true))
         let rowTrackMoving = growthMoving ?? (!growthRows.isEmpty && (growthRows["growth:\(snap.path)"]?.track.moving == true
             || growthRows["fold:\(snap.path)"]?.track.moving == true))
-        let isOwnGrowthMoving = rowTrackMoving || ((el.runtimeExtras["motionGate.inGrowingRow"] as? Bool) ?? false)
+        let isOwnGrowthMoving = rowTrackMoving || ((el.runtimeExtra("motionGate.inGrowingRow") as? Bool) ?? false)
         let nodeRevealing = flightTarget
-            || ((el.runtimeExtras["motionGate.revealing"] as? Bool) ?? false)
+            || ((el.runtimeExtra("motionGate.revealing") as? Bool) ?? false)
         let ownPaintPoseMoving = paintPoseSpringing(for: snap.nodeId, shadowCount: shadows.count)
         let nodeOwnMoving = spatialMoving
             || ownPaintPoseMoving

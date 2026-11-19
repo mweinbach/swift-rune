@@ -2,17 +2,17 @@ import RuneMotion
 
 private let noReportedScroll: [Float] = [0, 0]
 
-/// The geometry and visual state from one paint. Authored fields are immutable through
-/// FlatElement's copy-on-write storage, even if input commits a new tree before inspection.
-internal struct PaintedElement<State> {
-    let authored: FlatElement<State>
-    let path: String
-    let key: String?
+/// Trivial POD geometry and visual state from one native paint. Authored element fields
+/// (`FlatElement`, `path`, `key`, `targetRect`, `committedLayoutTarget`) stay in the frame's
+/// retained `FlatNode` arrays and are addressed by `slot` (`>= 0` mounted, `< 0` exit),
+/// keeping per-node report storage completely free of ARC traffic.
+internal struct PaintedElement {
+    static let syntheticSlot = Int.min
+
+    let slot: Int
     var parentIndex: Int?
     let rect: MotionRect
-    let target: MotionRect
     let visible: MotionRect
-    let committedLayoutTarget: MotionRect
     var opacity: Float
     let scale: Float
     let blur: Float
@@ -31,12 +31,43 @@ internal struct PaintedElement<State> {
     let moving: Bool
     let exiting: Bool
 
-    func report(pose: RawPoseNodeData?, edit: TextEdit? = nil, carriedPair: [Float]? = nil) -> ElementInfo {
-        report(authored.value, pose: pose, edit: edit,
-               carriedPair: carriedPair ?? (carried == .zero ? noReportedScroll : [carried.x, carried.y]))
+    static func placeholder(parentIndex: Int? = nil) -> PaintedElement {
+        PaintedElement(
+            slot: syntheticSlot, parentIndex: parentIndex, rect: .zero, visible: .zero,
+            opacity: 0, scale: 1, blur: 0, radius: 0, fill: .transparent, liveTextColor: nil,
+            hover: 0, press: 0, scrolled: .zero, carried: .zero, stuck: 0,
+            focusAllowed: false, focused: false, focusVisible: false, inert: true, moving: false, exiting: false
+        )
     }
 
-    private func report(_ el: El<State>, pose: RawPoseNodeData?, edit: TextEdit?, carriedPair: [Float]) -> ElementInfo {
+    func report<State>(
+        node: borrowing Runtime<State>.FlatNode,
+        pose: RawPoseNodeData?,
+        edit: TextEdit? = nil,
+        carriedPair: [Float]? = nil
+    ) -> ElementInfo {
+        report(
+            el: node.element.value,
+            path: node.path,
+            key: node.key,
+            target: node.targetRect,
+            committedLayoutTarget: node.committedLayoutTarget,
+            pose: pose,
+            edit: edit,
+            carriedPair: carriedPair ?? (carried == .zero ? noReportedScroll : [carried.x, carried.y])
+        )
+    }
+
+    private func report<State>(
+        el: borrowing El<State>,
+        path: String,
+        key: String?,
+        target: MotionRect,
+        committedLayoutTarget: MotionRect,
+        pose: RawPoseNodeData?,
+        edit: TextEdit?,
+        carriedPair: [Float]
+    ) -> ElementInfo {
         let secure = el.isSecure || edit?.isSecure == true
         let words = secure ? nil : edit?.text ?? el.plainText
         return ElementInfo(
@@ -52,94 +83,175 @@ internal struct PaintedElement<State> {
             checked: el.a11yChecked, a11yValue: el.a11yValue, a11yDescription: el.a11yDescription,
             a11yHidden: el.isA11yHidden, stuck: stuck, traceName: el.traceNameValue, virtualExtent: pose?.virtualExtent ?? false,
             loopPhase: pose?.loopPhase, revealing: pose?.revealing ?? false, liveIntent: pose?.ownLiveIntent ?? 0,
-            a11yInput: edit != nil || el.a11yRange != nil ? ElementA11yInput(el, edit: edit) : nil
+            a11yInput: edit != nil || el.a11yRange != nil ? ElementA11yInput(copy el, edit: edit) : nil
         )
     }
 }
 
-/// Synthetic text ranges and editors capture renderer-produced details at paint time. Boxing
-/// just those full records keeps the ordinary array stride independent of ElementInfo's size.
+/// Synthetic text ranges, editors, and inline links capture renderer-produced details at paint
+/// time. Keeping them out of the POD `painted` array keeps steady-state frame teardown O(1).
 internal final class CapturedElementReport {
     var info: ElementInfo
     init(_ info: ElementInfo) { self.info = info }
 }
 
-internal enum NativeElementReport<State> {
-    case painted(PaintedElement<State>)
-    case captured(CapturedElementReport)
+internal struct NativeFrameReports<State> {
+    var mounted: [Runtime<State>.FlatNode]
+    var exits: [Runtime<State>.FlatNode]
+    var painted: [PaintedElement]
+    /// Sparse overrides (editors, sliders, text highlights, link parents) addressed by painted index.
+    var captured: [Int: CapturedElementReport]
+    /// Trailing synthetic link records appended after painted nodes.
+    var trailing: [CapturedElementReport]
 
-    var path: String {
-        switch self {
-        case .painted(let element): element.path
-        case .captured(let report): report.info.path
+    var count: Int { painted.count + trailing.count }
+
+    struct Entry {
+        fileprivate let reports: NativeFrameReports<State>
+        fileprivate let index: Int
+
+        var path: String { reports.path(at: index) }
+
+        func report(poses: [String: RawPoseNodeData]) -> ElementInfo {
+            reports.report(at: index, poses: poses)
         }
     }
 
-    var identity: (path: String, key: String?, exiting: Bool) {
-        switch self {
-        case .painted(let element): (element.path, element.key, element.exiting)
-        case .captured(let report): (report.info.path, report.info.key, report.info.exiting)
+    func first(where predicate: (Entry) -> Bool) -> Entry? {
+        for i in 0..<count {
+            let entry = Entry(reports: self, index: i)
+            if predicate(entry) { return entry }
         }
+        return nil
     }
 
-    func report(poses: [String: RawPoseNodeData]) -> ElementInfo {
-        switch self {
-        case .painted(let element): element.report(pose: poses.isEmpty ? nil : poses[element.path])
-        case .captured(let report): report.info
+    @inline(__always)
+    func path(at index: Int) -> String {
+        if index >= painted.count {
+            return trailing[index - painted.count].info.path
+        }
+        if !captured.isEmpty, let report = captured[index] {
+            return report.info.path
+        }
+        let slot = painted[index].slot
+        return slot >= 0 ? mounted[slot].path : exits[~slot].path
+    }
+
+    @inline(__always)
+    func identity(at index: Int) -> (path: String, key: String?, exiting: Bool) {
+        if index >= painted.count {
+            let info = trailing[index - painted.count].info
+            return (info.path, info.key, info.exiting)
+        }
+        if !captured.isEmpty, let report = captured[index] {
+            let info = report.info
+            return (info.path, info.key, info.exiting)
+        }
+        let element = painted[index]
+        let slot = element.slot
+        if slot >= 0 {
+            return (mounted[slot].path, mounted[slot].key, element.exiting)
+        }
+        return (exits[~slot].path, exits[~slot].key, element.exiting)
+    }
+
+    func report(at index: Int, poses: [String: RawPoseNodeData]) -> ElementInfo {
+        if index >= painted.count {
+            return trailing[index - painted.count].info
+        }
+        if !captured.isEmpty, let report = captured[index] {
+            return report.info
+        }
+        let element = painted[index]
+        let slot = element.slot
+        if slot >= 0 {
+            let path = mounted[slot].path
+            return element.report(node: mounted[slot], pose: poses.isEmpty ? nil : poses[path])
+        }
+        let path = exits[~slot].path
+        return element.report(node: exits[~slot], pose: poses.isEmpty ? nil : poses[path])
+    }
+
+    mutating func updateOpacity(_ opacity: Float, at index: Int) {
+        if index >= painted.count {
+            trailing[index - painted.count].info.opacity = opacity
+        } else if !captured.isEmpty, let report = captured[index] {
+            report.info.opacity = opacity
+        } else {
+            painted[index].opacity = opacity
         }
     }
 
     /// Most descendants in a viewport report the same scroll pair.
-    static func materialize(_ reports: [Self], poses: [String: RawPoseNodeData]) -> [ElementInfo] {
+    func materialize(poses: [String: RawPoseNodeData]) -> [ElementInfo] {
+        var result: [ElementInfo] = []
+        result.reserveCapacity(count)
         var carried = Vec2.zero
         var pair = noReportedScroll
-        return reports.map { row in
-            switch row {
-            case .painted(let element):
-                if carried != element.carried {
-                    carried = element.carried
-                    pair = carried == .zero ? noReportedScroll : [carried.x, carried.y]
-                }
-                return element.report(pose: poses.isEmpty ? nil : poses[element.path], carriedPair: pair)
-            case .captured(let report):
-                return report.info
+        for i in painted.indices {
+            if !captured.isEmpty, let report = captured[i] {
+                result.append(report.info)
+                continue
+            }
+            let element = painted[i]
+            if carried != element.carried {
+                carried = element.carried
+                pair = carried == .zero ? noReportedScroll : [carried.x, carried.y]
+            }
+            let slot = element.slot
+            if slot >= 0 {
+                let path = mounted[slot].path
+                result.append(element.report(node: mounted[slot], pose: poses.isEmpty ? nil : poses[path], carriedPair: pair))
+            } else {
+                let path = exits[~slot].path
+                result.append(element.report(node: exits[~slot], pose: poses.isEmpty ? nil : poses[path], carriedPair: pair))
             }
         }
+        for report in trailing {
+            result.append(report.info)
+        }
+        return result
+    }
+}
+
+/// Paint-order reference for a native frame. When no raised subtrees reordered `painted`,
+/// `orderSlots` is `nil` and `nativeElementReports` itself is already in exact paint order.
+internal struct NativePaintOrder<State> {
+    var mounted: [Runtime<State>.FlatNode]
+    var exits: [Runtime<State>.FlatNode]
+    var slots: [Int]
+    var captured: [Int: CapturedElementReport]
+
+    @inline(__always)
+    func path(at index: Int) -> String {
+        if !captured.isEmpty, let report = captured[index] {
+            return report.info.path
+        }
+        let slot = slots[index]
+        return slot >= 0 ? mounted[slot].path : exits[~slot].path
     }
 
-    mutating func updateOpacity(_ opacity: Float) {
-        switch self {
-        case .painted(var element):
-            element.opacity = opacity
-            self = .painted(element)
-        case .captured(let report):
-            report.info.opacity = opacity
+    func materializePaths() -> [String] {
+        var paths: [String] = []
+        paths.reserveCapacity(slots.count)
+        for i in slots.indices {
+            paths.append(path(at: i))
         }
-    }
-
-    func restoringParent(in treeOrder: [Int]) -> Self {
-        switch self {
-        case .painted(var element):
-            element.parentIndex = element.parentIndex.map { treeOrder[$0] }
-            return .painted(element)
-        case .captured(let report):
-            report.info.parentIndex = report.info.parentIndex.map { treeOrder[$0] }
-            return self
-        }
+        return paths
     }
 }
 
 extension Runtime {
     internal func reportedPath(at index: Int) -> String? {
         if let reports = nativeElementReports {
-            return reports.indices.contains(index) ? reports[index].path : nil
+            return (0..<reports.count).contains(index) ? reports.path(at: index) : nil
         }
         return lastElements.indices.contains(index) ? lastElements[index].path : nil
     }
 
     internal func updateReportedOpacity(_ opacity: Float, at index: Int) {
         if nativeElementReports != nil {
-            nativeElementReports?[index].updateOpacity(opacity)
+            nativeElementReports?.updateOpacity(opacity, at: index)
         } else {
             lastElements[index].opacity = opacity
         }
@@ -151,7 +263,8 @@ extension Runtime {
         where matches: ((path: String, key: String?, exiting: Bool)) -> Bool
     ) -> Int? {
         if let reports = nativeElementReports {
-            return (0..<(count ?? reports.count)).first { matches(reports[$0].identity) }
+            let limit = count ?? reports.count
+            return (0..<limit).first { matches(reports.identity(at: $0)) }
         }
         let infos = lastElements
         return (0..<(count ?? infos.count)).first {
@@ -161,7 +274,7 @@ extension Runtime {
     }
 
     internal func reportedElement(at index: Int) -> ElementInfo {
-        if let reports = nativeElementReports { return reports[index].report(poses: nativeInspection?.rawPoseByPath ?? [:]) }
+        if let reports = nativeElementReports { return reports.report(at: index, poses: nativeInspection?.rawPoseByPath ?? [:]) }
         return lastElements[index]
     }
 

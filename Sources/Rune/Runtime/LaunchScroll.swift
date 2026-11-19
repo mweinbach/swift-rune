@@ -95,7 +95,7 @@ extension Runtime {
         return Array(repeating: nil, count: flatNodes.count)
     }
 
-    internal func carriedScroll(for node: FlatNode, scale: (String) -> Vec2?, cache: inout [Vec2?],
+    internal func carriedScroll(for node: borrowing FlatNode, scale: (String) -> Vec2?, cache: inout [Vec2?],
                                 turn: (String) -> Turn?) -> Vec2 {
         // Descendants of the same nearest scroll viewport have the same inner-to-outer sum,
         // including the presentation scale and turn of every enclosing viewport.
@@ -117,23 +117,28 @@ extension Runtime {
         return uncachedCarriedScroll(for: node, scale: scale, turn: turn)
     }
 
-    private func uncachedCarriedScroll(for node: FlatNode, scale: (String) -> Vec2?, turn: (String) -> Turn?) -> Vec2 {
+    private func uncachedCarriedScroll(for node: borrowing FlatNode, scale: (String) -> Vec2?, turn: (String) -> Turn?) -> Vec2 {
         let hasLaunches = !launchScrollById.isEmpty
         guard hasLaunches || !scrollOffsets.isEmpty else { return .zero }
         var sum = Vec2.zero
         var launches: [(id: NodeId, inner: Vec2)] = []
-        var current: FlatNode? = node
-        while let item = current {
-            if item.nodeId != node.nodeId, var offset = scrollOffsets[item.path] {
-                offset.y += slice2State.scrollExtraYByPath[item.path] ?? 0
-                let v = scrollInWindow(offset, scale: scale(item.path) ?? Vec2(1, 1), turn: turn(item.path))
+        let startId = node.nodeId
+        if hasLaunches, launchScrollById[startId] != nil {
+            launches.append((startId, sum))
+        }
+        var parentIdx = node.parentIndex
+        while let idx = parentIdx, flatNodes.indices.contains(idx) {
+            let itemId = flatNodes[idx].nodeId
+            if itemId != startId, var offset = scrollOffsets[flatNodes[idx].path] {
+                offset.y += slice2State.scrollExtraYByPath[flatNodes[idx].path] ?? 0
+                let v = scrollInWindow(offset, scale: scale(flatNodes[idx].path) ?? Vec2(1, 1), turn: turn(flatNodes[idx].path))
                 sum.x += v.x
                 sum.y += v.y
             }
-            if hasLaunches, launchScrollById[item.nodeId] != nil {
-                launches.append((item.nodeId, sum))
+            if hasLaunches, launchScrollById[itemId] != nil {
+                launches.append((itemId, sum))
             }
-            current = item.parentIndex.flatMap { flatNodes.indices.contains($0) ? flatNodes[$0] : nil }
+            parentIdx = flatNodes[idx].parentIndex
         }
         var carried = sum
         for (id, inner) in launches {

@@ -790,6 +790,13 @@ public struct Scene: Sendable {
     public var now: Double { store.now }
     public var count: Int { index.count }
     public var isEmpty: Bool { index.isEmpty }
+    /// True whenever any animation track or screen-travel path exists in the scene.
+    package var hasTrackOrTravel: Bool { store.trackLen > 0 || !travelling.isEmpty }
+    /// True when `id` may still have an active/sleeping track or travel path after `commit`.
+    @inline(__always)
+    package func mayNeedLandUnseen(_ id: NodeId) -> Bool {
+        !travelling.isEmpty || store.hasTracks(id)
+    }
 
     public mutating func keepFlights(_ on: Bool) {
         keep = on
@@ -969,7 +976,9 @@ public struct Scene: Sendable {
         if anim == .instant && (hadPath || store.isAnimating(id, Props.FRAME)) {
             endPath(i)
             nodes[i].frame = frame
-            trackSet(i, Props.FRAME, frame)
+            if nodes[i].tracks[Int(Props.FRAME.id.rawValue)] != nil || store.has(id, Props.FRAME) {
+                trackSet(i, Props.FRAME, frame)
+            }
             nodes[i].dirty = true
             return
         }
@@ -1943,27 +1952,27 @@ public struct Scene: Sendable {
     /// imperative property tracks, reparenting, and in-flight transitions are honored.
     /// Borrow the mounted nodes and tracks for this per-node check during commit and offscreen landing.
     private static func matchesRestingSpec(
-        _ index: Int, _ spec: NodeSpec, localFrame: MotionRect, nodes: borrowing [Node], store: borrowing AnimationStore
+        _ index: Int, _ spec: borrowing NodeSpec, localFrame: MotionRect, nodes: borrowing [Node], store: borrowing AnimationStore
     ) -> Bool {
-        let node = nodes[index]
-        guard node.presence.isPresent, node.path == nil, spec.launchLayout == nil,
-              node.frame == localFrame, !store.hasTracks(node.id),
-              node.tracks.entries.allSatisfy({ $0 == nil }),
-              node.opacity == spec.opacity, node.baseScale2D == spec.scale,
-              node.baseOffset == spec.offset, node.baseBlur == spec.blur, node.baseRotate == spec.rotate,
-              node.radius == spec.corners, spec.iconTurn == 0,
-              node.hasFill == (spec.fill != nil), node.hasBorder == (spec.border != nil),
-              spec.fill.map({ $0 == node.fill }) ?? true, spec.border.map({ $0 == node.border }) ?? true,
-              node.compatHadTransition == (spec.transition != nil),
-              node.transition == (spec.transition ?? .none) else { return false }
-        let parent = node.parent == Self.noneIdx ? nil : nodes[Int(node.parent)].id
+        guard nodes[index].presence.isPresent, nodes[index].path == nil, spec.launchLayout == nil,
+              nodes[index].frame == localFrame,
+              (store.trackLen == 0 || !store.hasTracks(nodes[index].id)),
+              nodes[index].tracks.entries.allSatisfy({ $0 == nil }),
+              nodes[index].opacity == spec.opacity, nodes[index].baseScale2D == spec.scale,
+              nodes[index].baseOffset == spec.offset, nodes[index].baseBlur == spec.blur, nodes[index].baseRotate == spec.rotate,
+              nodes[index].radius == spec.corners, spec.iconTurn == 0,
+              nodes[index].hasFill == (spec.fill != nil), nodes[index].hasBorder == (spec.border != nil),
+              spec.fill.map({ $0 == nodes[index].fill }) ?? true, spec.border.map({ $0 == nodes[index].border }) ?? true,
+              nodes[index].compatHadTransition == (spec.transition != nil),
+              nodes[index].transition == (spec.transition ?? .none) else { return false }
+        let parent = nodes[index].parent == Self.noneIdx ? nil : nodes[Int(nodes[index].parent)].id
         return parent == spec.parent
     }
 
     /// An offscreen node is landed after commit. Ordinary settled nodes already hold
     /// these values. An authored animation or a sleeping imperative track still needs
     /// the normal property reconciliation.
-    package mutating func landUnseen(_ spec: NodeSpec, localFrame: MotionRect) {
+    package mutating func landUnseen(_ spec: borrowing NodeSpec, localFrame: MotionRect) {
         guard let index = slot(spec.id),
               !Self.matchesRestingSpec(index, spec, localFrame: localFrame, nodes: nodes, store: store) else { return }
         landFrame(spec.id, localFrame)
@@ -2009,17 +2018,49 @@ public struct Scene: Sendable {
             }
         }
 
-        var worldOrigins: [NodeId: Vec2] = [:]
-        worldOrigins.reserveCapacity(specs.count)
-        for s in specs {
-            worldOrigins[s.id] = s.rect.origin
-        }
+        // Runtime commits in preorder, so an ancestor stack resolves parent origins without
+        // allocating a full `[NodeId: Vec2]` map. Out-of-order callers build it lazily once.
+        var ancestorStack: [(id: NodeId, origin: Vec2)] = []
+        ancestorStack.reserveCapacity(16)
+        var worldOrigins: [NodeId: Vec2]? = nil
 
         let canRetain = !cut && trace == nil
         var children: [(parent: UInt32, slot: UInt32)] = []
         children.reserveCapacity(specs.count)
         for spec in specs {
-            let parentOrigin = spec.parent.flatMap { worldOrigins[$0] } ?? .zero
+            let parentOrigin: Vec2
+            if let pid = spec.parent {
+                if let map = worldOrigins {
+                    parentOrigin = map[pid] ?? .zero
+                } else {
+                    var found: Int? = nil
+                    var k = ancestorStack.count - 1
+                    while k >= 0 {
+                        if ancestorStack[k].id == pid {
+                            found = k
+                            break
+                        }
+                        k -= 1
+                    }
+                    if let k = found {
+                        if k + 1 < ancestorStack.count {
+                            ancestorStack.removeLast(ancestorStack.count - 1 - k)
+                        }
+                        parentOrigin = ancestorStack[k].origin
+                    } else {
+                        var map = Dictionary<NodeId, Vec2>(minimumCapacity: specs.count)
+                        for s in specs { map[s.id] = s.rect.origin }
+                        worldOrigins = map
+                        parentOrigin = map[pid] ?? .zero
+                    }
+                }
+            } else {
+                if worldOrigins == nil { ancestorStack.removeAll(keepingCapacity: true) }
+                parentOrigin = .zero
+            }
+            if worldOrigins == nil {
+                ancestorStack.append((spec.id, spec.rect.origin))
+            }
             let localFrame = MotionRect.fromEdges(
                 spec.rect.left - parentOrigin.x,
                 spec.rect.top - parentOrigin.y,
@@ -2238,11 +2279,16 @@ public struct Scene: Sendable {
             }
         }
 
-        let allPresent = worldOrigins.count == index.count
-        var committed = [Bool](repeating: allPresent, count: nodes.count)
-        if !allPresent {
-            for child in children { committed[Int(child.slot)] = true }
+        var committed = [Bool](repeating: false, count: nodes.count)
+        var uniqueCommitted = 0
+        for child in children {
+            let s = Int(child.slot)
+            if !committed[s] {
+                committed[s] = true
+                uniqueCommitted += 1
+            }
         }
+        let allPresent = uniqueCommitted == index.count
         syncCommittedOrder(children, committed: committed)
         if allPresent { return }
 

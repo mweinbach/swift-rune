@@ -13,7 +13,11 @@ extension Runtime {
     /// The last paint determines which branch receives a gesture. Ordinary decorative boxes
     /// allow the wheel through, while raised, anchored and sticky roots mask their siblings.
     internal func gestureStartIndex(at point: Vec2) -> Int? {
-        for path in paintOrderPaths.reversed() {
+        let candidatePaths = hasPaintOrder
+            ? pickCandidates.inputPaths(at: point, geometry: hitGeometryByPath,
+                                        pathAt: { paintOrderPath(at: $0) }, fallback: { paintOrderPaths })
+            : paintOrderPaths
+        for path in candidatePaths.reversed() {
             guard let geometry = hitGeometryByPath[path], !geometry.isExiting,
                   geometry.opacity > 0.001, geometry.contains(point),
                   let i = nodeByPath[path], hoverAllowed(i), !subtreeExiting(i) else { continue }

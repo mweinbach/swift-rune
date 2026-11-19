@@ -255,8 +255,15 @@ extension Runtime {
 
     // MARK: - Pre-Layout Virtualize / VirtualRows Expansion
 
-    private func treeContainsVirtual(_ rootEl: El<State>) -> Bool {
-        var stack: [El<State>] = [rootEl]
+    private func treeContainsVirtual(_ rootEl: borrowing El<State>) -> Bool {
+        if rootEl.virtualEstimate != nil || rootEl.virtualRowsSource != nil {
+            return true
+        }
+        if let memo = rootEl.memoLayoutChildren, memo.matches(rootEl.children) {
+            return memo.traits.contains(.virtual)
+        }
+        guard !rootEl.children.isEmpty else { return false }
+        var stack = rootEl.children
         while let cur = stack.popLast() {
             if cur.virtualEstimate != nil || cur.virtualRowsSource != nil {
                 return true
@@ -688,20 +695,47 @@ extension Runtime {
             virtualSelectionSources.removeValue(forKey: path)
         }
         ctx.selectionSources[path] = selectionSource
-        func buildRow(_ source: VirtualRowSource<State>, at index: Int) -> CachedVirtualRow {
-            let touched = MemoScope.TouchedIdsBox()
-            let row = MemoScope.enterVirtualRow(
-                cache: self.memo, envHash: memoEnvHash, geometry: memoGeometry,
-                pass: memoPass, touchedIdsOut: touched
-            ) { source.buildContent(state, index) }
-            self.memo.appendViewReads(touched.reads + touched.trackedReads.memoReads, pass: memoPass)
-            var keyedRow = source.keyed(row.element, storageKey: keys[index])
+        let priorRowCache = remountRowCache?[path]
+        func buildRowInScope(_ source: VirtualRowSource<State>, at index: Int, scope: MemoBuildScope) -> CachedVirtualRow {
+            scope.resetForVirtualRow()
+            let (row, tracked) = trackedReads { source.buildContent(state, index) }
+            let topReads = scope.topLevelReads
+            if !topReads.isEmpty || !tracked.isEmpty {
+                let extra = tracked.memoReads
+                if extra.isEmpty {
+                    self.memo.appendViewReads(topReads, pass: memoPass)
+                } else if topReads.isEmpty {
+                    self.memo.appendViewReads(extra, pass: memoPass)
+                } else {
+                    self.memo.appendViewReads(topReads + extra, pass: memoPass)
+                }
+            }
+            let rowKey = keys[index]
+            // On a rebuild pass where a row's memoized root owner is unchanged and read-free
+            // (e.g. context lines during a diff copy-side flip), reuse its `CachedVirtualRow`
+            // directly without re-keying, re-scanning traits, or allocating a new box/Set.
+            if let prev = priorRowCache?[rowKey],
+               let owner = row.owner,
+               prev.memoizedRootOwner === owner,
+               prev.envHash == memoEnvHash,
+               topReads.isEmpty, tracked.isEmpty,
+               prev.reads.isEmpty, prev.trackedReads.isEmpty,
+               prev.el.storageKeyId == rowKey,
+               prev.memoIds == scope.allTouchedScopedIds {
+                return prev
+            }
+            var keyedRow = source.keyed(row.element, storageKey: rowKey)
             if !keyedRow.children.isEmpty, keyedRow.memoLayoutChildren?.matches(keyedRow.children) != true {
                 keyedRow.memoLayoutChildren = MemoLayoutChildren(keyedRow.children)
             }
-            return CachedVirtualRow(el: keyedRow, memoizedRootOwner: row.owner, layoutProjection: row.layoutProjection, memoIds: touched.ids,
+            return CachedVirtualRow(el: keyedRow, memoizedRootOwner: row.owner, layoutProjection: row.layoutProjection, memoIds: scope.allTouchedScopedIds,
                                     containsVirtual: treeContainsVirtual(keyedRow), reusableForRelayout: Self.isTreeReusableForRelayout(keyedRow),
-                                    reads: touched.reads, trackedReads: touched.trackedReads, envHash: memoEnvHash)
+                                    reads: topReads, trackedReads: tracked, envHash: memoEnvHash)
+        }
+        func buildRow(_ source: VirtualRowSource<State>, at index: Int) -> CachedVirtualRow {
+            MemoScope.withVirtualListScope(cache: self.memo, envHash: memoEnvHash, geometry: memoGeometry, pass: memoPass) { scope in
+                buildRowInScope(source, at: index, scope: scope)
+            }
         }
         func offscreenRow(_ index: Int) -> El<State>? {
             offscreenRowElement(source: selectionSource, at: index) { source in buildRow(source, at: index).el }
@@ -720,49 +754,55 @@ extension Runtime {
         var nestedRows: [(index: Int, reused: Bool)] = []
         let previousRows = canReuseRows ? remountRowCache?[path] : nil
         var nextRows = Dictionary<String, CachedVirtualRow>(minimumCapacity: isIndexed ? mounted.count : 0)
-        for i in mounted {
-            let rowKey = keys[i]
-            var rowEl: El<State>
-            var didReuseRow = false
-            var keysClean = true
-            let containsVirtual: Bool
-            if isIndexed {
-                let entry: CachedVirtualRow
-                if let reused = previousRows?[rowKey],
-                   reused.reusableForRelayout,
-                   reused.holds(against: memoGeometry, envHash: memoEnvHash) {
-                    self.memo.touchEntries(ids: reused.memoIds, pass: memoPass)
-                    self.memo.appendViewReads(reused.reads + reused.trackedReads.memoReads, pass: memoPass)
-                    reused.trackedReads.read()
-                    entry = reused
-                    didReuseRow = true
-                } else {
-                    let row = buildRow(el.virtualRowsSource!, at: i)
-                    if rowReuseMode == .remount && row.containsVirtual {
-                        ctx.remountHitNestedVirtual = true
-                        return
+        if isIndexed {
+            let rowSource = el.virtualRowsSource!
+            MemoScope.withVirtualListScope(cache: self.memo, envHash: memoEnvHash, geometry: memoGeometry, pass: memoPass) { scope in
+                for i in mounted {
+                    let rowKey = keys[i]
+                    var rowEl: El<State>
+                    var didReuseRow = false
+                    let entry: CachedVirtualRow
+                    if let reused = previousRows?[rowKey],
+                       reused.reusableForRelayout,
+                       reused.holds(against: memoGeometry, envHash: memoEnvHash) {
+                        self.memo.touchEntries(ids: reused.memoIds, pass: memoPass)
+                        if !reused.reads.isEmpty || !reused.trackedReads.isEmpty {
+                            self.memo.appendViewReads(reused.reads + reused.trackedReads.memoReads, pass: memoPass)
+                        }
+                        reused.trackedReads.read()
+                        entry = reused
+                        didReuseRow = true
+                    } else {
+                        let row = buildRowInScope(rowSource, at: i, scope: scope)
+                        if rowReuseMode == .remount && row.containsVirtual {
+                            ctx.remountHitNestedVirtual = true
+                            return
+                        }
+                        entry = row
                     }
-                    entry = row
+                    nextRows[rowKey] = entry
+                    rowEl = entry.el
+                    if !entry.keysClean {
+                        let repaired = KeyDiagnostics.repair(rowEl, at: "\(path)/@\(rowKey)") { ctx.keyRenames.append($0) }
+                        ctx.keyDiagnostics.append(contentsOf: repaired.warnings)
+                        rowEl = repaired.tree
+                    }
+                    if entry.containsVirtual { nestedRows.append((built.count, didReuseRow)) }
+                    built.append(rowEl)
                 }
-                nextRows[rowKey] = entry
-                rowEl = entry.el
-                keysClean = entry.keysClean
-                containsVirtual = entry.containsVirtual
-            } else {
-                rowEl = el.children[i]
-                containsVirtual = treeContainsVirtual(rowEl)
+            }
+            if ctx.remountHitNestedVirtual { return }
+        } else {
+            for i in mounted {
+                let rowKey = keys[i]
+                var rowEl = el.children[i]
+                let containsVirtual = treeContainsVirtual(rowEl)
                 if rowEl.storageKeyId != rowKey {
                     rowEl.assignStoredKey(rowKey, authored: VirtualRowKeyEncoding.authoredKey(rowKey))
                 }
+                if containsVirtual { nestedRows.append((built.count, false)) }
+                built.append(rowEl)
             }
-            // Every row now carries its resolved, unique key, including repaired duplicates.
-            if !keysClean {
-                let repaired = KeyDiagnostics.repair(rowEl, at: "\(path)/@\(rowKey)") { ctx.keyRenames.append($0) }
-                ctx.keyDiagnostics.append(contentsOf: repaired.warnings)
-                rowEl = repaired.tree
-            }
-            if containsVirtual { nestedRows.append((built.count, didReuseRow)) }
-            built.append(rowEl)
         }
 
         if !nextRows.isEmpty { ctx.builtVirtualRows[path] = nextRows }

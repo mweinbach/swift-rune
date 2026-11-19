@@ -35,7 +35,7 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
     const doc = canvas.ownerDocument;
     const root = doc.createElement('div');
     root.setAttribute('data-rune-a11y', '');
-    root.style.cssText = 'position:absolute;opacity:0;pointer-events:none;overflow:hidden;transform-origin:top left';
+    root.style.cssText = 'position:absolute;opacity:0;pointer-events:none;overflow:hidden;transform-origin:top left;contain:layout style';
     root.setAttribute('role', 'document');
     if (documentMode) {
         root.style.opacity = '1';
@@ -73,6 +73,7 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
         root.style.width = w + 'px';
         root.style.height = h + 'px';
         root.style.transform = 'scale(' + sx + ',' + sy + ')';
+        if (!documentMode) root.style.contain = 'strict';
     }
 
     function create(node) {

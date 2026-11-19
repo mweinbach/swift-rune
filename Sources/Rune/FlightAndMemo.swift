@@ -247,7 +247,7 @@ public final class MemoCache: @unchecked Sendable {
         var nestedIds: [String]
         var passBuilt: UInt64
         var element: Any
-        var rowLayout: AnyObject?
+        var virtualRowBox: AnyObject?
     }
 
     private let lock = NSLock()
@@ -350,10 +350,14 @@ public final class MemoCache: @unchecked Sendable {
 
     func getOrBuildMemo<State, Deps: Equatable>(
         rawId: String,
+        elementKey: String? = nil,
         deps: Deps,
         ignoreDuplicateGuard: Bool = false,
         callerLocation: String? = nil,
         site: String = "",
+        callerFile: String? = nil,
+        callerLine: UInt = 0,
+        callerColumn: UInt = 0,
         onReuse: ((Deps) -> Void)? = nil,
         build: () -> El<State>
     ) -> (element: El<State>, hit: Bool) {
@@ -364,19 +368,26 @@ public final class MemoCache: @unchecked Sendable {
         let curGeometry = scope?.geometry ?? MemoGeometry()
 
         func attachMemoKey(_ el: El<State>) -> El<State> {
-            guard !rawId.hasPrefix("cached:") else { return el }
+            let key = elementKey ?? rawId
+            guard !key.hasPrefix("cached:") else { return el }
             let existing = el.keyId
-            if let existing, existing != rawId {
+            if let existing, existing != key {
+                let resolvedSite = !site.isEmpty ? site
+                    : (callerLocation ?? callerFile.map { "\($0):\(callerLine)" } ?? "")
                 PerfWarn.memoKeyReplaced(
-                    id: rawId,
+                    id: key,
                     existing: existing,
-                    site: site.isEmpty ? (callerLocation ?? "") : site
+                    site: resolvedSite
                 )
             }
             var out = el
-            if existing != rawId {
-                out = out.key(rawId)
-                if let callerLocation { out.keyLocation = callerLocation }
+            if existing != key {
+                if let callerFile {
+                    out = out.key(key, file: callerFile, line: callerLine, column: callerColumn)
+                } else {
+                    out = out.key(key)
+                    if let callerLocation { out.keyLocation = callerLocation }
+                }
             }
             return out
         }
@@ -390,28 +401,42 @@ public final class MemoCache: @unchecked Sendable {
         }
 
         lock.lock()
-        if var existing = entries[scopedId],
-           existing.srgbBlend == srgb,
-           existing.envHash == env,
-           existing.equals(deps),
-           existing.reads.allSatisfy({ $0.matches(curGeometry) }),
-           let cached = existing.element as? El<State> {
+        if let entryIndex = entries.index(forKey: scopedId),
+           entries.values[entryIndex].srgbBlend == srgb,
+           entries.values[entryIndex].envHash == env,
+           entries.values[entryIndex].equals(deps),
+           entries.values[entryIndex].reads.allSatisfy({ $0.matches(curGeometry) }),
+           let cached = entries.values[entryIndex].element as? El<State> {
             let dryRun = scope?.isVerificationDryRun ?? false
-            let recordedReads = existing.reads
+            let recordedReads = entries.values[entryIndex].reads
+            let cachedDeps = onReuse != nil ? (entries.values[entryIndex].deps as? Deps) : nil
+            var singleNested: String?
             var touchedNested: Set<String> = []
             if !dryRun {
                 let pass = scope?.pass ?? passCounter
-                existing.passBuilt = pass
-                entries[scopedId] = existing
-                touchedNested = markNestedTouchedLocked(existing.nestedIds, pass: pass)
+                entries.values[entryIndex].passBuilt = pass
+                let nested = entries.values[entryIndex].nestedIds
+                if nested.count == 1, let childIndex = entries.index(forKey: nested[0]),
+                   entries.values[childIndex].nestedIds.isEmpty {
+                    entries.values[childIndex].passBuilt = pass
+                    singleNested = nested[0]
+                } else if !nested.isEmpty {
+                    touchedNested = markNestedTouchedLocked(nested, pass: pass)
+                }
             }
             lock.unlock()
             if !dryRun {
-                if let onReuse, let cachedDeps = existing.deps as? Deps { onReuse(cachedDeps) }
-                for r in recordedReads { scope?.record(r) }
+                if let onReuse, let cachedDeps { onReuse(cachedDeps) }
+                if !recordedReads.isEmpty {
+                    for r in recordedReads { scope?.record(r) }
+                }
                 scope?.recordNested(scopedId)
                 scope?.allTouchedScopedIds.insert(scopedId)
-                scope?.allTouchedScopedIds.formUnion(touchedNested)
+                if let singleNested {
+                    scope?.allTouchedScopedIds.insert(singleNested)
+                } else if !touchedNested.isEmpty {
+                    scope?.allTouchedScopedIds.formUnion(touchedNested)
+                }
             }
             return (cached, true)
         }
@@ -548,47 +573,16 @@ public final class MemoCache: @unchecked Sendable {
         return (built, false)
     }
 
-    /// Keep an already-built alternate while its owner remains mounted. Reads in the alternate
-    /// are checked when it is chosen again, so they do not become dependencies of the active view.
-    fileprivate func retainAlternate<State, Inputs: AnyObject>(
-        _ rawId: String, matching inputs: Inputs, in scope: MemoBuildScope, sharingWith activeSlot: String?
-    ) -> VirtualRowLayout<State>? {
-        guard !scope.isVerificationDryRun else { return nil }
-        var projection: VirtualRowLayout<State>?
-        let scopedId = scope.scopedId(for: rawId)
-        let touched: Set<String> = lock.withLock {
-            guard let entry = entries[scopedId], entry.envHash == scope.envHash, entry.equals(inputs) else { return [] }
-            // Checking a dynamic read here could invoke the dormant variant's geometry transform.
-            if let activeSlot, !scope.seenScopedIds.contains(scope.scopedId(for: activeSlot)),
-               entry.reads.isEmpty, entry.srgbBlend == Theme.blendsSrgb(),
-               let owner = entry.deps as? Inputs, let element = entry.element as? El<State>, let memo = element.memoLayoutChildren,
-               memo.traits.isDisjoint(with: [.mutableLayout, .virtual, .growth, .duplicateKeys]) {
-                if let retained = entry.rowLayout as? VirtualRowLayout<State> {
-                    projection = retained
-                } else {
-                    let layout = VirtualRowLayout(children: memo, owner: owner)
-                    entries[scopedId]?.rowLayout = layout
-                    projection = layout
-                }
-            }
-            return markNestedTouchedLocked([scopedId], pass: scope.pass)
-        }
-        if !touched.isEmpty {
-            scope.allTouchedScopedIds.formUnion(touched)
-            scope.recordNested(scopedId)
-        }
-        return projection
-    }
-
     @discardableResult
     private func markNestedTouchedLocked(_ nestedIds: [String], pass: UInt64) -> Set<String> {
+        guard !nestedIds.isEmpty else { return [] }
         var queue = nestedIds
         var visited: Set<String> = []
         while let nid = queue.popLast() {
-            guard visited.insert(nid).inserted, var child = entries[nid] else { continue }
-            child.passBuilt = pass
-            entries[nid] = child
-            queue.append(contentsOf: child.nestedIds)
+            guard visited.insert(nid).inserted, let idx = entries.index(forKey: nid) else { continue }
+            entries.values[idx].passBuilt = pass
+            let grandchildren = entries.values[idx].nestedIds
+            if !grandchildren.isEmpty { queue.append(contentsOf: grandchildren) }
         }
         return visited
     }
@@ -738,19 +732,223 @@ public func memo<State, Deps: Equatable>(
     return target.getOrBuildMemo(
         rawId: id,
         deps: deps,
-        callerLocation: "\(file):\(line):\(column)",
-        site: "\(file):\(line)",
+        callerFile: file,
+        callerLine: line,
+        callerColumn: column,
         build: build
     ).element
 }
 
-private final class MemoEventInputs<Inputs: Equatable, Context: AnyObject>: Equatable {
-    let inputs: Inputs
-    var context: Context?
+/// Typed storage for a `memoizedVirtualRow` cache entry. Eliminates existential `Any` boxing,
+/// dynamic casts, `:0`/`:1` key string allocations, and double-lock lookups on every row hit.
+private final class VirtualRowMemoBox<State, Inputs: Equatable, Context: AnyObject> {
+    struct VariantSlot {
+        var element: El<State>
+        var context: Context
+        var reads: [MemoRead]
+        var nestedIds: [String]
+        var rowLayout: VirtualRowLayout<State>?
+    }
 
-    init(_ inputs: Inputs) { self.inputs = inputs }
+    var deps: Inputs
+    var srgbBlend: Bool
+    var envHash: UInt64
+    var primary: VariantSlot?
+    var secondary: VariantSlot?
 
-    static func == (lhs: MemoEventInputs, rhs: MemoEventInputs) -> Bool { lhs.inputs == rhs.inputs }
+    init(deps: Inputs, srgbBlend: Bool, envHash: UInt64) {
+        self.deps = deps
+        self.srgbBlend = srgbBlend
+        self.envHash = envHash
+    }
+}
+
+extension MemoCache {
+    fileprivate func getOrBuildVirtualRow<State, Inputs: Equatable, Context: AnyObject>(
+        id: String,
+        deps: Inputs,
+        variant: Bool?,
+        variantsShareLayout: Bool,
+        scope: MemoBuildScope,
+        callerFile: String,
+        callerLine: UInt,
+        callerColumn: UInt,
+        makeContext: () -> Context,
+        updateContext: (Context) -> Void,
+        build: (Context) -> El<State>
+    ) -> VirtualRowContent<State> {
+        let srgb = Theme.blendsSrgb()
+        let scopedId = scope.scopedId(for: id)
+        let env = scope.envHash
+        let curGeometry = scope.geometry
+        let dryRun = scope.isVerificationDryRun
+        let pass = scope.pass
+        let useSecondary = (variant == true)
+
+        func attachMemoKey(_ el: El<State>) -> El<State> {
+            guard !id.hasPrefix("cached:") else { return el }
+            let existing = el.keyId
+            if let existing, existing != id {
+                PerfWarn.memoKeyReplaced(id: id, existing: existing, site: "\(callerFile):\(callerLine)")
+            }
+            if existing == id { return el }
+            return el.key(id, file: callerFile, line: callerLine, column: callerColumn)
+        }
+
+        // Same-pass duplicate IDs bypass caching (`memo.rs:1067`).
+        if !dryRun, !scope.seenScopedIds.insert(scopedId).inserted {
+            let built = attachMemoKey(build(makeContext()))
+            return VirtualRowContent(built)
+        }
+
+        var existingBox: VirtualRowMemoBox<State, Inputs, Context>?
+        var hitSlot: VirtualRowMemoBox<State, Inputs, Context>.VariantSlot?
+        var otherLayout: VirtualRowLayout<State>?
+        var singleNested: String?
+        var touchedNested: Set<String> = []
+
+        func touchNestedLocked(_ ids: [String]) {
+            if ids.isEmpty { return }
+            if ids.count == 1, let childIdx = entries.index(forKey: ids[0]),
+               entries.values[childIdx].nestedIds.isEmpty {
+                entries.values[childIdx].passBuilt = pass
+                if singleNested == nil && touchedNested.isEmpty {
+                    singleNested = ids[0]
+                } else if singleNested != ids[0] {
+                    if let prev = singleNested {
+                        touchedNested.insert(prev)
+                        singleNested = nil
+                    }
+                    touchedNested.insert(ids[0])
+                }
+            } else {
+                let visited = markNestedTouchedLocked(ids, pass: pass)
+                if !visited.isEmpty {
+                    if let prev = singleNested {
+                        touchedNested.insert(prev)
+                        singleNested = nil
+                    }
+                    touchedNested.formUnion(visited)
+                }
+            }
+        }
+
+        lock.lock()
+        if let entryIndex = entries.index(forKey: scopedId),
+           let box = entries.values[entryIndex].virtualRowBox as? VirtualRowMemoBox<State, Inputs, Context>,
+           box.srgbBlend == srgb,
+           box.envHash == env,
+           box.deps == deps {
+            existingBox = box
+            // Share the primary variant's layout projection when building or hitting secondary.
+            if !dryRun, variantsShareLayout, useSecondary, var primary = box.primary,
+               primary.reads.isEmpty, let memo = primary.element.memoLayoutChildren,
+               memo.traits.isDisjoint(with: [.mutableLayout, .virtual, .growth, .duplicateKeys]) {
+                if let retained = primary.rowLayout {
+                    otherLayout = retained
+                } else {
+                    let layout = VirtualRowLayout(children: memo, owner: primary.context)
+                    primary.rowLayout = layout
+                    box.primary = primary
+                    otherLayout = layout
+                }
+            }
+            let active = useSecondary ? box.secondary : box.primary
+            if let active, active.reads.allSatisfy({ $0.matches(curGeometry) }) {
+                hitSlot = active
+                if !dryRun {
+                    entries.values[entryIndex].passBuilt = pass
+                    entries.values[entryIndex].reads = active.reads
+                    touchNestedLocked(active.nestedIds)
+                    if let alt = useSecondary ? box.primary : box.secondary,
+                       alt.nestedIds != active.nestedIds {
+                        touchNestedLocked(alt.nestedIds)
+                    }
+                }
+            } else if !dryRun {
+                // Keep dormant alternate's nested memos alive while building the active variant.
+                entries.values[entryIndex].passBuilt = pass
+                if let alt = useSecondary ? box.primary : box.secondary {
+                    touchNestedLocked(alt.nestedIds)
+                }
+            }
+        }
+        lock.unlock()
+
+        if let hit = hitSlot {
+            if !dryRun {
+                updateContext(hit.context)
+                if !hit.reads.isEmpty {
+                    for r in hit.reads { scope.record(r) }
+                }
+                scope.recordNested(scopedId)
+                scope.allTouchedScopedIds.insert(scopedId)
+                if let singleNested {
+                    scope.allTouchedScopedIds.insert(singleNested)
+                } else if !touchedNested.isEmpty {
+                    scope.allTouchedScopedIds.formUnion(touchedNested)
+                }
+            }
+            return VirtualRowContent(memoized: hit.element, owner: hit.context, layoutProjection: otherLayout)
+        }
+
+        // Cache miss for the active variant: build using the shared row prefix `id` so nested
+        // memos (such as syntax-highlighted diff code) are shared across both variants.
+        let savedTracked = TrackedRecorder.pause()
+        scope.prefixStack.append(id)
+        scope.readFrames.append([])
+        scope.nestedFrames.append([])
+        let context = makeContext()
+        var built = attachMemoKey(build(context))
+        if !built.children.isEmpty { built.memoLayoutChildren = MemoLayoutChildren(built.children) }
+        TrackedRecorder.resume(savedTracked)
+        let capturedReads = scope.readFrames.popLast() ?? []
+        let capturedNested = scope.nestedFrames.popLast() ?? []
+        _ = scope.prefixStack.popLast()
+
+        let builtSlot = VirtualRowMemoBox<State, Inputs, Context>.VariantSlot(
+            element: built, context: context, reads: capturedReads, nestedIds: capturedNested, rowLayout: nil
+        )
+        let box = existingBox ?? VirtualRowMemoBox<State, Inputs, Context>(deps: deps, srgbBlend: srgb, envHash: env)
+
+        lock.lock()
+        if useSecondary {
+            box.secondary = builtSlot
+        } else {
+            box.primary = builtSlot
+        }
+        let allNested: [String]
+        if let alt = useSecondary ? box.primary : box.secondary, !alt.nestedIds.isEmpty, alt.nestedIds != capturedNested {
+            var merged = capturedNested
+            for nid in alt.nestedIds where !merged.contains(nid) { merged.append(nid) }
+            allNested = merged
+        } else {
+            allNested = capturedNested
+        }
+        buildCount &+= 1
+        entries[scopedId] = Entry(
+            deps: deps,
+            equals: { other in (other as? Inputs) == deps },
+            srgbBlend: srgb,
+            envHash: env,
+            reads: capturedReads,
+            nestedIds: allNested,
+            passBuilt: pass,
+            element: built,
+            virtualRowBox: box
+        )
+        lock.unlock()
+
+        for r in capturedReads { scope.record(r) }
+        scope.recordNested(scopedId)
+        scope.allTouchedScopedIds.insert(scopedId)
+        if let singleNested {
+            scope.allTouchedScopedIds.insert(singleNested)
+        } else if !touchedNested.isEmpty {
+            scope.allTouchedScopedIds.formUnion(touchedNested)
+        }
+        return VirtualRowContent(memoized: built, owner: context, layoutProjection: otherLayout)
+    }
 }
 
 /// Retains the subtree's event context alongside its memo entry. Updating the author-supplied
@@ -771,29 +969,11 @@ package func memoizedVirtualRow<State, Inputs: Equatable, Context: AnyObject>(
     build: (Context) -> El<State>
 ) -> VirtualRowContent<State> {
     guard let scope = MemoScope.current else { return VirtualRowContent(build(makeContext())) }
-    let cache = scope.cache
-    let inputs = MemoEventInputs<Inputs, Context>(deps)
-    let slot: String
-    var otherLayout: VirtualRowLayout<State>?
-    if let variant {
-        let first = id + ":0", second = id + ":1"
-        slot = variant ? second : first
-        let sharedSlot = variantsShareLayout && variant ? slot : nil
-        otherLayout = cache.retainAlternate(variant ? first : second, matching: inputs, in: scope, sharingWith: sharedSlot)
-    } else {
-        slot = id
-    }
-    var owner = inputs
-    let element = cache.getOrBuildMemo(rawId: slot, deps: inputs, callerLocation: "\(file):\(line):\(column)",
-                                       site: "\(file):\(line)", onReuse: { cached in
-        owner = cached
-        if let context = cached.context { updateContext(context) }
-    }) {
-        let context = makeContext()
-        inputs.context = context
-        return build(context)
-    }.element
-    return VirtualRowContent(memoized: variant == nil ? element : element.key(id), owner: owner, layoutProjection: otherLayout)
+    return scope.cache.getOrBuildVirtualRow(
+        id: id, deps: deps, variant: variant, variantsShareLayout: variantsShareLayout,
+        scope: scope, callerFile: file, callerLine: line, callerColumn: column,
+        makeContext: makeContext, updateContext: updateContext, build: build
+    )
 }
 
 /// Unlabelled `memo` convenience matching upstream `rune::memo("id", deps) { ... }`.

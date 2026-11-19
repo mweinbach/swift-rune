@@ -102,8 +102,15 @@ extension RuntimeVirtualListState {
 extension Runtime {
     /// Returns true when every element in `rootEl` can be re-laid-out across resizes without
     /// rebuilding via `view` (`relayout.rs:reusable`).
-    internal static func isTreeReusableForRelayout(_ rootEl: El<State>) -> Bool {
-        var stack: [El<State>] = [rootEl]
+    internal static func isTreeReusableForRelayout(_ rootEl: borrowing El<State>) -> Bool {
+        if rootEl.layout.aspectFit != nil || rootEl.anchor?.fit == true || rootEl.pixelsPayload != nil {
+            return false
+        }
+        if let memo = rootEl.memoLayoutChildren, memo.matches(rootEl.children) {
+            return !memo.traits.contains(.requiresResizeRebuild)
+        }
+        guard !rootEl.children.isEmpty else { return true }
+        var stack = rootEl.children
         while let el = stack.popLast() {
             if el.layout.aspectFit != nil || el.anchor?.fit == true || el.pixelsPayload != nil {
                 return false

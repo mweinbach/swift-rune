@@ -1913,12 +1913,12 @@ public struct El<State> {
 
     // MARK: - Identity & Hierarchy
 
-    public func key(_ k: String, file: String = #fileID, line: UInt = #line, column: UInt = #column) -> Self {
+    public consuming func key(_ k: String, file: String = #fileID, line: UInt = #line, column: UInt = #column) -> Self {
         key(k, byteExact: false, file: file, line: line, column: column)
     }
 
     /// Kit widgets address tree, table, and column IDs by their original UTF-8 bytes.
-    package func key(_ id: String, byteExact: Bool, file: String = #fileID, line: UInt = #line, column: UInt = #column) -> Self {
+    package consuming func key(_ id: String, byteExact: Bool, file: String = #fileID, line: UInt = #line, column: UInt = #column) -> Self {
         let encoded = VirtualRowKeyEncoding.encodedKey(id, byteExact: byteExact)
         var copy = self
         copy.assignStoredKey(encoded ?? id, authored: encoded == nil ? nil : id)
@@ -1926,18 +1926,18 @@ public struct El<State> {
         return copy
     }
 
-    public func child(_ c: El<State>) -> Self {
+    public consuming func child(_ c: consuming El<State>) -> Self {
         var copy = self
         copy.children.append(c)
         return copy
     }
 
-    public func child(_ c: El<State>?) -> Self {
+    public consuming func child(_ c: consuming El<State>?) -> Self {
         guard let c else { return self }
         return child(c)
     }
 
-    public func children<S: Sequence>(_ list: S) -> Self where S.Element == El<State> {
+    public consuming func children<S: Sequence>(_ list: S) -> Self where S.Element == El<State> {
         var copy = self
         copy.children.append(contentsOf: list)
         return copy
@@ -1945,36 +1945,36 @@ public struct El<State> {
 
     // MARK: - Sizing & Flexbox Modifiers
 
-    public func w(_ v: Float) -> Self {
+    public consuming func w(_ v: Float) -> Self {
         var copy = self
         copy.layout.width = .points(v)
         return copy
     }
 
-    public func h(_ v: Float) -> Self {
+    public consuming func h(_ v: Float) -> Self {
         var copy = self
         copy.layout.height = .points(v)
         return copy
     }
 
-    public func size(_ w: Float, _ h: Float) -> Self {
+    public consuming func size(_ w: Float, _ h: Float) -> Self {
         var copy = self
         copy.layout.width = .points(w)
         copy.layout.height = .points(h)
         return copy
     }
 
-    public func square(_ s: Float) -> Self {
+    public consuming func square(_ s: Float) -> Self {
         size(s, s)
     }
 
-    public func wFull() -> Self {
+    public consuming func wFull() -> Self {
         var copy = self
         copy.layout.width = .fraction(1.0)
         return copy
     }
 
-    public func hFull() -> Self {
+    public consuming func hFull() -> Self {
         var copy = self
         copy.layout.height = .fraction(1.0)
         return copy
@@ -2036,31 +2036,31 @@ public struct El<State> {
         return copy
     }
 
-    public func minW(_ v: Float) -> Self {
+    public consuming func minW(_ v: Float) -> Self {
         var copy = self
         copy.layout.minWidth = .points(v)
         return copy
     }
 
-    public func minH(_ v: Float) -> Self {
+    public consuming func minH(_ v: Float) -> Self {
         var copy = self
         copy.layout.minHeight = .points(v)
         return copy
     }
 
-    public func maxW(_ v: Float) -> Self {
+    public consuming func maxW(_ v: Float) -> Self {
         var copy = self
         copy.layout.maxWidth = .points(v)
         return copy
     }
 
-    public func maxH(_ v: Float) -> Self {
+    public consuming func maxH(_ v: Float) -> Self {
         var copy = self
         copy.layout.maxHeight = .points(v)
         return copy
     }
 
-    public func grow(_ g: Float = 1.0) -> Self {
+    public consuming func grow(_ g: Float = 1.0) -> Self {
         var copy = self
         copy.layout.flexGrow = g
         copy.layout.flexShrink = 1.0
@@ -2070,7 +2070,7 @@ public struct El<State> {
         return copy
     }
 
-    public func shrink(_ s: Float) -> Self {
+    public consuming func shrink(_ s: Float) -> Self {
         var copy = self
         copy.layout.flexShrink = s
         return copy
@@ -2127,24 +2127,24 @@ public struct El<State> {
         return copy
     }
 
-    public func px(_ h: Float) -> Self {
+    public consuming func px(_ h: Float) -> Self {
         var copy = self
         copy.layout.padding.left = h
         copy.layout.padding.right = h
         return copy
     }
 
-    public func py(_ v: Float) -> Self {
+    public consuming func py(_ v: Float) -> Self {
         var copy = self
         copy.layout.padding.top = v
         copy.layout.padding.bottom = v
         return copy
     }
 
-    public func pt(_ v: Float) -> Self { var c = self; c.layout.padding.top = v; return c }
-    public func pb(_ v: Float) -> Self { var c = self; c.layout.padding.bottom = v; return c }
-    public func pl(_ v: Float) -> Self { var c = self; c.layout.padding.left = v; return c }
-    public func pr(_ v: Float) -> Self { var c = self; c.layout.padding.right = v; return c }
+    public consuming func pt(_ v: Float) -> Self { var c = self; c.layout.padding.top = v; return c }
+    public consuming func pb(_ v: Float) -> Self { var c = self; c.layout.padding.bottom = v; return c }
+    public consuming func pl(_ v: Float) -> Self { var c = self; c.layout.padding.left = v; return c }
+    public consuming func pr(_ v: Float) -> Self { var c = self; c.layout.padding.right = v; return c }
 
     public func m(_ all: Float) -> Self {
         var copy = self
@@ -2161,12 +2161,12 @@ public struct El<State> {
 
     // MARK: - Alignment & Positioning
 
-    public func itemsStart() -> Self { var c = self; c.layout.alignItems = .start; return c }
-    public func itemsCenter() -> Self { var c = self; c.layout.alignItems = .center; return c }
-    public func centerY() -> Self { itemsCenter() }
-    public func centerX() -> Self { justifyCenter() }
-    public func itemsEnd() -> Self { var c = self; c.layout.alignItems = .end; return c }
-    public func itemsStretch() -> Self { var c = self; c.layout.alignItems = .stretch; return c }
+    public consuming func itemsStart() -> Self { var c = self; c.layout.alignItems = .start; return c }
+    public consuming func itemsCenter() -> Self { var c = self; c.layout.alignItems = .center; return c }
+    public consuming func centerY() -> Self { itemsCenter() }
+    public consuming func centerX() -> Self { justifyCenter() }
+    public consuming func itemsEnd() -> Self { var c = self; c.layout.alignItems = .end; return c }
+    public consuming func itemsStretch() -> Self { var c = self; c.layout.alignItems = .stretch; return c }
     public func alignSelf(_ a: AlignItems) -> Self { var c = self; c.layout.alignSelf = a; return c }
 
     public func justifyStart() -> Self { var c = self; c.layout.justifyContent = .start; return c }
@@ -2351,7 +2351,7 @@ public struct El<State> {
         return copy
     }
 
-    public func stickyLeft(_ offset: Float = 0) -> Self {
+    public consuming func stickyLeft(_ offset: Float = 0) -> Self {
         var copy = self
         let clean = offset.isFinite ? offset : 0
         var cfg = copy.stickyConfig ?? StickyConfig()
@@ -2389,7 +2389,7 @@ public struct El<State> {
 
     // MARK: - Visual Styling
 
-    public func bg(_ color: Color) -> Self {
+    public consuming func bg(_ color: Color) -> Self {
         var copy = self
         copy.background = color
         return copy
@@ -2594,7 +2594,7 @@ public struct El<State> {
         return copy
     }
 
-    public func hoverGroup() -> Self {
+    public consuming func hoverGroup() -> Self {
         var copy = self
         copy.isHoverGroup = true
         return copy
@@ -2707,7 +2707,7 @@ public struct El<State> {
 
     // MARK: - Typography Modifiers
 
-    public func font(_ style: TextStyle) -> Self {
+    public consuming func font(_ style: TextStyle) -> Self {
         var copy = self
         copy.textStyle = style
         return copy
@@ -2734,8 +2734,8 @@ public struct El<State> {
     public func letterSpacing(_ spacing: Float) -> Self { var c = self; c.textStyle.letterSpacing = spacing; return c }
     public func tracking(_ spacing: Float) -> Self { letterSpacing(spacing) }
     public func textAlign(_ align: TextAlign) -> Self { var c = self; c.textStyle.align = align; return c }
-    public func noWrap() -> Self { var c = self; c.textStyle.wrap = .noWrap; return c }
-    public func wrapText() -> Self { var c = self; c.textStyle.wrap = .wrap; return c }
+    public consuming func noWrap() -> Self { var c = self; c.textStyle.wrap = .noWrap; return c }
+    public consuming func wrapText() -> Self { var c = self; c.textStyle.wrap = .wrap; return c }
     public func wrap(_ mode: TextWrap) -> Self { var c = self; c.textStyle.wrap = mode; return c }
     public func ellipsis() -> Self {
         var c = self
@@ -2826,7 +2826,7 @@ public struct El<State> {
         return copy
     }
 
-    public func color(_ c: Color) -> Self {
+    public consuming func color(_ c: Color) -> Self {
         var copy = self
         copy.textColor = c
         return copy
@@ -2958,7 +2958,7 @@ public struct El<State> {
 
     // MARK: - Interaction, Focus & Accessibility
 
-    public func hover(_ bg: Color) -> Self {
+    public consuming func hover(_ bg: Color) -> Self {
         var copy = self
         copy.hoverBg = bg
         return copy
@@ -3332,8 +3332,8 @@ public struct El<State> {
         return copy
     }
 
-    public func role(_ r: ElementRole) -> Self { var c = self; c.role = r; return c }
-    public func label(_ l: String) -> Self { var c = self; c.a11yLabel = l; return c }
+    public consuming func role(_ r: ElementRole) -> Self { var c = self; c.role = r; return c }
+    public consuming func label(_ l: String) -> Self { var c = self; c.a11yLabel = l; return c }
     /// Zero-copy `label` from a compile-time `StaticString` literal (`El::label_static`).
     public func labelStatic(_ label: StaticString) -> Self { var c = self; c.a11yLabelCow = .staticString(label); return c }
     public func help(_ h: String) -> Self {
@@ -3440,7 +3440,7 @@ public struct El<State> {
         return c
     }
 
-    public func a11yHidden() -> Self {
+    public consuming func a11yHidden() -> Self {
         var c = self
         c.isA11yHidden = true
         return c
@@ -3453,7 +3453,7 @@ public struct El<State> {
     public func readOnly(_ on: Bool = true) -> Self { var c = self; c.a11yReadOnly = on; return c }
     public func sorted(_ ascending: Bool?) -> Self { var c = self; c.a11ySorted = ascending; return c }
     public func liveRegion(_ live: LiveRegionPoliteness?) -> Self { var c = self; c.a11yLive = live; return c }
-    public func positionInSet(_ position: Int, size: Int) -> Self { var c = self; c.a11yPosInSet = (position, size); return c }
+    public consuming func positionInSet(_ position: Int, size: Int) -> Self { var c = self; c.a11yPosInSet = (position, size); return c }
     public func shortcutHint(_ keys: String) -> Self { var c = self; c.a11yShortcutHint = keys; return c }
 
     /// The pointer shape shown while hovering or pressing this element (`el::layout::cursor`).
@@ -3716,7 +3716,7 @@ public struct El<State> {
 
     /// Called with `true` when the pointer enters this element's visible rect and `false` when
     /// it leaves (descendants included). Never acts as a hit blocker (`El::on_hover_change`).
-    public func onHoverChange(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
+    public consuming func onHoverChange(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
         var copy = self
         copy.handlers.onHoverChange = handler
         return copy

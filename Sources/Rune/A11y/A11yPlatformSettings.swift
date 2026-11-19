@@ -94,7 +94,7 @@ public enum AccessibilityRoleRules {
         return keyboardTarget ? .group : nil
     }
 
-    internal static func projectedRole<State>(for el: El<State>, takesFocus: Bool, keyboardTarget: Bool) -> ElementRole? {
+    internal static func projectedRole<State>(for el: borrowing El<State>, takesFocus: Bool, keyboardTarget: Bool) -> ElementRole? {
         projectedRole(el.role, keyed: el.keyId != nil, labelled: AccessibilityNameSource.nonblank(el.a11yLabel) != nil,
                       pressable: el.a11yPressable, takesFocus: takesFocus, keyboardTarget: keyboardTarget,
                       input: el.hasEditLens, modal: el.isModal, scrolls: !el.layout.scrollAxes.isEmpty,

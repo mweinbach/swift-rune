@@ -241,6 +241,24 @@ function sourceFamilies(doc, line) {
 // Only the exact regular face in the first CSS family can establish this
 // contract. A user-installed face or an explicitly configured feature/axis
 // can change both glyph selection and the range geometry.
+// Within one synchronous `rune_web_scene` frame, embedding-page scripts cannot
+// mutate `document.fonts`, `FontFace` descriptors, or host element CSS. Scoping
+// these two audits to the active scene batch keeps direct API calls 100% live
+// while avoiding 60x repeated `doc.fonts` scans and `getComputedStyle` calls per frame.
+let sceneBatchDepth = 0;
+let sceneBatchEpoch = 0;
+export function withRuneTextSceneBatch(fn) {
+    if (sceneBatchDepth === 0) ++sceneBatchEpoch;
+    ++sceneBatchDepth;
+    try {
+        return fn();
+    } finally {
+        --sceneBatchDepth;
+        if (sceneBatchDepth === 0) ++sceneBatchEpoch;
+    }
+}
+
+const fixedPitchAudit = new WeakMap();
 function fixedPitchSource(doc, line) {
     if (!line.offsets || line.text.length > 256 ||
         line.explicitDirection !== 'ltr' || line.lang || line.weight !== 400 || line.italic ||
@@ -254,6 +272,24 @@ function fixedPitchSource(doc, line) {
     if (alias && alias.source !== source) return null;
     const face = alias?.face ?? source.face;
     const aliasKey = alias?.family.toLowerCase();
+    if (sceneBatchDepth > 0) {
+        const epoch = `${sceneBatchEpoch}|${sourceCount}|${doc.fonts.size}`;
+        let audit = fixedPitchAudit.get(doc);
+        if (!audit || audit.epoch !== epoch) {
+            audit = { epoch, verdicts: new Map() };
+            fixedPitchAudit.set(doc, audit);
+        }
+        const auditKey = key + '\u0000' + (aliasKey ?? '');
+        const cached = audit.verdicts.get(auditKey);
+        if (cached !== undefined) return cached;
+        const live = auditFixedPitchFace(doc, source, face, key, aliasKey);
+        audit.verdicts.set(auditKey, live);
+        return live;
+    }
+    return auditFixedPitchFace(doc, source, face, key, aliasKey);
+}
+
+function auditFixedPitchFace(doc, source, face, key, aliasKey) {
     if (!doc.fonts.has(source.face) || !doc.fonts.has(face) || face.status !== 'loaded' ||
         face.weight !== '400' || face.style !== 'normal' || face.stretch !== 'normal' ||
         cssFamilyKey(face.family) !== (aliasKey ?? key) || source.face.unicodeRange.toUpperCase() !== 'U+0-10FFFF' ||
@@ -467,20 +503,36 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         return element;
     }
 
+    let hostFixedPitchValid = false;
+    let hostFixedPitchEpoch = -1;
     function fixedPitchStyleKey(line, source) {
         if (!explicitSpans) return null;
-        // The closed shelf owns its span styles. Its host and the document
-        // element can still be transformed or hidden by the embedding page.
-        for (const element of [root, doc.documentElement]) {
-            const style = doc.defaultView.getComputedStyle(element);
-            if (style.display === 'none' || style.contentVisibility === 'hidden' ||
-                style.transform !== 'none' || style.scale !== 'none' || style.rotate !== 'none' ||
-                style.translate !== 'none' || style.perspective !== 'none' ||
-                (style.zoom !== '1' && style.zoom !== 'normal')) return null;
+        // The closed shelf owns its span styles. Its host and the document element can
+        // still be transformed or hidden by the embedding page.
+        let valid;
+        if (sceneBatchDepth > 0 && hostFixedPitchEpoch === sceneBatchEpoch) {
+            valid = hostFixedPitchValid;
+        } else {
+            valid = true;
+            for (const element of [root, doc.documentElement]) {
+                const style = doc.defaultView.getComputedStyle(element);
+                if (style.display === 'none' || style.contentVisibility === 'hidden' ||
+                    style.transform !== 'none' || style.scale !== 'none' || style.rotate !== 'none' ||
+                    style.translate !== 'none' || style.perspective !== 'none' ||
+                    (style.zoom !== '1' && style.zoom !== 'normal')) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (sceneBatchDepth > 0) {
+                hostFixedPitchValid = valid;
+                hostFixedPitchEpoch = sceneBatchEpoch;
+            }
         }
+        if (!valid) return null;
         // The same certificate also scopes exact vertical ink bounds. A browser
         // without face-wide ascent can return a baseline specific to this line.
-        return [source.id, line.size, line.baseline, doc.defaultView.devicePixelRatio].join('/');
+        return `${source.id}/${line.size}/${line.baseline}/${doc.defaultView.devicePixelRatio}`;
     }
 
     function lineOrigin(line) {

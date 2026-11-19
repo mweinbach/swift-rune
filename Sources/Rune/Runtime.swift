@@ -32,6 +32,11 @@ internal struct FlatElement<State> {
         }
     }
 
+    @inline(__always)
+    func withValuePointer<R>(_ body: (UnsafePointer<El<State>>) -> R) -> R {
+        siblings.withUnsafeBufferPointer { buf in body(buf.baseAddress! + index) }
+    }
+
     var hasSiblings: Bool { siblings.count > 1 }
 
     mutating func detachFromSiblings() {
@@ -1189,7 +1194,7 @@ public final class Runtime<State> {
     internal var paintHitScopes: [RenderHitScope] = []
     internal var paintGlyphFixups: [GlyphUVFixup] = []
     internal var lastPaintInstanceCount = 0
-    internal var spareElementReports: [NativeElementReport<State>] = []
+    internal var spareElementReports: [PaintedElement] = []
     internal var spareFlatNodes: [FlatNode] = []
     internal var replayedFlatMemoNodes: Int { flatMemoPaths.values.reduce(0) { $0 + $1.replayedNodes } }
     internal var replayedVirtualFlatRoots: Int { flatMemoPaths.values.count(where: \.replayedRowRoot) }
@@ -1206,7 +1211,7 @@ public final class Runtime<State> {
     /// The last mounted state of nodes removed from the current tree, retained until their exit finishes.
     internal var exitingSnapshots: [NodeId: FlatNode] = [:]
     private var materializedElements: [ElementInfo] = []
-    internal var nativeElementReports: [NativeElementReport<State>]?
+    internal var nativeElementReports: NativeFrameReports<State>?
     internal var lastElements: [ElementInfo] {
         get {
             materializeElementReports()
@@ -1224,19 +1229,26 @@ public final class Runtime<State> {
 
     private func materializeElementReports() {
         guard let reports = nativeElementReports else { return }
+        if nativePaintOrderMatchesReports {
+            var paths: [String] = []
+            paths.reserveCapacity(reports.painted.count)
+            for i in reports.painted.indices { paths.append(reports.path(at: i)) }
+            storedPaintOrderPaths = paths
+            nativePaintOrderMatchesReports = false
+        }
         let poses = nativeInspection?.rawPoseByPath ?? [:]
-        materializedElements = NativeElementReport.materialize(reports, poses: poses)
+        materializedElements = reports.materialize(poses: poses)
         nativeElementReports = nil
     }
 
-    internal func publishElementReports(_ reports: [NativeElementReport<State>]) {
+    internal func publishElementReports(_ reports: NativeFrameReports<State>) {
         materializedElements = []
         var previous = nativeElementReports
         nativeElementReports = reports
-        if var previous = previous.take(), previous.capacity / 4 <= max(64, reports.count) {
-            // Keep only the allocation. Departed elements may own user callbacks.
-            previous.removeAll(keepingCapacity: true)
-            spareElementReports = previous
+        if var previous = previous.take(), previous.painted.capacity / 4 <= max(64, reports.painted.count) {
+            // `PaintedElement` is trivial POD: clearing its count releases nothing and keeps capacity.
+            previous.painted.removeAll(keepingCapacity: true)
+            spareElementReports = previous.painted
         }
     }
     internal var accessibilityProjectionCache: AccessibilityProjectionCache?
@@ -1246,8 +1258,59 @@ public final class Runtime<State> {
     internal var hitGeometryByPath = FrameGeometry<HitGeometry>() {
         didSet { pickCandidates = RepeatedPickCandidates() }
     }
-    internal var paintOrderPaths: [String] = [] {
-        didSet { pickCandidates = RepeatedPickCandidates() }
+    private var storedPaintOrderPaths: [String] = []
+    private var nativePaintOrder: NativePaintOrder<State>?
+    /// True when `nativeElementReports` itself is already in exact paint order (no raised reorder).
+    private var nativePaintOrderMatchesReports = false
+
+    internal var hasPaintOrder: Bool {
+        if nativePaintOrderMatchesReports { return !(nativeElementReports?.painted.isEmpty ?? true) }
+        if let nativePaintOrder { return !nativePaintOrder.slots.isEmpty }
+        return !storedPaintOrderPaths.isEmpty
+    }
+
+    internal func publishNativePaintOrder(_ explicit: NativePaintOrder<State>?) {
+        storedPaintOrderPaths = []
+        nativePaintOrder = explicit
+        nativePaintOrderMatchesReports = (explicit == nil)
+        pickCandidates = RepeatedPickCandidates()
+    }
+
+    @inline(__always)
+    internal func paintOrderPath(at index: Int) -> String {
+        if nativePaintOrderMatchesReports, let reports = nativeElementReports {
+            return reports.path(at: index)
+        }
+        if let nativePaintOrder {
+            return nativePaintOrder.path(at: index)
+        }
+        return storedPaintOrderPaths[index]
+    }
+
+    internal var paintOrderPaths: [String] {
+        get {
+            if nativePaintOrderMatchesReports, let reports = nativeElementReports {
+                var paths: [String] = []
+                paths.reserveCapacity(reports.painted.count)
+                for i in reports.painted.indices { paths.append(reports.path(at: i)) }
+                storedPaintOrderPaths = paths
+                nativePaintOrderMatchesReports = false
+                return paths
+            }
+            if let nativePaintOrder {
+                let paths = nativePaintOrder.materializePaths()
+                storedPaintOrderPaths = paths
+                self.nativePaintOrder = nil
+                return paths
+            }
+            return storedPaintOrderPaths
+        }
+        set {
+            nativePaintOrder = nil
+            nativePaintOrderMatchesReports = false
+            storedPaintOrderPaths = newValue
+            pickCandidates = RepeatedPickCandidates()
+        }
     }
     /// Atlas-space coverage adjustments collected only while a motion gate is recording.
     internal var motionRasterGlyphs: MotionGateRasterGlyphs?
@@ -3157,8 +3220,10 @@ public final class Runtime<State> {
         let maximumGroupHeight = wholeRows ? 8_388_608 : FixedVirtualRowLayout.maximumExactHeight
         // An auto-direction ancestor can read new rows until a descendant's explicit
         // direction isolates them. Keep these text leaves in its ordinary layout solve.
+        // Every container ancestor and every donor row already passed full rebuild checks,
+        // and `adoptFixedUnifiedLine` validates every layout style, text size and flex rule.
         let directionMayReadRows = ancestors.last { $0.explicitDir != nil }?.explicitDir == .auto
-        let canAdopt = !rebuilding && !directionMayReadRows
+        let canAdopt = !directionMayReadRows
         let isDirected = source.isUnmirrored || ancestors.contains { $0.explicitDir != nil || $0.isUnmirrored }
         let lineTextFlow: TextFlow? = isDirected ? .ltr : nil
         var donors: [FixedUnifiedLineKind: (El<State>, LayoutEngine.ResultNode)] = [:]
@@ -3639,6 +3704,9 @@ public final class Runtime<State> {
             // track can change this root's child slide between otherwise identical passes.
             if !growthRows.isEmpty, growthRows["growth:" + item.path]?.track.moving == true { return false }
             let previous = span.appliedRange(at: layoutCommitGen)
+                ?? (paths !== previousPaths ? previousPaths.span.flatMap { prevSpan in
+                    span.sharesProjection(with: prevSpan) ? prevSpan.appliedRange(at: layoutCommitGen) : nil
+                } : nil)
             guard (!checkFrameTracks && previous != nil) || span.nodes.allSatisfy({ stableForFlatReplay($0.nodeId) }) else { return false }
 
             let index = newFlat.count
@@ -5804,7 +5872,10 @@ public final class Runtime<State> {
                 animatedExitParents: slice2State.liveTailExitParents,
                 landWaitingNodes: commitKind.lands,
                 snapNewMounts: commitKind.snaps || commitCut,
-                retainingUnchanged: pass.isVirtualRemount
+                // A matched resting node's own presented value cannot change: its spec,
+                // local frame and tracks all rest, and any moving ancestor took the insert
+                // path, whose dirtiness cascades during presentation.
+                retainingUnchanged: true
             )
         }
         syncMotionLoops(specs: pass.loopSpecs, at: now, cut: activeSettleLoops)
@@ -6159,20 +6230,20 @@ public final class Runtime<State> {
         )
     }
 
-    internal func nodeTakesFocus(_ el: El<State>) -> Bool {
+    internal func nodeTakesFocus(_ el: borrowing El<State>) -> Bool {
         nodeTakesFocus(el, webFocus: cxSettings.viewDefaults.webFocus)
     }
 
-    internal func nodeTakesFocus(_ el: El<State>, webFocus: Bool) -> Bool {
+    internal func nodeTakesFocus(_ el: borrowing El<State>, webFocus: Bool) -> Bool {
         if el.a11yDisabled { return false }
         if el.focusable { return true }
-        let pressableRoles: Set<ElementRole> = [
-            .button, .tab, .checkbox, .switchControl, .radio, .menuItem, .listItem,
-        ]
-        return webFocus &&
-            !el.focusOptOut &&
-            (el.handlers.onClick != nil || el.handlers.onClickPress != nil || el.handlers.onPointerDown != nil) &&
-            pressableRoles.contains(el.role)
+        guard webFocus, !el.focusOptOut else { return false }
+        switch el.role {
+        case .button, .tab, .checkbox, .switchControl, .radio, .menuItem, .listItem:
+            return el.handlers.onClick != nil || el.handlers.onClickPress != nil || el.handlers.onPointerDown != nil
+        default:
+            return false
+        }
     }
 
     internal func updateScrollPositions(at now: Double) {
@@ -10662,9 +10733,10 @@ public final class Runtime<State> {
         predicate: ((FlatNode) -> Bool)? = nil
     ) -> (node: FlatNode, rect: MotionRect, localPoint: Vec2)? {
         let orderedPaths: [String]
-        if !paintOrderPaths.isEmpty {
+        if hasPaintOrder {
             orderedPaths = canRepaintDuringQuery ? paintOrderPaths :
-                pickCandidates.inputPaths(at: point, order: paintOrderPaths, geometry: hitGeometryByPath)
+                pickCandidates.inputPaths(at: point, geometry: hitGeometryByPath,
+                                          pathAt: { paintOrderPath(at: $0) }, fallback: { paintOrderPaths })
         } else {
             let sortedIndices = flatNodes.indices.sorted { a, b in
                 let za = flatNodes[a].zOrder
@@ -10730,8 +10802,9 @@ public final class Runtime<State> {
         predicate: (FlatNode) -> Bool
     ) -> [(node: FlatNode, rect: MotionRect, localPoint: Vec2)] {
         let orderedPaths: [String]
-        if !paintOrderPaths.isEmpty {
-            orderedPaths = pickCandidates.inputPaths(at: point, order: paintOrderPaths, geometry: hitGeometryByPath)
+        if hasPaintOrder {
+            orderedPaths = pickCandidates.inputPaths(at: point, geometry: hitGeometryByPath,
+                                                     pathAt: { paintOrderPath(at: $0) }, fallback: { paintOrderPaths })
         } else {
             let sortedIndices = flatNodes.indices.sorted { a, b in
                 let za = flatNodes[a].zOrder

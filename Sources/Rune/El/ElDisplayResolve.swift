@@ -455,13 +455,13 @@ internal enum ElDisplayResolver {
     }
 
     static func resolveText<State>(
-        el: El<State>,
+        el: borrowing El<State>,
         rawText: String?,
         isSecure: Bool,
         fallbackDirection: TextFlow? = nil
     ) -> ElResolvedText {
         var style = el.textStyle
-        if (el.runtimeExtras["htmlWrapAnywhere"] as? Bool == true) || (el.runtimeExtras["shell.wrapAnywhere"] as? Bool == true) {
+        if (el.runtimeExtra("htmlWrapAnywhere") as? Bool == true) || (el.runtimeExtra("shell.wrapAnywhere") as? Bool == true) {
             style.wrapAnywhere = true
             if style.wrap == .noWrap {
                 style.wrap = .wrap
@@ -477,7 +477,23 @@ internal enum ElDisplayResolver {
             style.align = .leading
         }
 
-        let authored = rawText ?? el.richSpans?.map(\.text).joined() ?? ""
+        let authored: String
+        if let rawText {
+            authored = rawText
+        } else if let rawSpans = el.richSpans, !rawSpans.isEmpty {
+            if rawSpans.count == 1 {
+                authored = rawSpans[0].text
+            } else {
+                var total = 0
+                for sp in rawSpans { total += sp.text.utf8.count }
+                var joined = ""
+                joined.reserveCapacity(total)
+                for sp in rawSpans { joined.append(sp.text) }
+                authored = joined
+            }
+        } else {
+            authored = ""
+        }
         let isHiddenSecure = isSecure && !el.isRevealed && !authored.isEmpty
         let caseMode: TextCase? = isHiddenSecure ? nil : el.textCaseValue
 

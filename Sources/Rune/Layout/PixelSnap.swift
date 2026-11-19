@@ -489,7 +489,7 @@ public enum PixelSnap {
 
     /// Whether a box paints a visible fill/border/gradient that its children's gaps show against.
     public static func frames<State>(
-        _ el: El<State>,
+        _ el: borrowing El<State>,
         effectiveFill: Color? = nil,
         effectiveBorder: Color? = nil
     ) -> Bool {

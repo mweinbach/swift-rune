@@ -26,9 +26,9 @@ internal struct AccessibilityNameSource {
         return text
     }
 
-    static func words<Node>(
-        of node: Node, source: (Node) -> Self, children: (Node) -> [Node]
-    ) -> String? {
+    static func words<Node, Children: Sequence>(
+        of node: Node, source: (Node) -> Self, children: (Node) -> Children
+    ) -> String? where Children.Element == Node {
         let root = source(node)
         guard !root.secure else { return nil }
         if let label = nonblank(root.label) { return label }
@@ -70,9 +70,9 @@ internal struct AccessibilityNameSource {
     }
 
     /// Look for a referenced key inside the nearest common ancestor first.
-    static func relatedIndex(
-        _ key: String, from index: Int, parent: (Int) -> Int?, children: (Int) -> [Int], keyAt: (Int) -> String?
-    ) -> Int? {
+    static func relatedIndex<Children: Sequence>(
+        _ key: String, from index: Int, parent: (Int) -> Int?, children: (Int) -> Children, keyAt: (Int) -> String?
+    ) -> Int? where Children.Element == Int {
         func find(in scope: Int) -> Int? {
             for child in children(scope) {
                 if child != index, matchesAuthoredKey(keyAt(child), key) { return child }
