@@ -57,7 +57,8 @@ inline std::vector<RuneGPUIDs> displays() {
 inline HRESULT choose(IDXGIFactory1 *factory, const LUID *required, bool presented,
                       ComPtr<IDXGIAdapter1> &selected, const char *&reason, HMONITOR surfaceMonitor = nullptr) {
     selected.Reset();
-    struct Candidate { ComPtr<IDXGIAdapter1> adapter; DXGI_ADAPTER_DESC1 desc; std::string name; };
+    struct Candidate { ComPtr<IDXGIAdapter1> adapter; DXGI_ADAPTER_DESC1 desc; std::string name; bool software; };
+    std::vector<Candidate> all;
     std::vector<Candidate> choices;
     for (UINT i = 0;; ++i) {
         ComPtr<IDXGIAdapter1> a;
@@ -70,21 +71,36 @@ inline HRESULT choose(IDXGIFactory1 *factory, const LUID *required, bool present
             if (required->LowPart == desc.AdapterLuid.LowPart && required->HighPart == desc.AdapterLuid.HighPart) {
                 selected = a; reason = "WGL surface LUID"; return S_OK;
             }
-        } else if (!(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) choices.push_back({a, desc, lowerUTF8(desc.Description)});
+        } else {
+            bool sw = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+            Candidate c{a, desc, lowerUTF8(desc.Description), sw};
+            all.push_back(c);
+            if (!sw) choices.push_back(std::move(c));
+        }
     }
-    if (required || choices.empty()) return DXGI_ERROR_NOT_FOUND;
+    if (required) return DXGI_ERROR_NOT_FOUND;
+    std::string value;
+    // WGPU_ADAPTER_NAME searches all DXGI adapters (software adapters included, e.g. WARP)
+    // and is final: never fall through to another GPU when no adapter matches (#1286).
+    if (environment(L"WGPU_ADAPTER_NAME", value)) {
+        std::vector<RuneGPUAdapter> allInfos;
+        allInfos.reserve(all.size());
+        for (const auto &c : all) {
+            allInfos.push_back({c.name.c_str(), "", c.desc.VendorId, c.desc.DeviceId,
+                                c.software ? RuneGPUCPU : RuneGPUOther, true, false});
+        }
+        int index = rune_gpu_by_name(allInfos.data(), (int)allInfos.size(), value.c_str());
+        if (index >= 0) { selected = all[index].adapter; reason = "WGPU_ADAPTER_NAME"; return S_OK; }
+        return DXGI_ERROR_NOT_FOUND;
+    }
+    if (choices.empty()) return DXGI_ERROR_NOT_FOUND;
     std::vector<RuneGPUAdapter> infos;
     for (const auto &c : choices) infos.push_back({c.name.c_str(), "", c.desc.VendorId, c.desc.DeviceId, RuneGPUOther, true, false});
-    std::string value;
-    if (environment(L"WGPU_ADAPTER_NAME", value)) {
-        int index = rune_gpu_by_name(infos.data(), (int)infos.size(), value.c_str());
-        if (index >= 0) { selected = choices[index].adapter; reason = "WGPU_ADAPTER_NAME"; return S_OK; }
-    }
     bool power = environment(L"WGPU_POWER_PREF", value) && (value == "high" || value == "low" || value == "none");
-    if (!power && presented) {
+    if (!power) {
         // The current WGL DC already belongs to a window. Preserve the actual
         // monitor's adapter for a secondary display when the driver omitted its LUID.
-        if (surfaceMonitor) {
+        if (presented && surfaceMonitor) {
             for (const auto &c : choices) {
                 for (UINT j = 0;; ++j) {
                     ComPtr<IDXGIOutput> output;
@@ -96,9 +112,15 @@ inline HRESULT choose(IDXGIFactory1 *factory, const LUID *required, bool present
                 }
             }
         }
+        // Every device takes the GPU driving the primary display; `presented` only names the reason (#1286).
         auto ids = displays();
         int index = rune_gpu_by_display(infos.data(), (int)infos.size(), ids.data(), (int)ids.size());
-        if (index >= 0) { selected = choices[index].adapter; reason = "desktop display"; return S_OK; }
+        if (index >= 0) {
+            selected = choices[index].adapter;
+            reason = presented ? "the GPU driving the primary display"
+                               : "the GPU a window would get (it drives the primary display)";
+            return S_OK;
+        }
     }
     ComPtr<IDXGIFactory6> modern;
     if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&modern)))) {

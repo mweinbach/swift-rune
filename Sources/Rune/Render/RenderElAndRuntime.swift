@@ -761,7 +761,8 @@ extension Runtime {
             Theme.withBlend(srgbBlend) {
                 let interactionStart = interactionFrameBegins()
                 frameHadCommitted = false
-                lastWasSettled = false
+                lastWasSettled = pendingSettledBeforeInput
+                pendingSettledBeforeInput = false
                 let timer = beginFrameTimers(at: now)
                 var (frameOut, animNow) = stepToFrameOutputScaled(at: now, skipFramePoll: timer.alreadyPolled)
                 func paint() -> RenderFrame {
@@ -804,6 +805,7 @@ extension Runtime {
         if publishHitGeometry { kitHooks.unseenPresence.beginFrame() }
         activePaintedLoopWake = nil
         activePaintedLoopsAnimating = false
+        beginAnimatedIconFrame()
         beginPixelPaint()
         defer { finishPixelPaint() }
         beginPaintGlyphFrame(pinnedMask: 0)
@@ -1109,6 +1111,32 @@ extension Runtime {
             return false
         }
 
+        let scaledAnimNow = cxSettings.scaledTime(at: now)
+        func hasLiveAnimatedIconOnNode(_ n: FlatNode) -> Bool {
+            guard !reducedMotion, textSystem.hasAnimatedIcons else { return false }
+            if let (svg, _) = n.el.iconPayload {
+                let mountT = iconMountTime(node: n.nodeId, icon: svg, fallback: scaledAnimNow)
+                if textSystem.iconAnimLive(svg, at: scaledAnimNow, mountTime: mountT) {
+                    return true
+                }
+            }
+            if let shaped = nodeTextLayouts[n.nodeId]?.box.shaped {
+                for chip in shaped.pillChips {
+                    if let svg = chip.icon,
+                       textSystem.iconAnimLive(svg, at: scaledAnimNow, mountTime: iconMountTime(node: n.nodeId, icon: svg, fallback: scaledAnimNow)) {
+                        return true
+                    }
+                }
+                for inline in shaped.inlineIcons {
+                    if let svg = inline.icon,
+                       textSystem.iconAnimLive(svg, at: scaledAnimNow, mountTime: iconMountTime(node: n.nodeId, icon: svg, fallback: scaledAnimNow)) {
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+
         @inline(never)
         func hasDynamicInSubtree(_ node: FlatNode) -> Bool {
             subtreeContains(node) { n in
@@ -1128,6 +1156,7 @@ extension Runtime {
                 || n.el.runtimeExtra(RenderExtrasKey.effectSpec) != nil
                 || n.el.runtimeExtra("systemMaterial") != nil
                 || n.el.backdropBlur > 0
+                || hasLiveAnimatedIconOnNode(n)
             }
         }
 
@@ -1136,6 +1165,7 @@ extension Runtime {
         }
 
         func emitTextBackdropsAndPills(
+            nodeId: NodeId,
             shaped: ShapedText,
             textLeft: Float,
             textTop: Float,
@@ -1228,14 +1258,39 @@ extension Runtime {
             }
             func emitMask(_ svg: SVGIcon, rect: SIMD4<Float>, color: Color) {
                 let pxSize = max(4, Int((min(rect.z, rect.w) * rasterScale * scale).rounded()))
-                let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
+                let dstRect = deviceRect(rect)
                 let tint = premulSIMD4(color, opacity: localOpacity, srgb: srgbBlend)
-                appendIcon(entry, rect: deviceRect(rect), ink: tint, clip: clipEdges, fade: fade, rotated: rotated)
+                if !reducedMotion, textSystem.iconKind(svg) == .animatedMono,
+                   let anim = sampleAnimatedIcon(
+                       svg,
+                       nodeId: nodeId,
+                       pixelSize: pxSize,
+                       drawnSize: nil,
+                       origin: SIMD2<Float>(dstRect.x, dstRect.y),
+                       mirrored: false,
+                       color: color,
+                       opacity: localOpacity,
+                       at: now
+                   ) {
+                    appendIcon(
+                        anim.entry,
+                        rect: dstRect,
+                        ink: tint,
+                        clip: clipEdges,
+                        fade: fade,
+                        rotated: rotated,
+                        animatedRecord: anim.state == .finished ? nil : (nodeId, svg, pxSize, nil, false)
+                    )
+                    return
+                }
+                let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
+                appendIcon(entry, rect: dstRect, ink: tint, clip: clipEdges, fade: fade, rotated: rotated)
             }
         }
 
         func appendIcon(_ entry: GlyphAtlas.Entry, rect: SIMD4<Float>, ink: SIMD4<Float>,
-                        clip: SIMD4<Float>, fade: SIMD4<UInt32>, rotated: Bool = false) {
+                        clip: SIMD4<Float>, fade: SIMD4<UInt32>, rotated: Bool = false,
+                        animatedRecord: (node: NodeId, icon: SVGIcon, pixelSize: Int, drawnSize: Float?, mirrored: Bool)? = nil) {
             guard entry.uv != .zero else { return }
             let pixels = SIMD2(Float(entry.pixelSize.x), Float(entry.pixelSize.y))
             let near: (Float) -> Bool = { abs($0 - $0.rounded()) < 1.0 / 512 }
@@ -1251,10 +1306,24 @@ extension Runtime {
                 uv += SIMD4(-du, -dv, du, dv)
                 if motionRasterGlyphs != nil { motionGlyphMasks[SIMD3(uv.x, uv.y, Float(entry.page))] = 0 }
             }
-            glyphFixups.append((instances.count, uv, box.z, box.w, entry.page, !aligned))
+            let slotIndex = instances.count
+            glyphFixups.append((slotIndex, uv, box.z, box.w, entry.page, !aligned))
             instances.append(RenderInstance(rect: box, radii: .zero, fill: ink, border: .zero,
                                             params: SIMD4(0, KIND_GLYPH, 0, 1), uv: uv, clip: clip, fade: fade))
             marks.append(0)
+            if let rec = animatedRecord {
+                cyclePaint.recordIcon(
+                    node: rec.node,
+                    index: slotIndex,
+                    icon: rec.icon,
+                    pixelSize: rec.pixelSize,
+                    drawnSize: rec.drawnSize,
+                    origin: SIMD2<Float>(rect.x, rect.y),
+                    mirrored: rec.mirrored,
+                    aligned: aligned,
+                    rect: box
+                )
+            }
         }
 
         var labelRasters = TextBoxGeometry.ScaledLabelRasters()
@@ -1552,6 +1621,7 @@ extension Runtime {
                 || el.runtimeExtra(RenderExtrasKey.effectSpec) != nil
                 || el.runtimeExtra("systemMaterial") != nil
                 || el.backdropBlur > 0
+                || hasLiveAnimatedIconOnNode(node)
 
             var liveOpacity: Float? = nil
             var liveScale: Vec2? = nil
@@ -2190,6 +2260,7 @@ extension Runtime {
                 fnvMixFloat(&nodePaintHash, scale)
                 fnvMix(&nodePaintHash, srgbBlend ? 1 : 0)
                 fnvMix(&nodePaintHash, focusVisible ? 1 : 0)
+                fnvMix(&nodePaintHash, inputMachines.focusMachine.enteredByKeys ? 1 : 0)
                 fnvMix(&nodePaintHash, hovered ? 1 : 0)
                 fnvMix(&nodePaintHash, pressed ? 1 : 0)
                 fnvMix(&nodePaintHash, focused ? 1 : 0)
@@ -3150,7 +3221,66 @@ extension Runtime {
             if let (svg, iconSizePt) = el.iconPayload {
                 let iconPx = max(1, Int((iconSizePt * scale).rounded()))
                 let iconColor = applyPressColor(pressTint.color, to: liveTextColor ?? paintStore.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? defaultForeground, frac: pressTint.frac)
-                if let colorDecoded = textSystem.colorIcons.rasterize(
+                let iconKind = textSystem.iconKind(svg)
+                if iconKind == .animatedMono, !reducedMotion {
+                    let col = premulSIMD4(iconColor, opacity: localOpacity, srgb: srgbBlend)
+                    let rotated = parentIsRotated || abs(el.rotate) > 1e-4
+                    let exactSide = min(effRect.width, effRect.height) * scale
+                    let restingExact = !rotated && nodeScaleMotion == .still && unscaled && !boxGliding && !inFlight
+                        && abs(exactSide - iconSizePt * scale) < 1.0 / 512.0
+                        && abs(paintStore.get(nid, Props.ICON_TURN) ?? el.iconRotation) < 1e-6
+                    let canvas = restingExact && exactSide > 1e-4 ? max(1, Int(ceil(exactSide - 1.0 / 64.0))) : iconPx
+                    let drawnSide: Float? = restingExact && exactSide > 1e-4 ? exactSide : nil
+                    let pw = Float(canvas)
+                    let ph = Float(canvas)
+                    let ix: Float
+                    let iy: Float
+                    if restingExact && exactSide > 1e-4 {
+                        let contain = inheritedSnap.contain * scale
+                        ix = PixelSnap.onGrid(exactEdgesPx.x + (effRect.width * scale - exactSide) * 0.5, contain: contain.x)
+                        iy = PixelSnap.onGrid(exactEdgesPx.y + (effRect.height * scale - exactSide) * 0.5, contain: contain.y)
+                    } else {
+                        ix = rectPx.x + (rectPx.z - pw) * 0.5
+                        iy = rectPx.y + (rectPx.w - ph) * 0.5
+                    }
+                    if let anim = sampleAnimatedIcon(
+                        svg,
+                        nodeId: nid,
+                        pixelSize: canvas,
+                        drawnSize: drawnSide,
+                        origin: SIMD2<Float>(ix, iy),
+                        mirrored: node.mirroredInRtl,
+                        color: iconColor,
+                        opacity: localOpacity,
+                        at: now
+                    ) {
+                        appendIcon(
+                            anim.entry,
+                            rect: SIMD4(ix, iy, Float(anim.entry.pixelSize.x), Float(anim.entry.pixelSize.y)),
+                            ink: col,
+                            clip: activeClip,
+                            fade: activeFade,
+                            rotated: rotated,
+                            animatedRecord: anim.state == .finished ? nil : (nid, svg, canvas, drawnSide, node.mirroredInRtl)
+                        )
+                    } else {
+                        let placed = textSystem.glyphAtlas.rasterizeIcon(
+                            svg,
+                            pixelSize: canvas,
+                            drawnSize: drawnSide,
+                            mirrored: node.mirroredInRtl
+                        )
+                        appendIcon(
+                            placed,
+                            rect: SIMD4(ix, iy, Float(placed.pixelSize.x), Float(placed.pixelSize.y)),
+                            ink: col,
+                            clip: activeClip,
+                            fade: activeFade,
+                            rotated: rotated
+                        )
+                    }
+                } else if iconKind == .color,
+                   let colorDecoded = textSystem.colorIcons.rasterize(
                     svg,
                     pixelSize: iconPx,
                     currentColor: iconColor,
@@ -3286,6 +3416,7 @@ extension Runtime {
                     )
                 }
                 emitTextBackdropsAndPills(
+                    nodeId: nid,
                     shaped: shaped,
                     textLeft: textLeft,
                     textTop: textTop,
@@ -3592,6 +3723,7 @@ extension Runtime {
                     marks.append(0)
                 }
                 emitTextBackdropsAndPills(
+                    nodeId: nid,
                     shaped: shaped,
                     textLeft: textLeft,
                     textTop: textTop,
@@ -4387,6 +4519,7 @@ extension Runtime {
             isAnimating = true
             animSources |= AnimSource.loop
         }
+        finishAnimatedIconFrame(at: now)
 
         let clear = clearColor.simd4(srgb: srgbBlend)
         var output = RenderFrame(

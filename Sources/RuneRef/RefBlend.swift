@@ -47,7 +47,7 @@ public enum RefBlend {
                     if b <= 0.25 {
                         d = ((16.0 * b - 12.0) * b + 4.0) * b
                     } else {
-                        d = sqrtf(b)
+                        d = sqrtf(max(b, 0.0))
                     }
                     blended = b + (2.0 * s - 1.0) * (d - b)
                 }

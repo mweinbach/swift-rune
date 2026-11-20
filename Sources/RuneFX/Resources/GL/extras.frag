@@ -103,7 +103,7 @@ vec4 shade_extras(
 void main() {
     Globals g = fxGlobals;
     BackdropEncoding enc = fxBackdrop;
-    vec2 pixel = runePixel;
+    vec2 pixel = recover_pixel(g);
     Inst i = fxInstance;
     vec4 shaded = shade_extras(pixel, i, g, uTex1, enc);
     fragColor = fx_fs(shaded, i, pixel, g, uTex0, enc);

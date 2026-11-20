@@ -49,6 +49,87 @@ function setFont(box, font) {
     style.overflowWrap = 'break-word';
 }
 
+// Detects how this browser represents `Element.scrollLeft` on a `direction: rtl` container:
+// - 'negative': 0 at the right (start) edge, -(scrollWidth - clientWidth) at the left (end) edge
+//   (CSSOM View standard: Chromium >= 85, Firefox, Safari >= 15.4).
+// - 'reverse':  0 at the right (start) edge, +(scrollWidth - clientWidth) at the left (end) edge
+//   (legacy Edge / IE).
+// - 'default':  +(scrollWidth - clientWidth) at the right (start) edge, 0 at the left (end) edge
+//   (legacy Blink / WebKit).
+let rtlScrollType = null;
+export function detectRtlScrollType(doc = globalThis.document) {
+    if (rtlScrollType) return rtlScrollType;
+    const host = doc?.body ?? doc?.documentElement;
+    if (!host) return 'negative';
+    const outer = doc.createElement('div');
+    outer.dir = 'rtl';
+    outer.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:40px;height:40px;overflow-x:scroll;overflow-y:hidden;scrollbar-width:none;visibility:hidden;pointer-events:none;';
+    const inner = doc.createElement('div');
+    inner.style.cssText = 'width:80px;height:1px;';
+    outer.append(inner);
+    host.append(outer);
+    let type = 'negative';
+    if (outer.scrollWidth > outer.clientWidth) {
+        if (outer.scrollLeft > 0) {
+            type = 'default';
+        } else {
+            outer.scrollLeft = 1;
+            type = outer.scrollLeft === 0 ? 'negative' : 'reverse';
+        }
+        rtlScrollType = type;
+    }
+    outer.remove();
+    return type;
+}
+
+function isRtl(el) {
+    if (el.dir === 'rtl') return true;
+    if (el.dir === 'ltr') return false;
+    return globalThis.getComputedStyle?.(el).direction === 'rtl';
+}
+
+// Normalizes `el.scrollLeft` into Rune's logical horizontal scroll offset (0 at the inline-start
+// edge, growing toward the inline-end edge up to `scrollWidth - clientWidth`).
+export function readScrollX(el) {
+    const raw = el.scrollLeft;
+    if (!Number.isFinite(raw)) return 0;
+    const max = Math.max(0, el.scrollWidth - el.clientWidth);
+    if (!isRtl(el)) return Math.min(Math.max(raw, 0), max);
+    const type = detectRtlScrollType(el.ownerDocument);
+    const logical = type === 'negative' ? -raw : type === 'default' ? max - raw : raw;
+    return Math.min(Math.max(logical, 0), max);
+}
+
+// Converts Rune's logical horizontal scroll offset (`0..=max`) into the DOM `scrollLeft` value
+// expected by `el`'s direction and browser RTL scroll model.
+export function domScrollLeft(el, x) {
+    if (!Number.isFinite(x)) return 0;
+    const max = Math.max(0, el.scrollWidth - el.clientWidth);
+    const clamped = Math.min(Math.max(x, 0), max);
+    if (!isRtl(el)) return clamped;
+    const type = detectRtlScrollType(el.ownerDocument);
+    if (type === 'negative') return clamped === 0 ? 0 : -clamped;
+    if (type === 'default') return max - clamped;
+    return clamped;
+}
+
+// Mirrors a horizontal viewport's direction and logical offset from Rune into the DOM container.
+export function applyScrollX(record, x, rtl) {
+    const box = record?.box;
+    if (!box) return;
+    if (rtl !== undefined) {
+        const dir = rtl ? 'rtl' : 'ltr';
+        if (box.dir !== dir) box.dir = dir;
+    }
+    const target = domScrollLeft(box, x);
+    if (Math.abs(box.scrollLeft - target) > 0.5) box.scrollLeft = target;
+    if (record.pageScroll) {
+        record.pageScroll.requested = Math.max(0, Number.isFinite(x) ? x : 0);
+        record.pageScroll.pending = false;
+        record.pageScroll.seen = readScrollX(box);
+    }
+}
+
 function syncScroller(record, node, send) {
     const { box } = record;
     if (!Number.isFinite(node.pageContentWidth)) {
@@ -66,13 +147,13 @@ function syncScroller(record, node, send) {
     let scroll = record.pageScroll;
     if (!scroll) {
         const spacer = box.ownerDocument.createElement('span');
-        spacer.style.cssText = 'position:absolute;left:0;top:0;height:1px;pointer-events:none';
+        spacer.style.cssText = 'position:absolute;inset-inline-start:0;top:0;height:1px;pointer-events:none';
         spacer.setAttribute('aria-hidden', 'true');
         box.append(spacer);
         record.spacer = spacer;
         scroll = { requested: undefined, pending: false, seen: 0 };
         scroll.listener = () => {
-            const offset = box.scrollLeft;
+            const offset = readScrollX(box);
             if (Math.abs(offset - scroll.seen) <= 0.5) return;
             scroll.seen = offset;
             send({ kind: 'pageScrollX', key: node.path, x: offset });
@@ -80,6 +161,13 @@ function syncScroller(record, node, send) {
         box.setAttribute('data-rune-scroll-x', '');
         box.addEventListener('scroll', scroll.listener, { passive: true });
         record.pageScroll = scroll;
+    }
+    if (node.rtl !== undefined || node.dir !== undefined) {
+        const dir = (node.rtl === true || node.dir === 'rtl') ? 'rtl' : 'ltr';
+        if (box.dir !== dir) {
+            box.dir = dir;
+            scroll.pending = true;
+        }
     }
     const width = Math.max(0, node.pageContentWidth) + 'px';
     if (record.spacer.style.width !== width) record.spacer.style.width = width;
@@ -193,9 +281,10 @@ export function finishDocumentNode(record, slots) {
     const { box, node, pageScroll } = record;
     if (pageScroll?.pending) {
         pageScroll.pending = false;
-        box.scrollLeft = pageScroll.requested;
+        const target = domScrollLeft(box, pageScroll.requested);
+        if (Math.abs(box.scrollLeft - target) > 0.5) box.scrollLeft = target;
         // The browser can clamp this offset at the end, and delivers its scroll event later.
-        pageScroll.seen = box.scrollLeft;
+        pageScroll.seen = readScrollX(box);
     }
     const content = node.documentText ?? node.name ?? '';
     if ((node.role === 'heading' || node.role === 'text') && layoutInlineLinks(record, slots, content)) return;

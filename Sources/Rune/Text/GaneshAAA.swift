@@ -771,14 +771,17 @@ internal enum GaneshAAA {
         guard edges.count > 2 else { return }
         let cw = clip.2 - clip.0, ch = clip.3 - clip.1
         let masked = cw <= 32 && ((cw + 3) & ~3) * ch <= 1024
-        let iw = ir.2 - ir.0, ih = ir.3 - ir.1
-        let mask = AAAMask(w: Int(iw), left: ir.0, top: ir.1, count: Int(iw * ih + 2))
+        let iw = Int64(ir.2) - Int64(ir.0), ih = Int64(ir.3) - Int64(ir.1)
+        if iw <= 0 || ih <= 0 || iw > 2048 || ih > 2048 || iw * ih > 1024 * 1024 {
+            return
+        }
+        let mask = AAAMask(w: Int(iw), left: ir.0, top: ir.1, count: Int(iw * ih) + 2)
         sortAndLink(&edges)
         let skipIntersect = path.points.count > Int(ch * 2)
         walkEdges(&edges, rule: rule, mask: mask, startY: ir.1, stopY: ir.3, leftClip: ir.0 << 16, rightClip: ir.2 << 16, skipIntersect: skipIntersect)
         for y in clip.1..<clip.3 {
             for x in clip.0..<clip.2 {
-                let a = mask.data[1 + Int((y - ir.1) * iw + x - ir.0)]
+                let a = mask.data[1 + Int(y - ir.1) * Int(iw) + Int(x - ir.0)]
                 out[Int(y) * w + Int(x)] = masked ? a : snapAlpha(a)
             }
         }

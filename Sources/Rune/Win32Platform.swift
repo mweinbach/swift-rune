@@ -667,9 +667,9 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
     }
 
     private func foundWindow(seen: Bool, at now: Double, wall: Double) {
-        let moving = !seen && (!runtime.reducedMotion && runtime.loopRuntime.tracks.keys.contains {
+        let moving = !seen && (!runtime.reducedMotion && (runtime.animatedIconsShown || runtime.loopRuntime.tracks.keys.contains {
             runtime.kitHooks.unseenPresence.frameById[$0]?.inView == true
-        } || app.compositorValue?.isAnimating == true)
+        }) || app.compositorValue?.isAnimating == true)
         look.found(seen: seen, moving: moving, at: wall)
         guard cover.canDraw != seen else { return }
         _ = cover.setCover(.windows, on: !seen, runtime: runtime, at: now)

@@ -1,9 +1,9 @@
 {
   "swiftExecutables" : 99,
   "swiftTargets" : 19,
-  "syncedAt" : "2026-11-19T18:39:38Z",
-  "syncedCommit" : "f54cbcfa84d995d339c243a579218f5062c940b5",
-  "syncedCommitDate" : "2026-11-19T04:16:09-06:00",
-  "syncedCommitSubject" : "refactor: split the last four framework files over 800 lines (#1237)",
+  "syncedAt" : "2026-11-20T20:53:08Z",
+  "syncedCommit" : "eff95e80c328943deeeef0355485c06c3d71ecf0",
+  "syncedCommitDate" : "2026-11-20T10:58:23-06:00",
+  "syncedCommitSubject" : "feat(rune-text,rune): animate monochrome SMIL SVG icons with partial damage (#1291)",
   "upstreamRepo" : "https:\/\/github.com\/anomalyco\/rune"
 }

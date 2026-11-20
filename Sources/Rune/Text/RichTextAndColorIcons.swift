@@ -1088,6 +1088,14 @@ public enum SVGIconRenderer {
 public final class ColorIconRasterizer: @unchecked Sendable {
     private static let budgetBytes = 4 * 1024 * 1024
 
+    private enum Kind: Equatable {
+        case mono
+        case animatedMono
+        case color
+        /// Its own colours, and `currentColor` parts that take the element's colour.
+        case colorAndCurrent
+    }
+
     private struct CacheKey: Hashable {
         var icon: SVGIcon
         var px: Int
@@ -1102,6 +1110,8 @@ public final class ColorIconRasterizer: @unchecked Sendable {
     }
 
     private let lock = NSLock()
+    /// What each swapped icon paints with, cached once per distinct icon body.
+    private var kinds: [SVGIcon: Kind] = [:]
     private var cache: [CacheKey: CacheEntry] = [:]
     private var totalBytes: Int = 0
 
@@ -1119,8 +1129,67 @@ public final class ColorIconRasterizer: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Classifies `icon` (after applying any active icon swap) in a single cached lookup.
+    /// On first encounter of a monochrome animated icon, compiles and caches its bounded AST.
+    /// Multi-colour icons stay static even if they contain SMIL tags (logged once in debug builds).
+    internal func iconKind(_ icon: SVGIcon, animated: SVGAnimatedIcons) -> SVGIconKind {
+        let (resolved, _) = IconSwapRegistry.resolvedIcon(for: icon)
+        if resolved.body == nil {
+            return .mono
+        }
+        switch classify(resolved, animated: animated) {
+        case .mono: return .mono
+        case .animatedMono: return .animatedMono
+        case .color, .colorAndCurrent: return .color
+        }
+    }
+
+    private func classify(_ icon: SVGIcon, animated: SVGAnimatedIcons?) -> Kind {
+        guard let body = icon.body else {
+            return .mono
+        }
+        lock.lock()
+        if let cached = kinds[icon] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let classified: Kind
+        if icon.isColorIcon {
+            #if DEBUG && !os(WASI)
+            if SVGIconAnimParser.mayBeAnimated(body) {
+                RuneStandardIO.error("rune: multi-colour icon contains SVG animation elements; colour icon animation is ignored and the icon renders static\n")
+            }
+            #endif
+            classified = body.contains("currentColor") ? .colorAndCurrent : .color
+        } else if let animated, SVGIconAnimParser.mayBeAnimated(body) {
+            if case .animated(let plan) = SVGIconAnimParser.compile(body, viewBox: icon.viewBox),
+               animated.insertPlan(icon, plan) {
+                classified = .animatedMono
+            } else {
+                classified = .mono
+            }
+        } else {
+            classified = .mono
+        }
+
+        // Only cache non-color animated candidates when an `SVGAnimatedIcons` registry participated,
+        // so standalone `ColorIconRasterizer.rasterize` calls never mask later animated compilation.
+        if animated != nil || classified == .color || classified == .colorAndCurrent || !SVGIconAnimParser.mayBeAnimated(body) {
+            lock.lock()
+            let existing = kinds[icon]
+            if existing == nil {
+                kinds[icon] = classified
+            }
+            lock.unlock()
+            return existing ?? classified
+        }
+        return classified
+    }
+
     /// Rasterizes a multi-color `SVGIcon` (or silhouette in `oneColor`) into a `DecodedImage` (`RGBA8` premultiplied).
-    /// Returns `nil` when the icon is strictly monochrome and `oneColor == nil`.
+    /// Returns `nil` for monochrome icons (static or animated), which draw from the glyph atlas.
     public func rasterize(
         _ icon: SVGIcon,
         pixelSize: Int,
@@ -1128,13 +1197,34 @@ public final class ColorIconRasterizer: @unchecked Sendable {
         oneColor: Color? = nil,
         mirrored: Bool = false
     ) -> DecodedImage? {
-        guard icon.isColorIcon || oneColor != nil, let body = icon.body else {
+        rasterize(icon, pixelSize: pixelSize, currentColor: currentColor, oneColor: oneColor, mirrored: mirrored, animated: nil)
+    }
+
+    internal func rasterize(
+        _ icon: SVGIcon,
+        pixelSize: Int,
+        currentColor: Color = .white,
+        oneColor: Color? = nil,
+        mirrored: Bool = false,
+        animated: SVGAnimatedIcons?
+    ) -> DecodedImage? {
+        let (resolved, _) = IconSwapRegistry.resolvedIcon(for: icon)
+        guard let body = resolved.body else {
             return nil
         }
+        let kind = classify(resolved, animated: animated)
+        let tintKey: String
+        switch kind {
+        case .mono, .animatedMono:
+            return nil
+        case .color:
+            tintKey = oneColor.map { "one/" + $0.hexKey } ?? ""
+        case .colorAndCurrent:
+            tintKey = oneColor.map { "one/" + $0.hexKey } ?? currentColor.hexKey
+        }
         let px = max(1, pixelSize)
-        guard px <= LinearMipGenerator.maxDecodeDimension, icon.viewBox.isFinite, icon.viewBox > 0 else { return nil }
-        let tintKey = currentColor.hexKey + (oneColor.map { "/" + $0.hexKey } ?? "")
-        let key = CacheKey(icon: icon, px: px, tintKey: tintKey, mirrored: mirrored)
+        guard px <= LinearMipGenerator.maxDecodeDimension, resolved.viewBox.isFinite, resolved.viewBox > 0 else { return nil }
+        let key = CacheKey(icon: resolved, px: px, tintKey: tintKey, mirrored: mirrored)
         lock.lock()
         if var entry = cache[key] {
             entry.used = true
@@ -1144,7 +1234,7 @@ public final class ColorIconRasterizer: @unchecked Sendable {
         }
         lock.unlock()
 
-        guard var rgba = renderRGBA(body: body, viewBox: icon.viewBox, px: px, currentColor: currentColor, oneColor: oneColor) else {
+        guard var rgba = renderRGBA(body: body, viewBox: resolved.viewBox, px: px, currentColor: currentColor, oneColor: oneColor) else {
             return nil
         }
         if mirrored && px > 1 && rgba.count >= px * px * 4 {

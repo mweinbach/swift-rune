@@ -21,6 +21,27 @@ struct OpenCodeThemeTests {
         }
     }
 
+    @Test func darkBorderFocusIsBlue400AndLightStaysBlue500() {
+        let darkKit = OpenCodeTheme.kit(dark: true)
+        let lightKit = OpenCodeTheme.kit(dark: false)
+        let blue400 = OpenCodeTheme.authored("v2-blue-400", dark: true)
+        let blue500 = OpenCodeTheme.authored("v2-blue-500", dark: false)
+
+        #expect(blue400 != nil)
+        #expect(blue500 != nil)
+        #expect(darkKit.c.borderFocus == blue400)
+        #expect(OpenCodeTheme.authored("v2-border-border-focus", dark: true) == blue400)
+        #expect(OpenCodeTheme.authored("color-v2-border-border-focus", dark: true) == blue400)
+        #expect(OpenCodeThemeData.darkColors["v2-border-border-focus"] == "#a2bcffff")
+        #expect(OpenCodeThemeData.darkColors["color-v2-border-border-focus"] == "#a2bcffff")
+
+        #expect(lightKit.c.borderFocus == blue500)
+        #expect(OpenCodeTheme.authored("v2-border-border-focus", dark: false) == blue500)
+        #expect(OpenCodeTheme.authored("color-v2-border-border-focus", dark: false) == blue500)
+        #expect(OpenCodeThemeData.lightColors["v2-border-border-focus"] == "#7698fdff")
+        #expect(OpenCodeThemeData.lightColors["color-v2-border-border-focus"] == "#7698fdff")
+    }
+
     @Test func scalesAndEmberStepsMatchTokens() {
         for dark in [false, true] {
             let mode = dark ? "dark" : "light"

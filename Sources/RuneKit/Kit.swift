@@ -713,6 +713,18 @@ public struct Kit: Sendable, Equatable {
         e.shadows(shadowLayers(layers))
     }
 
+    /// Attaches the kit's keyboard focus ring (`c.borderFocus`) with exact `width` and `offset`.
+    internal func focusRing<S>(_ e: El<S>, _ width: Float, _ offset: Float) -> El<S> {
+        e.focusRing(width, offset: offset, c.borderFocus)
+    }
+
+    /// Attaches the kit's keyboard focus ring and paints the matching forced outline when
+    /// `forced` is true (e.g. `ControlVisualState.focus`).
+    internal func focusRingState<S>(_ e: El<S>, _ width: Float, _ offset: Float, _ forced: Bool) -> El<S> {
+        let ringed = focusRing(e, width, offset)
+        return forced ? ringed.outline(width: width, offset: offset, color: c.borderFocus) : ringed
+    }
+
     /// Mounts overlays above `base`: `base` fills the window and each overlay follows it in paint
     /// and hit order (`rune_kit::root`). Place popover/menu/select/tooltip contents and toast regions here.
     public static func root<State>(_ base: El<State>, overlays: [El<State>] = []) -> El<State> {

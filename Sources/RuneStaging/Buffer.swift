@@ -230,22 +230,25 @@ public struct Readback: @unchecked Sendable {
         return pixels
     }
 
-    /// Waits for `commandBuffer` to finish executing and returns unpadded pixels, or `nil` on GPU error.
+    /// Waits for `commandBuffer` to finish executing via `Health.poll` and returns unpadded pixels,
+    /// or `nil` if the device is lost or polling/mapping fails.
     public func tryRead(commandBuffer: MTLCommandBuffer) -> [UInt8]? {
-        if commandBuffer.status != .completed && commandBuffer.status != .error {
-            commandBuffer.waitUntilCompleted()
-        }
-        guard commandBuffer.status == .completed else { return nil }
+        guard waitReadback(commandBuffer) else { return nil }
         return tryTakeMapped()
     }
 
-    /// Waits for `commandBuffer` to finish executing and returns unpadded pixels.
+    /// Waits for `commandBuffer` to finish executing via `Health.poll` and returns unpadded pixels.
     public func read(commandBuffer: MTLCommandBuffer) -> [UInt8] {
-        if commandBuffer.status != .completed && commandBuffer.status != .error {
-            commandBuffer.waitUntilCompleted()
-        }
-        precondition(commandBuffer.status == .completed, "Readback command buffer failed: \(String(describing: commandBuffer.error))")
+        precondition(waitReadback(commandBuffer), "poll: the GPU device is lost")
         return takeMapped()
     }
+}
+
+/// Waits for the command buffer's work; `false` on a lost or removed device (`Health.poll`).
+private func waitReadback(_ commandBuffer: MTLCommandBuffer) -> Bool {
+    if case .success = Health.poll(commandBuffer: commandBuffer, mode: .waitIndefinitely) {
+        return true
+    }
+    return false
 }
 #endif

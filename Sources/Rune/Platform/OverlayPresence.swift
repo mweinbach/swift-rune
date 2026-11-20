@@ -284,6 +284,12 @@ public enum OverlayPresence: Equatable, Sendable {
         }
     }
 
+    /// True when the overlay currently draws no frames (hidden or occluded) and must advance
+    /// pending clipboard/popup work immediately rather than deferring to the next drawn frame (`#1249`).
+    public var isFrameless: Bool {
+        !isDrawing || isOccluded
+    }
+
     public var fadeEnd: Double? {
         if case let .fadingOut(until, _, _) = self { return until }
         return nil

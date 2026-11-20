@@ -140,6 +140,10 @@ typedef struct {
     uint32_t double_click_ms, accent, window, text, highlight, highlight_text, disabled, button, button_text, link;
 } RuneWinPreferences;
 RuneWinPreferences rune_win_preferences(void);
+// Atomically replaces destination with source via MoveFileExW(MOVEFILE_REPLACE_EXISTING).
+// Returns 0 on success or GetLastError() on failure.
+uint32_t rune_win_replace_file(const uint16_t *source, const uint16_t *destination);
+void rune_win_yield_or_sleep_ms(uint32_t ms);
 void rune_win_dark_title(RuneWinWindow *window, int32_t dark);
 void rune_win_set_title(RuneWinWindow *window, const uint16_t *title);
 void rune_win_show(RuneWinWindow *window, int32_t show);

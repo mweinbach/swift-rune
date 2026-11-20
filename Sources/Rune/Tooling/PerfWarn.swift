@@ -511,6 +511,13 @@ public enum PerfWarn {
         #endif
     }()
 
+    /// Initializes the cached `RUNE_PERF_WARN` flag up front so the first timed callback does not
+    /// heap-allocate while reading the environment variable (`perf_warn::warm`, `#1283`).
+    @inline(__always)
+    internal static func warm() {
+        _ = configuredWarnings
+    }
+
     /// Returns the calling thread's user + system CPU time in milliseconds, when available.
     public static func threadCpuMs() -> Double? {
         #if os(Windows)

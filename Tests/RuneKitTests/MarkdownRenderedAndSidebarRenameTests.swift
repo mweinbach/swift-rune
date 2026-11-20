@@ -149,6 +149,162 @@ struct MarkdownRenderedAndSidebarRenameTests {
         let p0 = try Self.bodyCellWidths(plainSrc, pad: 0)
         let p8 = try Self.bodyCellWidths(plainSrc, pad: pad)
         #expect(p0.natural == p8.natural && p0.min == p8.min)
+
+        // #1290: Inline code inside a link has no code-pill padding in table column widths.
+        let linkedEnds = try Self.firstBodyCell("| h |\n|---|\n| [`code`](https://example.com) |")
+        let linkedEndsHits = MarkdownTableCodePad.hits(linkedEnds)
+        #expect(!linkedEndsHits.last && !linkedEndsHits.word)
+        let le0 = try Self.bodyCellWidths("| h |\n|---|\n| [`code`](https://example.com) |", pad: 0)
+        let le8 = try Self.bodyCellWidths("| h |\n|---|\n| [`code`](https://example.com) |", pad: pad)
+        #expect(abs(le8.natural - le0.natural) < 0.001)
+        #expect(abs(le8.min - le0.min) < 0.001)
+
+        let linkedWord = try Self.firstBodyCell("| h |\n|---|\n| [`a`](https://example.com) b |")
+        let linkedWordHits = MarkdownTableCodePad.hits(linkedWord)
+        #expect(!linkedWordHits.last && !linkedWordHits.word)
+        let lw0 = try Self.bodyCellWidths("| h |\n|---|\n| [`a`](https://example.com) b |", pad: 0)
+        let lw8 = try Self.bodyCellWidths("| h |\n|---|\n| [`a`](https://example.com) b |", pad: pad)
+        #expect(abs(lw8.natural - lw0.natural) < 0.001)
+        #expect(abs(lw8.min - lw0.min) < 0.001)
+    }
+
+    @Test("#1290: inline code inside links keeps monospace + bidi isolate and inherits link styling without pill bg/padding")
+    @MainActor
+    func markdownInlineCodeInsideLinksInheritsLinkStyling() throws {
+        // Parser uses linkOpenPad/linkClosePad inside links and openPad/closePad outside links.
+        let doc = MarkdownParser.parseDocument("See [`code`](https://example.com) and `chip`.", autolink: true)
+        guard case let .para(inl) = doc.blocks.first else {
+            Issue.record("expected paragraph")
+            return
+        }
+        #expect(inl.text == "See \u{2066}code\u{2069} and \u{202f}\u{202f}\u{2066}chip\u{2069}\u{202f}\u{202f}.")
+        #expect(inl.unpaddedText == "See code and chip.")
+        #expect(MarkdownInline.unpadded("\u{2066}a\u{2069} \u{202f}\u{202f}\u{2066}b\u{2069}\u{202f}\u{202f}") == "a b")
+
+        // Standalone image alt (not inside a link) keeps pill pads; linked image alt is inside a link.
+        let imgDoc = MarkdownParser.parseDocument("**![`alt`](https://example.com/a.png)** and [![`inlink`](https://example.com/b.png)](https://example.com).", autolink: true)
+        guard case let .para(imgInl) = imgDoc.blocks.first else {
+            Issue.record("expected paragraph")
+            return
+        }
+        #expect(imgInl.text.contains("\u{202f}\u{202f}\u{2066}alt\u{2069}\u{202f}\u{202f}"))
+        #expect(imgInl.text.contains("\u{2066}inlink\u{2069}"))
+        #expect(!imgInl.text.contains("\u{202f}\u{202f}\u{2066}inlink"))
+
+        // Rendered spans: code inside link inherits link color and underline with no code-pill background.
+        let style = MarkdownStyle.fromKit(Kit.neutral(dark: true))
+        func richSpans(of root: El<Int>) -> [TextSpan] {
+            var out: [TextSpan] = []
+            func walk(_ e: El<Int>) {
+                if let sp = e.richSpans { out.append(contentsOf: sp) }
+                for c in e.children { walk(c) }
+            }
+            walk(root)
+            return out
+        }
+
+        let defaultRoot: El<Int> = Markdown("See [`code`](https://example.com) and `chip`.").render(style)
+        let spans = richSpans(of: defaultRoot)
+        let linkedCode = try #require(spans.first { $0.text == "code" })
+        let standaloneCode = try #require(spans.first { $0.text == "chip" })
+        let linkedOpenPad = try #require(spans.first { $0.text == MarkdownInline.linkOpenPad })
+        let linkedClosePad = try #require(spans.first { $0.text == MarkdownInline.linkClosePad })
+        let chipOpenPad = try #require(spans.first { $0.text == MarkdownInline.openPad })
+
+        #expect(linkedCode.monospace)
+        #expect(linkedCode.weight == style.inlineCodeWeight)
+        #expect(linkedCode.color == style.accent)
+        #expect(linkedCode.underline)
+        #expect(linkedCode.background == nil)
+        #expect(linkedOpenPad.color == style.accent && linkedOpenPad.underline && linkedOpenPad.background == nil)
+        #expect(linkedClosePad.color == style.accent && linkedClosePad.underline && linkedClosePad.background == nil)
+
+        #expect(standaloneCode.monospace)
+        #expect(standaloneCode.weight == style.inlineCodeWeight)
+        #expect(standaloneCode.color == style.text)
+        #expect(!standaloneCode.underline)
+        #expect(standaloneCode.background == style.codeBg)
+        #expect(chipOpenPad.background == style.codeBg)
+
+        // Custom linkPaint (custom color, bg, underline: false) is inherited by inline code inside the link.
+        let customBg = Color(r: 1.0, g: 0.0, b: 0.5, a: 1.0)
+        let customRoot: El<Int> = Markdown("[**bold** *em* `code` plain](session:1)")
+            .linkStyle { url -> MarkdownLinkStyle? in
+                url.hasPrefix("session:")
+                    ? MarkdownLinkStyle(color: .white, underline: false, weight: 500, bg: customBg)
+                    : nil
+            }
+            .render(style)
+        let customSpans = richSpans(of: customRoot)
+        let customCode = try #require(customSpans.first { $0.text == "code" })
+        let customBold = try #require(customSpans.first { $0.text == "bold" })
+        let customPlain = try #require(customSpans.first { $0.text.contains("plain") })
+        #expect(customCode.monospace)
+        #expect(customCode.color == .white)
+        #expect(!customCode.underline)
+        #expect(customCode.background == customBg)
+        #expect(customCode.weight == style.inlineCodeWeight)
+        #expect(customBold.weight == style.strongWeight)
+        #expect(customPlain.weight == 500)
+
+        // Markdown link containing code takes link styling even when codeLink also matches the text.
+        let clColor = Color(r: 0.1, g: 0.8, b: 0.4, a: 1.0)
+        let mixedRoot: El<Int> = Markdown("[`app.swift`](https://example.com) vs `app.swift`")
+            .codeLink(match: { code in code.hasSuffix(".swift") ? "file://\(code)" : nil }, color: clColor)
+            .render(style)
+        let mixedSpans = richSpans(of: mixedRoot).filter { $0.text == "app.swift" }
+        #expect(mixedSpans.count == 2)
+        #expect(mixedSpans[0].color == style.accent && mixedSpans[0].underline && mixedSpans[0].background == nil)
+        #expect(mixedSpans[1].color == clColor && !mixedSpans[1].underline && mixedSpans[1].background == nil)
+
+        // Lightweight inlineSpans helper skips code-pill bg inside links.
+        let helperSpans = MarkdownParser.inlineSpans("[`code`](https://example.com) `chip`", kit: Kit.neutral(dark: true))
+        let helperLinked = try #require(helperSpans.first { $0.text == "code" })
+        let helperStandalone = try #require(helperSpans.first { $0.text == "chip" })
+        #expect(helperLinked.monospace && helperLinked.underline && helperLinked.background == nil)
+        #expect(helperStandalone.monospace && !helperStandalone.underline && helperStandalone.background != nil)
+    }
+
+    @Test("#1290: streaming dropClosingPad strips trailing linkClosePad as well as closePad")
+    func markdownStreamingDropClosingPadHandlesLinkClose() throws {
+        // Direct dropClosingPad on a paragraph ending with linkClosePad (U+2069).
+        let text = "\u{2066}code\u{2069}"
+        let openLen = MarkdownInline.linkOpenPad.utf8.count
+        let codeEnd = openLen + 4
+        let closeEnd = codeEnd + MarkdownInline.linkClosePad.utf8.count
+        let inl = MarkdownInline(
+            text: text,
+            spans: [
+                MarkdownStyleSpan(start: 0, end: openLen, style: .codePad),
+                MarkdownStyleSpan(start: openLen, end: codeEnd, style: .code),
+                MarkdownStyleSpan(start: codeEnd, end: closeEnd, style: .codePad),
+                MarkdownStyleSpan(start: 0, end: closeEnd, style: .link),
+            ],
+            links: [MarkdownLinkSpan(start: 0, end: closeEnd, url: "https://example.com")]
+        )
+        let map = MarkdownSpanMap([MarkdownSpanMap.Segment(src: 2..<6, out: openLen..<codeEnd)])
+        var doc = MarkdownParsedDoc(blocks: [.para(inl)], maps: [.inline(map)])
+        MarkdownTailStream.dropClosingPad(in: &doc)
+        guard case let .para(stripped) = doc.blocks.first else {
+            Issue.record("expected paragraph")
+            return
+        }
+        #expect(stripped.text == "\u{2066}code")
+        #expect(!stripped.text.contains("\u{2069}"))
+        #expect(stripped.spans.map(\.style) == [.codePad, .code, .link])
+        #expect(stripped.links == [MarkdownLinkSpan(start: 0, end: codeEnd, url: "https://example.com")])
+
+        // End-to-end streaming of an unclosed inline code span inside a link grows without trailing U+2069 or pill spaces.
+        let s1 = MarkdownTailStream.parseStreaming("[`foo", autolink: true)
+        let s2 = MarkdownTailStream.parseStreaming("[`foobar", autolink: true)
+        guard case let .para(p1) = s1.blocks.first, case let .para(p2) = s2.blocks.first else {
+            Issue.record("expected streaming paragraphs")
+            return
+        }
+        #expect(p1.text == "\u{2066}foo")
+        #expect(p2.text == "\u{2066}foobar")
+        #expect(!p1.text.contains("\u{202f}") && !p1.text.contains("\u{2069}"))
+        #expect(p2.text.hasPrefix(p1.text))
     }
 
     // MARK: - r436 sidebar rename field label

@@ -103,6 +103,6 @@ vec4 shade_glow(
 void main() {
     Globals g = fxGlobals;
     BackdropEncoding enc = fxBackdrop;
-    vec2 pixel = runePixel;
+    vec2 pixel = recover_pixel(g);
     fragColor = fx_fs(shade_glow(pixel, g, uTex0, uTex1, enc), fxInstance, pixel, g, uTex0, enc);
 }

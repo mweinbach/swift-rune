@@ -108,7 +108,7 @@ struct RuneWinWindow {
     DWORD windowed_style;
     WINDOWPLACEMENT windowed_placement;
     int in_size_move;
-    int click_through, overlay;
+    int click_through, overlay, overlay_keys;
     LONG_PTR added_input_styles;
     int context_failed, running, tracking_mouse, buttons, visible, composing, translated_key;
     BOOL touching;
@@ -366,12 +366,13 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             w->worker = NULL;
         }
         if (w->redraw != redraw_system) RemovePropW(hwnd, RUNE_REDRAW_PROPERTY);
+        if (w->overlay) RemovePropW(hwnd, L"RuneOverlayWindow");
         rune_lifecycle_destroy(hwnd, &w->lifecycle);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         w->hwnd = NULL;
         return DefWindowProcW(hwnd, msg, wp, lp);
     case WM_MOUSEACTIVATE:
-        if (w->overlay) return MA_NOACTIVATE;
+        if (w->overlay && !w->overlay_keys) return MA_NOACTIVATE;
         break;
     case WM_NCHITTEST:
         if (w->overlay) {
@@ -586,7 +587,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (msg >= WM_RBUTTONDOWN) button = 1;
         else button = 0;
         if (down) {
-            if (!w->overlay) SetFocus(hwnd);
+            if (!w->overlay || w->overlay_keys) SetFocus(hwnd);
             SetCapture(hwnd);
             w->buttons |= 1 << button;
         }
@@ -1193,11 +1194,18 @@ void rune_win_overlay_place(RuneWinWindow *w, int32_t x, int32_t y, int32_t widt
     SetWindowPos(w->hwnd, NULL, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
     if (previous) SetThreadDpiAwarenessContext(previous);
 }
-int rune_win_overlay_setup(RuneWinWindow *w) {
-    HWND hwnd = w->hwnd;
+static int apply_overlay_styles(HWND hwnd, int can_take_keys) {
     LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    LONG_PTR no_activate = can_take_keys ? 0 : WS_EX_NOACTIVATE;
+    LONG_PTR next = (style & ~(WS_EX_APPWINDOW | WS_EX_NOACTIVATE))
+        | WS_EX_LAYERED | WS_EX_TOOLWINDOW | no_activate;
     SetLastError(0);
-    if (!SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (style & ~WS_EX_APPWINDOW) | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) && GetLastError()) return 0;
+    if (next != style && !SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next) && GetLastError()) return 0;
+    return 1;
+}
+int rune_win_overlay_setup(RuneWinWindow *w, int can_take_keys) {
+    HWND hwnd = w->hwnd;
+    if (!apply_overlay_styles(hwnd, can_take_keys)) return 0;
     if (!SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)) return 0;
     // Give DWM the RGBA backbuffer, including the transparent pixels around the UI.
     HRGN region = CreateRectRgn(0, 0, -1, -1);
@@ -1207,7 +1215,23 @@ int rune_win_overlay_setup(RuneWinWindow *w) {
     DeleteObject(region);
     if (FAILED(result)) return 0;
     w->overlay = 1;
+    w->overlay_keys = can_take_keys != 0;
+    SetPropW(hwnd, L"RuneOverlayWindow", (HANDLE)1);
     return 1;
+}
+int rune_win_overlay_set_keys(RuneWinWindow *w, int can_take_keys) {
+    if (!w || !w->hwnd || !w->overlay) return 0;
+    w->overlay_keys = can_take_keys != 0;
+    return apply_overlay_styles(w->hwnd, w->overlay_keys);
+}
+int rune_win_overlay_request_keys(RuneWinWindow *w) {
+    if (!w || !w->hwnd || !w->overlay || !w->overlay_keys || !IsWindowVisible(w->hwnd)) return 0;
+    if (!AllowSetForegroundWindow(GetCurrentProcessId())) return 0;
+    SetForegroundWindow(w->hwnd);
+    return 1;
+}
+int rune_win_is_overlay_hwnd(void *hwnd) {
+    return hwnd && GetPropW((HWND)hwnd, L"RuneOverlayWindow") != NULL;
 }
 int rune_win_overlay_work_area(int32_t x, int32_t y, int32_t *top, int32_t *bottom) {
     POINT p = {x,y};

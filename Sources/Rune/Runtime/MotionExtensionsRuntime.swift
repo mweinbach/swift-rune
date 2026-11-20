@@ -17,13 +17,27 @@ struct CyclePaint {
         let curve: Cycle
     }
 
+    struct IconSlot {
+        let node: NodeId
+        let index: Int
+        let icon: SVGIcon
+        let pixelSize: Int
+        let drawnSize: Float?
+        let origin: SIMD2<Float>
+        let mirrored: Bool
+        let aligned: Bool
+        let rect: SIMD4<Float>
+    }
+
     private(set) var serial: UInt64 = 0
     private(set) var slots: [Slot] = []
+    private(set) var iconSlots: [IconSlot] = []
     private(set) var interval: Double?
 
     mutating func begin() {
         serial &+= 1
         slots.removeAll(keepingCapacity: true)
+        iconSlots.removeAll(keepingCapacity: true)
         interval = nil
     }
 
@@ -31,6 +45,14 @@ struct CyclePaint {
                          ink: SIMD4<Float>, curve: Cycle, interval: Double) {
         slots.append(Slot(node: node, element: element, path: path, index: index, rect: rect, ink: ink, curve: curve))
         self.interval = min(self.interval ?? interval, interval)
+    }
+
+    mutating func recordIcon(node: NodeId, index: Int, icon: SVGIcon, pixelSize: Int, drawnSize: Float?,
+                             origin: SIMD2<Float>, mirrored: Bool, aligned: Bool, rect: SIMD4<Float>) {
+        iconSlots.append(IconSlot(
+            node: node, index: index, icon: icon, pixelSize: pixelSize, drawnSize: drawnSize,
+            origin: origin, mirrored: mirrored, aligned: aligned, rect: rect
+        ))
     }
 
     mutating func restoreTreeOrder(_ treeIndex: [Int]) {
@@ -55,15 +77,108 @@ extension El {
 extension Runtime {
     func paintCycleTick(frame: inout RenderFrame, serial: UInt64, commit: Int, at now: Double) -> Bool {
         let clear = clearColor.simd4(srgb: srgbBlend)
+        let hasIcons = !cyclePaint.iconSlots.isEmpty
         guard cyclePaint.serial == serial, viewCommitCount == commit, srgbBlend == frame.srgbBlend,
               frame.clearColor == SIMD4(clear.x * clear.w, clear.y * clear.w, clear.z * clear.w, clear.w),
-              let dt = cyclePaint.interval, cyclePaint.slots.count == loopRuntime.tracks.count,
               let due = activePaintedLoopWake, due - now <= CyclePaint.displayTolerance, now.isFinite,
               liveVisible, !reducedMotion, cxSettings.viewTimeScale > 0,
               !hasOtherPaintDeadline, !isTracing, traceChannels == nil, rewindRecorder == nil,
               !RasterCheck.enabled, restsExceptLoop(), (pollWakeDeadline() ?? .infinity) > now,
               !timerWake.isAsked, !polledChange, !virtualFill.resuming(at: now),
-              (nextWakeDeadline(after: currentTime, includePaint: true, includeLoops: false) ?? .infinity) > now,
+              (nextWakeDeadline(after: currentTime, includePaint: true, includeLoops: false) ?? .infinity) > now else {
+            return false
+        }
+        if hasIcons {
+            guard loopRuntime.tracks.isEmpty, cyclePaint.slots.isEmpty,
+                  cyclePaint.iconSlots.allSatisfy({ slot in
+                      frame.instances.indices.contains(slot.index)
+                          && frame.instances[slot.index].rect == slot.rect
+                          && frame.instances[slot.index].params.y == KIND_GLYPH
+                          && textSystem.iconAnimSlotsReady(
+                              slot.icon,
+                              pixelSize: slot.pixelSize,
+                              drawnSize: slot.drawnSize,
+                              mirrored: slot.mirrored,
+                              scopeID: slot.node.rawValue
+                          )
+                  }) else {
+                return false
+            }
+            currentTime = now
+            let scaledNow = cxSettings.scaledTime(at: now)
+            var nextWake: Double? = nil
+            var anyLive = false
+            var anyChanged = false
+            let pageW = Float(textSystem.glyphAtlas.pagePixelSize.x)
+            let pageH = Float(textSystem.glyphAtlas.pagePixelSize.y)
+            for slot in cyclePaint.iconSlots {
+                let mountT = textSystem.iconAnimIsFinite(slot.icon)
+                    ? iconMountTime(node: slot.node, icon: slot.icon, fallback: scaledNow)
+                    : 0.0
+                guard let anim = textSystem.animatedIconQuadInPlace(
+                    slot.icon,
+                    pixelSize: slot.pixelSize,
+                    drawnSize: slot.drawnSize,
+                    origin: slot.origin,
+                    mirrored: slot.mirrored,
+                    at: scaledNow,
+                    mountTime: mountT,
+                    scopeID: slot.node.rawValue
+                ) else {
+                    continue
+                }
+                switch anim.state {
+                case .moving:
+                    anyLive = true
+                    let w = scaledNow + 1.0 / 30.0
+                    nextWake = nextWake.map { min($0, w) } ?? w
+                case .waitingUntil(let wakeAt):
+                    anyLive = true
+                    nextWake = nextWake.map { min($0, wakeAt) } ?? wakeAt
+                case .finished:
+                    break
+                }
+                var normUV = anim.entry.uv
+                if !slot.aligned {
+                    let pxF = Float(max(1, anim.entry.pixelSize.x))
+                    let pyF = Float(max(1, anim.entry.pixelSize.y))
+                    let du = (normUV.z - normUV.x) / pxF
+                    let dv = (normUV.w - normUV.y) / pyF
+                    normUV += SIMD4(-du, -dv, du, dv)
+                }
+                let u0 = normUV.x * pageW
+                let v0 = normUV.y * pageH
+                let uw = max(1.0, (normUV.z - normUV.x) * pageW)
+                let vh = max(1.0, (normUV.w - normUV.y) * pageH)
+                let scaled = !slot.aligned || abs(uw - slot.rect.z) > 0.5 || abs(vh - slot.rect.w) > 0.5
+                let nextUV = SIMD4<Float>(u0, v0, scaled ? uw : 0, scaled ? vh : 0)
+                let nextPage = Float(anim.entry.page)
+                if anim.changed || frame.instances[slot.index].uv != nextUV || frame.instances[slot.index].params.z != nextPage {
+                    frame.instances[slot.index].uv = nextUV
+                    frame.instances[slot.index].params.z = nextPage
+                    anyChanged = true
+                }
+            }
+            animatedIconsShown = anyLive
+            if let wakeAt = nextWake {
+                let wallWake = now + max(0.0, wakeAt - scaledNow) / Double(cxSettings.viewTimeScale)
+                activePaintedLoopWake = wallWake
+            } else {
+                activePaintedLoopWake = nil
+            }
+            if anyChanged {
+                let glyphAtlas = textSystem.glyphAtlas.framePages()
+                frame.glyphs = glyphAtlas.bases[0]
+                frame.glyphPages = glyphAtlas.bases.count > 1 ? glyphAtlas.bases : []
+                frame.glyphGeneration = glyphAtlas.generation
+                frame.glyphPageRevisions = glyphAtlas.revisions
+                frame.rawGlyphPageRevisions = glyphAtlas.rawRevisions
+                frame.glyphPagePatches = glyphAtlas.patches
+                frame.rawGlyphPagePatches = glyphAtlas.rawPatches
+            }
+            return true
+        }
+        guard let dt = cyclePaint.interval, cyclePaint.slots.count == loopRuntime.tracks.count,
               cyclePaint.slots.allSatisfy({ slot in
                   frame.instances.indices.contains(slot.index) && frame.instances[slot.index].rect == slot.rect &&
                       frame.instances[slot.index].params.y == KIND_RECT && reportedPath(at: slot.element) == slot.path

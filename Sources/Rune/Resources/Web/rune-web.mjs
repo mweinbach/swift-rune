@@ -468,6 +468,13 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
                 page.sync(height, top, focused);
             }
             syncAccessibility();
+            if (accessibility && wasm.rune_web_scroll_x) {
+                const scrollSize = wasm.rune_web_scroll_x();
+                if (scrollSize > 0) {
+                    const bytes = new Uint8Array(wasm.memory.buffer, wasm.rune_web_buffer(0), scrollSize);
+                    accessibility.syncScrollX(JSON.parse(decoder.decode(bytes)));
+                }
+            }
             const cursorSize = wasm.rune_web_cursor?.();
             if (cursorSize) {
                 const bytes = new Uint8Array(wasm.memory.buffer, wasm.rune_web_buffer(0), cursorSize);

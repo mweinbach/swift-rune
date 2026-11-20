@@ -1087,6 +1087,7 @@ public struct ElementHandlers<State> {
     public var onTextSubmit: ((inout State, String, inout Tx) -> Void)?
     public var onLink: ((inout State, String, inout Tx) -> Void)?
     public var onLinkSecondary: ((inout State, String, PointerPress, inout Tx) -> Void)?
+    public var onPillSecondary: ((inout State, String, PointerPress, inout Tx) -> Bool)?
     public var modalDismiss: ((inout State, inout Tx) -> Void)?
     public var onStep: ((inout State, Int, inout Tx) -> Void)?
     public var onStepLimit: ((inout State, Bool, inout Tx) -> Void)?
@@ -1262,6 +1263,7 @@ final class ElColdData<State> {
     var focusRequested: Bool = false
     var focusHighlightColor: Color? = nil
     @ElColdOptional var focusWithinRing: (width: Float, offset: Float, color: Color)? = nil
+    var focusWithinKeyboard: Bool = false
     var focusWithinFlat: Bool = false
     var focusFollows: Bool = false
 
@@ -1269,6 +1271,7 @@ final class ElColdData<State> {
     var a11yHelp: String? = nil
     var helpWhenTruncated: Bool = false
     var helpSide: Side? = nil
+    var helpOpen: Bool = false
     var a11ySelected: String? = nil
     var a11yExpanded: Bool? = nil
     var a11yLevel: Int? = nil
@@ -1437,12 +1440,14 @@ final class ElColdData<State> {
         c.focusRequested = focusRequested
         c.focusHighlightColor = focusHighlightColor
         c._focusWithinRing = _focusWithinRing
+        c.focusWithinKeyboard = focusWithinKeyboard
         c.focusWithinFlat = focusWithinFlat
         c.focusFollows = focusFollows
         c.a11yLabelStorage = a11yLabelStorage
         c.a11yHelp = a11yHelp
         c.helpWhenTruncated = helpWhenTruncated
         c.helpSide = helpSide
+        c.helpOpen = helpOpen
         c.a11ySelected = a11ySelected
         c.a11yExpanded = a11yExpanded
         c.a11yLevel = a11yLevel
@@ -1765,6 +1770,12 @@ public struct El<State> {
         get { _cold?.focusWithinRing }
         set { ensureCold().focusWithinRing = newValue }
     }
+    /// Whether `focusWithinRing` shows only when the keyboard put focus on this element or inside
+    /// it (`FocusSpec::within_keyboard`, #1297).
+    public var focusWithinKeyboard: Bool {
+        get { _cold?.focusWithinKeyboard ?? false }
+        set { ensureCold().focusWithinKeyboard = newValue }
+    }
     public var focusWithinFlat: Bool { get { _cold?.focusWithinFlat ?? false } set { ensureCold().focusWithinFlat = newValue } }
     public var isFocusFollowsSelection: Bool { get { _cold?.focusFollows ?? false } set { ensureCold().focusFollows = newValue } }
 
@@ -1779,6 +1790,8 @@ public struct El<State> {
     public var a11yHelp: String? { get { _cold?.a11yHelp } set { ensureCold().a11yHelp = newValue } }
     public var isHelpWhenTruncated: Bool { get { _cold?.helpWhenTruncated ?? false } set { ensureCold().helpWhenTruncated = newValue } }
     public var helpSide: Side? { get { _cold?.helpSide } set { ensureCold().helpSide = newValue } }
+    /// Whether this element's tooltip is held open regardless of pointer position (`El::help_open`, #1300).
+    public var isHelpOpen: Bool { get { _cold?.helpOpen ?? false } set { ensureCold().helpOpen = newValue } }
     public var a11ySelected: String? { get { _cold?.a11ySelected } set { ensureCold().a11ySelected = newValue } }
     public var a11yExpanded: Bool? { get { _cold?.a11yExpanded } set { ensureCold().a11yExpanded = newValue } }
     public var a11yLevel: Int? { get { _cold?.a11yLevel } set { ensureCold().a11yLevel = newValue } }
@@ -3085,6 +3098,8 @@ public struct El<State> {
         copy.focusRingColor = color
         copy.focusRingWidth = 2.0
         copy.focusRingOffset = offset
+        copy.focusWithinKeyboard = false
+        copy.noFocusRing = false
         copy.focusable = true
         return copy
     }
@@ -3094,6 +3109,8 @@ public struct El<State> {
         copy.focusRingColor = color
         copy.focusRingWidth = width
         copy.focusRingOffset = offset
+        copy.focusWithinKeyboard = false
+        copy.noFocusRing = false
         return copy
     }
 
@@ -3155,7 +3172,24 @@ public struct El<State> {
     public func focusWithinRing(_ color: Color, width: Float = 2.0, offset: Float = 2.0) -> Self {
         var copy = self
         copy.focusWithinRing = (width, offset, color)
+        copy.focusWithinKeyboard = false
+        copy.noFocusRing = false
         return copy
+    }
+
+    /// `focusWithinRing` that shows only while the keyboard put focus on this element or inside
+    /// it (Tab, an arrow in a group, `Tx.focus` with a ring): not for a click, a focus handed over
+    /// without a ring, or the window coming back to the front with focus where it was
+    /// (`El::focus_visible_within_ring`, #1297).
+    public func focusVisibleWithinRing(_ color: Color, width: Float = 2.0, offset: Float = 2.0) -> Self {
+        var copy = focusWithinRing(color, width: width, offset: offset)
+        copy.focusWithinKeyboard = true
+        return copy
+    }
+
+    /// Positional overload matching `focusRing(_ width:offset:_ color:)`.
+    public func focusVisibleWithinRing(_ width: Float, offset: Float, _ color: Color) -> Self {
+        focusVisibleWithinRing(color, width: width, offset: offset)
     }
 
     public func focusWithinFlat(_ enabled: Bool = true) -> Self {
@@ -3423,6 +3457,16 @@ public struct El<State> {
     }
     public func helpAbove() -> Self {
         helpSide(.top)
+    }
+    /// Keeps the tooltip showing whatever the pointer does while `open` is true, as a
+    /// `Tooltip forceOpen` does (e.g. a Copy button's "Copied" after a press). Only one shows at
+    /// a time; with several, the first drawn (`El::help_open`, #1300).
+    public func helpOpen(_ open: Bool) -> Self {
+        var c = self
+        if open || c._cold != nil {
+            c.isHelpOpen = open
+        }
+        return c
     }
     public func selected(_ val: String?) -> Self { var c = self; c.a11ySelected = val; return c }
     public func expanded(_ val: Bool?) -> Self { var c = self; c.a11yExpanded = val; return c }
@@ -3713,6 +3757,17 @@ public struct El<State> {
             return copy
         }
         copy.handlers.onLinkSecondary = handler
+        return copy
+    }
+
+    /// Secondary press (right-click or macOS control-click) on a `Mark.pill` inside this
+    /// `textInput` (`El::on_pill_secondary`, #1293). Called with the pill's id and the press
+    /// coordinates; return `true` to handle it (opening a pill-specific menu) or `false` to fall
+    /// through to the field's standard context menu.
+    public func onPillSecondary(_ handler: @escaping (inout State, String, PointerPress, inout Tx) -> Bool) -> Self {
+        var copy = self
+        guard copy.hasEditLens || copy.role == .textInput else { return copy }
+        copy.handlers.onPillSecondary = handler
         return copy
     }
 

@@ -319,7 +319,9 @@ internal enum GaneshArea {
 
     static func renderAAA(shape shapeIn: Shape, pen: Pen?, fillRule: GAAARule, ctm: GTransform, origin: GPoint, px: Int, out: inout [UInt8]) {
         for i in out.indices { out[i] = 0 }
+        guard GaneshIcon.ctmIsSafe(ctm) else { return }
         let res = GPathStroker.computeResolutionScale(ctm)
+        guard res.isFinite && res > 0.0 && res <= 256.0 else { return }
         guard let user = buildGPath(shapeIn, tolerance: 0.25 / res) else { return }
         let outline: GPath?
         if let p = pen {
@@ -356,8 +358,21 @@ internal enum GaneshArea {
         for p in corners {
             l = min(l, p.x); t = min(t, p.y); r = max(r, p.x); btm = max(btm, p.y)
         }
+        guard l.isFinite && t.isFinite && r.isFinite && btm.isFinite else { return }
+        let cx0 = floorf(ctm.tx), cy0 = floorf(ctm.ty)
+        let limit = Float(px) + 2.0
+        if cx0 + r < -2.0 || cx0 + l > limit || cy0 + btm < -2.0 || cy0 + t > limit {
+            return
+        }
         let dx = floorf(l), dy = floorf(t)
-        let w = max(1, Int(ceilf(r) - dx) + 2), h = max(1, Int(ceilf(btm) - dy) + 2)
+        let spanW = ceilf(r) - dx, spanH = ceilf(btm) - dy
+        let maxDim = min(2048, max(256, px * 4))
+        guard spanW.isFinite && spanH.isFinite && spanW >= 0.0 && spanH >= 0.0,
+              spanW <= Float(maxDim), spanH <= Float(maxDim) else {
+            return
+        }
+        let w = Int(spanW) + 2, h = Int(spanH) + 2
+        guard w <= maxDim && h <= maxDim && w * h <= 1024 * 1024 else { return }
         let pad: Float = 1.0
         guard let device = outline.transform(frac.postTranslate(pad - dx, pad - dy)) else { return }
         var mask = [UInt8](repeating: 0, count: w * h)
@@ -530,9 +545,12 @@ internal enum GaneshIcon {
         switch tag {
         case "circle":
             let r = num(el, "r")
+            guard r > 0.0 else { return nil }
             return .oval(center: GPoint(x: num(el, "cx"), y: num(el, "cy")), radii: GPoint(x: r, y: r))
         case "ellipse":
-            return .oval(center: GPoint(x: num(el, "cx"), y: num(el, "cy")), radii: GPoint(x: num(el, "rx"), y: num(el, "ry")))
+            let rx = num(el, "rx"), ry = num(el, "ry")
+            guard rx > 0.0 && ry > 0.0 else { return nil }
+            return .oval(center: GPoint(x: num(el, "cx"), y: num(el, "cy")), radii: GPoint(x: rx, y: ry))
         case "rect":
             let x = num(el, "x"), y = num(el, "y"), w = num(el, "width"), h = num(el, "height")
             let r = min(num(el, "rx"), min(w * 0.5, h * 0.5))
@@ -546,7 +564,15 @@ internal enum GaneshIcon {
         }
     }
 
-    private static func union(_ acc: inout [UInt8], _ top: [UInt8], alpha: Float) {
+    /// Hard finiteness and magnitude bound on a composed device-space transform so nested scales or
+    /// translations can never overflow fixed-point rasterization or `GPathStroker`.
+    internal static func ctmIsSafe(_ ctm: GTransform) -> Bool {
+        ctm.xx.isFinite && ctm.xy.isFinite && ctm.yx.isFinite && ctm.yy.isFinite && ctm.tx.isFinite && ctm.ty.isFinite
+            && max(max(abs(ctm.xx), abs(ctm.xy)), max(abs(ctm.yx), abs(ctm.yy))) <= 4096.0
+            && max(abs(ctm.tx), abs(ctm.ty)) <= 65_536.0
+    }
+
+    internal static func union(_ acc: inout [UInt8], _ top: [UInt8], alpha: Float) {
         for i in acc.indices {
             let fa = UInt32(acc[i])
             let fb = UInt32((Float(top[i]) * alpha).rounded())
@@ -554,7 +580,7 @@ internal enum GaneshIcon {
         }
     }
 
-    private static func paintShape(
+    internal static func paintShape(
         _ shape: GaneshArea.Shape,
         ctm: GTransform,
         origin: GPoint,
@@ -565,6 +591,7 @@ internal enum GaneshIcon {
         buf: inout [UInt8],
         into: inout [UInt8]
     ) {
+        guard alpha > 0.0, ctmIsSafe(ctm) else { return }
         let op = GaneshArea.op(for: shape, ctm: ctm, pen: pen)
         switch op {
         case .hairline(let width):
@@ -591,10 +618,15 @@ internal enum GaneshIcon {
 
     static func coverageAt(_ icon: SVGIcon, pixelSize px: Int, drawnSize: Float? = nil, origin: GPoint = .zero) -> [UInt8] {
         guard px > 0 else { return [] }
-        let size = drawnSize ?? Float(px)
-        let s = size / max(Float(1), icon.viewBox)
-        let count = px * px
+        let (count, overflow) = px.multipliedReportingOverflow(by: px)
+        guard !overflow else { return [] }
         var acc = [UInt8](repeating: 0, count: count)
+        let size = drawnSize ?? Float(px)
+        guard size.isFinite && size > 0.0,
+              icon.viewBox.isFinite && icon.viewBox > 0.0 && icon.viewBox <= SVGIconAnimLimits.maxViewDim else {
+            return acc
+        }
+        let s = size / max(Float(1), icon.viewBox)
         var buf = [UInt8](repeating: 0, count: count)
 
         guard let body = icon.body else {
@@ -609,9 +641,24 @@ internal enum GaneshIcon {
             return acc
         }
 
+        if body.utf8.count > 256 * 1024 {
+            return acc
+        }
+        if body.contains("<animate") || body.contains("<set") {
+            switch SVGAnimatedIcons.renderRestCoverage(body: body, viewBox: icon.viewBox, px: px, size: size, origin: origin) {
+            case .rendered(let cov):
+                return cov
+            case .rejected:
+                return acc
+            case .staticFallback:
+                break
+            }
+        }
+
         var layers: [([UInt8], Float)] = []
         let root = Scope(ctm: .scale(s, s), paints: true, group: nil, layer: false)
         var scopes: [Scope] = []
+        var elements = 0
 
         @inline(__always)
         func unionToCurrent(_ top: [UInt8], _ alpha: Float) {
@@ -629,9 +676,7 @@ internal enum GaneshIcon {
                 paintShape(shape, ctm: ctm, origin: origin, pen: pen, fill: fill, alpha: alpha, px: px, buf: &buf, into: &acc)
             } else {
                 let last = layers.count - 1
-                var dst = layers[last].0
-                paintShape(shape, ctm: ctm, origin: origin, pen: pen, fill: fill, alpha: alpha, px: px, buf: &buf, into: &dst)
-                layers[last].0 = dst
+                paintShape(shape, ctm: ctm, origin: origin, pen: pen, fill: fill, alpha: alpha, px: px, buf: &buf, into: &layers[last].0)
             }
         }
 
@@ -644,17 +689,21 @@ internal enum GaneshIcon {
                 }
                 continue
             }
+            elements += 1
+            if elements > 1024 || scopes.count >= 64 {
+                break
+            }
             let stripped = el.drop(while: { $0 == "<" })
             var tag = stripped.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
             if tag.hasSuffix("/") { tag.removeLast() }
             let open = !el.hasSuffix("/")
             let up = scopes.last ?? root
             let ctm = attr(el, "transform").map { GTransform.then(parseTransform($0), up.ctm) } ?? up.ctm
-            let paints = up.paints && attr(el, "display") != "none" && !nonRenderingTags.contains(tag)
+            let paints = up.paints && ctmIsSafe(ctm) && attr(el, "display") != "none" && !nonRenderingTags.contains(tag)
             if tag == "g" || tag == "a" || tag == "svg" {
                 if open {
                     let alpha = opacity(attr(el, "opacity"))
-                    let layer = paints && alpha < 1.0
+                    let layer = paints && alpha < 1.0 && layers.count < SVGIconAnimLimits.maxLayers
                     if layer { layers.append(([UInt8](repeating: 0, count: count), alpha)) }
                     scopes.append(Scope(ctm: ctm, paints: paints, group: el, layer: layer))
                 }
@@ -665,6 +714,7 @@ internal enum GaneshIcon {
             }
             if !paints { continue }
             guard let pathD = elementPath(el) else { continue }
+            if pathD.utf8.count > 128 * 1024 { continue }
             let els = GSVGPathParser.parse(pathD)
 
             func get(_ name: String) -> String? {

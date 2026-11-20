@@ -108,10 +108,12 @@ public enum AnimSource {
     public static let virtualFill: UInt32 = 1 << 9
     /// A long paste's waiting paragraphs being shaped a few a frame (`TEXT_FILL`, `text_fill.rs`).
     public static let textFill: UInt32 = 1 << 10
+    /// A monochrome SMIL animated SVG icon is advancing (`ICON_ANIM`, #1291).
+    public static let iconAnim: UInt32 = 1 << 11
 
     private static let allNames: [String] = [
         "tracks", "growth", "scroll", "reveal", "loop",
-        "scale-settle", "video", "text-flight", "live", "virtual-fill", "text-fill",
+        "scale-settle", "video", "text-flight", "live", "virtual-fill", "text-fill", "icon-anim",
     ]
 
     public static func names(_ bits: UInt32) -> [String] {
@@ -640,6 +642,16 @@ public final class Runtime<State> {
     public var nativeMaterials: Bool = false
     public var windowFocused: Bool = true {
         didSet {
+            // Back to the front: a field's keyboard-entry ring stays off until the keys move focus
+            // (`wakes.rs`, #1297).
+            if windowFocused && !oldValue && inputMachines.focusMachine.enteredByKeys {
+                inputMachines.focusMachine.step(.windowReturned)
+                needsCommit = true
+                commitWhyPending |= CommitWhy.dirty
+                stateUnchangedSinceBuild = false
+                pendingResizeRelayout = false
+                pendingGrowthRelayout = false
+            }
             // frame.rs:77-81: a focus change marks the state dirty only when a selection takes
             // its active or inactive pair (`windowFocusRepaintsSelection`).
             if windowFocused != oldValue, windowFocusRepaintsSelection {
@@ -647,7 +659,7 @@ public final class Runtime<State> {
                 commitWhyPending |= CommitWhy.dirty
                 stateUnchangedSinceBuild = false
                 pendingResizeRelayout = false
-            pendingGrowthRelayout = false
+                pendingGrowthRelayout = false
             }
         }
     }
@@ -865,6 +877,7 @@ public final class Runtime<State> {
     internal var pressScaleTrackOwners: Set<NodeId> = []
     public internal(set) var focusedPath: String? = nil {
         didSet {
+            if focusedPath == nil { inputMachines.focusMachine.entry = .other }
             if focusedPath != oldValue { syncFocusedEditLineMode() }
         }
     }
@@ -1139,6 +1152,108 @@ public final class Runtime<State> {
     internal var unseenPresence = UnseenPresenceState()
     internal var activePaintedLoopsAnimating: Bool = false
     internal var activePaintedLoopWake: Double? = nil
+    /// A drawn monochrome SMIL animated SVG icon is actively advancing (`PaintState::animated_icons`, #1291).
+    internal var animatedIconsActive: Bool = false
+    /// A painted animated SVG icon is active (moving or waiting on a flat hold), even while the
+    /// window is covered: tells Windows occlusion polling to watch for uncover (#1291).
+    internal var animatedIconsShown: Bool = false
+    /// Earliest scaled runtime timestamp when a flat-hold or paced animated SVG icon resumes (#1291).
+    internal var iconAnimWake: Double? = nil
+    internal struct IconAnimMountKey: Hashable {
+        let node: NodeId
+        let icon: SVGIcon
+    }
+    /// Mount time (scaled runtime `t`) per `(NodeId, SVGIcon)` for finite-duration animated icons (#1291).
+    internal var iconAnimMounts: [IconAnimMountKey: Double] = [:]
+
+    internal func beginAnimatedIconFrame() {
+        animatedIconsActive = false
+        animatedIconsShown = false
+        iconAnimWake = nil
+        textSystem.beginIconFrame()
+    }
+
+    internal func iconMountTime(node: NodeId, icon: SVGIcon, fallback: Double) -> Double {
+        iconAnimMounts[IconAnimMountKey(node: node, icon: icon)] ?? fallback
+    }
+
+    internal func getOrInsertIconMount(node: NodeId, icon: SVGIcon, now: Double) -> Double {
+        let key = IconAnimMountKey(node: node, icon: icon)
+        if let existing = iconAnimMounts[key] { return existing }
+        iconAnimMounts[key] = now
+        return now
+    }
+
+    internal func noteIconAnimWake(_ at: Double) {
+        iconAnimWake = iconAnimWake.map { min($0, at) } ?? at
+    }
+
+    internal func sampleAnimatedIcon(
+        _ svg: SVGIcon,
+        nodeId: NodeId,
+        pixelSize: Int,
+        drawnSize: Float?,
+        origin: SIMD2<Float>,
+        mirrored: Bool,
+        color: Color,
+        opacity: Float,
+        at now: Double
+    ) -> AnimatedIconQuad? {
+        let alphaMin: Float = 1.0 / 255.0
+        guard !reducedMotion, opacity > alphaMin, color.a > alphaMin else { return nil }
+        let scaledNow = cxSettings.scaledTime(at: now)
+        let mountT = textSystem.iconAnimIsFinite(svg)
+            ? getOrInsertIconMount(node: nodeId, icon: svg, now: scaledNow)
+            : 0.0
+        if !liveVisible {
+            if textSystem.iconAnimLive(svg, at: scaledNow, mountTime: mountT) {
+                animatedIconsShown = true
+            }
+            return nil
+        }
+        guard let anim = textSystem.animatedIconQuad(
+            svg,
+            pixelSize: pixelSize,
+            drawnSize: drawnSize,
+            origin: origin,
+            mirrored: mirrored,
+            at: scaledNow,
+            mountTime: mountT,
+            scopeID: nodeId.rawValue
+        ) else {
+            return nil
+        }
+        switch anim.state {
+        case .moving:
+            animatedIconsShown = true
+            if cxSettings.viewTimeScale > 0 {
+                animatedIconsActive = true
+            }
+        case .waitingUntil(let wakeAt):
+            animatedIconsShown = true
+            if cxSettings.viewTimeScale > 0 {
+                noteIconAnimWake(wakeAt)
+            }
+        case .finished:
+            break
+        }
+        return anim
+    }
+
+    internal func finishAnimatedIconFrame(at now: Double) {
+        if !iconAnimMounts.isEmpty {
+            iconAnimMounts = iconAnimMounts.filter { mountedNode($0.key.node) != nil }
+        }
+        if animatedIconsActive {
+            isAnimating = true
+            animSources |= AnimSource.iconAnim
+        }
+        if let wakeAt = iconAnimWake, liveVisible, cxSettings.viewTimeScale > 0 {
+            let scaledNow = cxSettings.scaledTime(at: now)
+            let wallWake = now + max(0.0, wakeAt - scaledNow) / Double(cxSettings.viewTimeScale)
+            activePaintedLoopWake = activePaintedLoopWake.map { min($0, wallWake) } ?? wallWake
+        }
+    }
     internal var cyclePaint = CyclePaint()
     internal var hasOtherPaintDeadline: Bool { nextImageWake != nil || nextVideoWake != nil }
     internal var explicitSettleRequested: Bool = false
@@ -1333,6 +1448,9 @@ public final class Runtime<State> {
     internal var virtualFillNeedsCommit: Bool = false
     internal var forceInitialSettle: Bool = true
     internal var lastWasSettled: Bool = false
+    /// Whether a host settle (`settleAll`) already landed ahead of this frame's input
+    /// (`frame.rs::settle_before_input`, #1241), so `settled` stays true if the input changed nothing.
+    internal var pendingSettledBeforeInput: Bool = false
     private var activeExplicitSettleCut: Bool = false
     internal var pendingEventTime: Double? = nil
 
@@ -1549,6 +1667,7 @@ public final class Runtime<State> {
         self.scrollStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.liveStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.cxSettings = RuntimeShellSettings(viewport: viewport, pixelScale: pixelScale, reducedMotion: reducedMotion)
+        PerfWarn.warm()
     }
 
     deinit {
@@ -1923,7 +2042,8 @@ public final class Runtime<State> {
         at now: Double,
         split: (catchUp: Double, dt: Double, hostDelta: Double)? = nil
     ) -> RefScene {
-        lastWasSettled = false
+        lastWasSettled = pendingSettledBeforeInput
+        pendingSettledBeforeInput = false
         let wasQuiet = !frameHadInputSinceLastFrame && !isAnimating
         let timer = beginFrameTimers(at: now)
         let pendingDue = pendingUpdateWakes.contains { ($0.scheduledAt + $0.delay) <= now }
@@ -2217,7 +2337,7 @@ public final class Runtime<State> {
             if runPoll(at: now) { framePollChanged() }
         }
         frameTookDispatchedInput()
-        dispatchPendingPaintHover(at: now)
+        dispatchPendingPaintHover(at: now, allowSettleBeforeInput: false)
         flushPlatformFrameWork(at: now)
         pollPlaygroundIfNeeded(at: now)
         applyPlaygroundIfNeeded(at: now)
@@ -2312,6 +2432,10 @@ public final class Runtime<State> {
             // A decode on its own reflows siblings at once. With an input or state change,
             // only the pictures that acquired a new aspect land at their measured size.
             pictureOnlyRelayout = !pixelsAspectSnapIds.isEmpty && why == CommitWhy.relayout && !other
+            // The frame's own commit assigns `settled` (`frame.rs:355`, #1241): an animated input
+            // commit after `settleBeforeInput` clears it; a settle frame whose input changed
+            // nothing never enters this block and keeps `lastWasSettled == true`.
+            lastWasSettled = false
             commitFor(why: why, at: commitAt, cut: shouldCut, resizeSnap: resizeSnap)
             pictureOnlyRelayout = false
             pixelsAspectSnapIds.removeAll(keepingCapacity: true)
@@ -2668,6 +2792,51 @@ public final class Runtime<State> {
             commitFor(why: routed ? CommitWhy.route : 0, at: now, cut: forceInitialSettle)
             forceInitialSettle = false
         }
+    }
+
+    /// Lands a host settle (`settleAll` / `markNeedsCommit(settle: true)`) for the tree as it
+    /// stands before this frame's input runs, then lets the input's own commit animate what it
+    /// changes (`frame.rs::settle_before_input`, #1241). `commitTree` clears the settle latch as
+    /// this commit applies it so nothing is deferred or dropped.
+    internal func settleBeforeInputIfNeeded(at now: Double) {
+        guard explicitSettleRequested, commitCount > 0 else { return }
+        let follow = pendingCaretFollow
+        pendingCaretFollow = false
+        let commitAt = min(pendingEventTime ?? now, now)
+        pendingEventTime = nil
+        needsCommit = false
+        forceInitialSettle = false
+        hasExternalDirtyCommit = false
+        popupNeedsLayout = false
+        pendingCommitKind = .settle
+        // `settle_all` marks the tree dirty too, and this commit carries both `SETTLE | DIRTY`.
+        commitFor(why: CommitWhy.settle | CommitWhy.dirty, at: commitAt, cut: true)
+        pendingSettledBeforeInput = true
+        // Scroll requests queued before the input resolve under the settle commit rather than
+        // gliding on the input's own animated commit.
+        if needsCommit {
+            var recommits = 0
+            repeat {
+                commitFollowUp(at: commitAt)
+                recommits += 1
+            } while needsCommit && ((scrollKeyLandings.awaiting && recommits < ScrollKeyLanding.maxRounds)
+                || (!virtualRevealLandings.isEmpty && recommits < 8))
+            virtualRevealLandings.removeAll(keepingCapacity: true)
+            needsCommit = false
+            commitWhyPending = 0
+            hasExternalDirtyCommit = false
+            popupNeedsLayout = false
+        }
+        // The input below starts from the settled tree, as it would on any other frame.
+        pendingCommitKind = .animate
+        pendingUnprompted = false
+        pendingAskedMotion = false
+        pendingCommitMotion = nil
+        pendingColorMotionSpring = nil
+        pendingFollowEdge = false
+        pendingUnclippedFlights = false
+        slice2State.pendingLiveTail = LiveTailRequests()
+        pendingCaretFollow = pendingCaretFollow || follow
     }
 
     internal func anchoredOverlayHasScaleTrack(_ el: El<State>, nodeId: NodeId) -> Bool {
@@ -6843,6 +7012,7 @@ public final class Runtime<State> {
         }
         inputMachines.focusMachine.lastFocusSelectedByGroup = nextSelectedByGroup
 
+        var returnedFromPointerMenu = false
         if !txBlur && nextIdx == nil {
             for ret in poppedReturns.reversed() {
                 if !ret.isModal {
@@ -6857,6 +7027,7 @@ public final class Runtime<State> {
                     nextIdx = idx
                     if inputMachines.focusMachine.openedModalKind == .pointerMenu {
                         focusVisible = false
+                        returnedFromPointerMenu = true
                     }
                     break
                 }
@@ -6866,6 +7037,7 @@ public final class Runtime<State> {
                     nextIdx = idx
                     if inputMachines.focusMachine.openedModalKind == .pointerMenu {
                         focusVisible = false
+                        returnedFromPointerMenu = true
                     }
                     break
                 }
@@ -6884,6 +7056,7 @@ public final class Runtime<State> {
             }
         }
 
+        let resolvedTxVis = txFocusVisible ?? kitHooks.pendingTxFocusVisible
         if !txBlur && nextIdx == nil {
             let allowsVirtual: (String) -> Bool = { path in
                 guard let modal = self.activeModalPath else { return true }
@@ -6891,13 +7064,19 @@ public final class Runtime<State> {
             }
             if let fk = txFocusKey,
                let v = virtualInputs.values.first(where: { matchesAuthoredKey($0.key, fk) && allowsVirtual($0.path) }) {
-                assignFocusPath(v.path, keyboard: focusKeyboard)
+                let targetKbd = resolvedTxVis ?? focusKeyboard
+                kitHooks.pendingTxFocusVisible = nil
+                assignFocusPath(v.path, keyboard: targetKbd)
+                inputMachines.focusMachine.step(.set(path: v.path, keyboard: targetKbd))
                 focusedKey = v.key
                 if prevFocusedPath != focusedPath { imeReset = true }
                 return
             }
             if let fp = focusedPath, let v = virtualInputs[fp], allowsVirtual(v.path) {
                 assignFocusPath(v.path, keyboard: focusKeyboard)
+                if prevFocusedPath != v.path {
+                    inputMachines.focusMachine.step(.set(path: v.path, keyboard: focusKeyboard))
+                }
                 focusedKey = v.key
                 if prevFocusedPath != focusedPath { imeReset = true }
                 return
@@ -6905,6 +7084,9 @@ public final class Runtime<State> {
             if let fk = focusedKey,
                let v = virtualInputs.values.first(where: { matchesAuthoredKey($0.key, fk) && allowsVirtual($0.path) }) {
                 assignFocusPath(v.path, keyboard: focusKeyboard)
+                if prevFocusedPath != v.path {
+                    inputMachines.focusMachine.step(.set(path: v.path, keyboard: focusKeyboard))
+                }
                 focusedKey = v.key
                 if prevFocusedPath != focusedPath { imeReset = true }
                 return
@@ -6940,15 +7122,21 @@ public final class Runtime<State> {
             nextPath = nil
             keptOffscreenVirtual = false
         }
+        let explicitFocusRequest = txBlur
+            || (txFocusKey != nil && nextIdx != nil)
+            || (whenShown != nil && whenShown?.index == nextIdx)
+            || (requestedFocusIdx != nil && requestedFocusIdx == nextIdx)
         if nextIdx != nil {
             // Focus landed on an element (`FocusEvent::Set { path: Some }`): no Tab start or hand-off survives.
             focusHandoff = false
             webFocusTabStartPath = nil
-            if txFocusKey != nil, let vis = txFocusVisible {
+            if txFocusKey != nil, let vis = resolvedTxVis {
                 focusKeyboard = vis
             } else if let shown = whenShown, shown.index == nextIdx {
                 focusKeyboard = shown.ring
             } else if requestedFocusIdx == nextIdx && requestedFocusIdx != nil && txFocusKey == nil {
+                focusKeyboard = false
+            } else if returnedFromPointerMenu {
                 focusKeyboard = false
             }
         }
@@ -6959,6 +7147,9 @@ public final class Runtime<State> {
             hoveredHighlightActive = false
         }
         assignFocusPath(nextPath, keyboard: focusKeyboard)
+        if explicitFocusRequest || prevFocusedPath != nextPath {
+            inputMachines.focusMachine.step(.set(path: nextPath, keyboard: focusKeyboard))
+        }
         focusedKey = keptOffscreenVirtual ? prevFocusedKey : nextIdx.flatMap { flatNodes[$0].key }
         if nextPath != nil || !pressing() {
             inputMachines.focusMachine.blurredFocusPath = nil
@@ -6975,7 +7166,86 @@ public final class Runtime<State> {
         syncFocusedLinkIndex()
     }
 
-    /// Focus fallback when the control holding focus (or recently blurred by Escape) leaves the tree (`focus.rs::focus_fallback`).
+    /// Whether `node` can take keyboard focus itself or is an editable text field (`focus.rs::can_take_focus`).
+    private func nodeCanTakeFocus(_ node: FlatNode) -> Bool {
+        if node.el.a11yDisabled { return false }
+        return nodeTakesFocus(node.el) || node.el.hasEditAccess
+    }
+
+    /// In `nodes`, whether node `j` is a Tab stop: in the Tab order (`tabIndex >= 0`) and not an
+    /// item of a roving focus group, whatever it can take now (a control just disabled still was one)
+    /// (`focus.rs::tab_stop_in`, #1302).
+    private func tabStopIn(_ nodes: [FlatNode], _ j: Int) -> Bool {
+        guard nodes.indices.contains(j) else { return false }
+        if (nodes[j].el.tabIndex ?? 0) < 0 { return false }
+        var p = nodes[j].parentIndex
+        while let i = p, nodes.indices.contains(i) {
+            if nodes[i].el.focusGroup { return false }
+            if nodeTakesFocus(nodes[i].el) { return true }
+            p = nodes[i].parentIndex
+        }
+        return true
+    }
+
+    /// In `nodes`, the focus group `j` is an item of (`focus.rs::group_in`, #1304).
+    private func groupIn(_ nodes: [FlatNode], _ j: Int) -> Int? {
+        guard nodes.indices.contains(j) else { return nil }
+        var p = nodes[j].parentIndex
+        while let i = p, nodes.indices.contains(i) {
+            if nodes[i].el.focusGroup { return i }
+            if nodeTakesFocus(nodes[i].el) { return nil }
+            p = nodes[i].parentIndex
+        }
+        return nil
+    }
+
+    /// In `nodes`, the nearest roving focus group around `j`: the one it is an item of, or the one
+    /// whose item holds it (e.g. a tab's Close button is in its tab strip's group)
+    /// (`focus.rs::roving_home_in`, #1304).
+    private func rovingHomeIn(_ nodes: [FlatNode], _ j: Int) -> Int? {
+        guard nodes.indices.contains(j) else { return nil }
+        var p = nodes[j].parentIndex
+        while let i = p, nodes.indices.contains(i) {
+            if nodes[i].el.focusGroup { return i }
+            p = nodes[i].parentIndex
+        }
+        return nil
+    }
+
+    /// Shared rescue pick for `focusFallback` and `fallbackInNew` (`focus.rs::rescue`, #1302/#1304).
+    private static func rescueFocus(
+        lostTabStop: Bool,
+        at: Int,
+        scopes: [(start: Int, end: Int)],
+        item: (Int) -> Int?,
+        tab: (Int) -> Int?,
+        any: (Int) -> Int?
+    ) -> Int? {
+        func pass(_ ok: (Int) -> Int?) -> Int? {
+            for (s, end) in scopes {
+                if at + 1 < end {
+                    for i in (at + 1)..<end {
+                        if let pick = ok(i) { return pick }
+                    }
+                }
+                if s + 1 < at {
+                    for i in ((s + 1)..<at).reversed() {
+                        if let pick = ok(i) { return pick }
+                    }
+                }
+                if let pick = ok(s) { return pick }
+            }
+            return nil
+        }
+        if let hit = pass(item) { return hit }
+        if lostTabStop {
+            return pass(tab) ?? pass(any)
+        }
+        return pass(any)
+    }
+
+    /// Focus fallback when the control holding focus (or recently blurred by Escape) leaves the
+    /// tree or can no longer hold focus (`focus.rs::focus_fallback`, #1298/#1302/#1304).
     private func focusFallback(prevNodes: [FlatNode], prevByPath: [String: Int], prevFocusedPath: String?) -> Int? {
         let gone: String?
         if let fp = prevFocusedPath {
@@ -6987,16 +7257,22 @@ public final class Runtime<State> {
         }
         guard let gone else { return nil }
         if prevFocusedPath == nil && !focusHandoff { return nil }
-        // The control that held focus is still in the tree (e.g. blurred/collapsed while staying): hand nothing on.
-        if nodeByPath[gone] != nil { return nil }
 
-        // An offscreen virtual field has no previous slot. A moved stub retains its old slot
-        // but loses its path, so only that case climbs the new tree (`r384`, `#842`).
-        guard let at = prevByPath[gone] else { return nil }
+        // An offscreen virtual field has no previous slot. A moved stub or a node whose rebuilt
+        // replacement took its path over as disabled hands focus on from the new tree (`#1302`).
+        guard let at = prevByPath[gone], prevNodes.indices.contains(at) else { return nil }
         let atNode = prevNodes[at]
-        guard atNode.path == gone else {
-            return atNode.path.isEmpty ? fallbackInNew(gone: gone) : nil
+        if atNode.path != gone {
+            let disabledHere = nodeByPath[gone].map { !nodeCanTakeFocus(flatNodes[$0]) } ?? false
+            if atNode.path.isEmpty || disabledHere {
+                return fallbackInNew(gone: gone)
+            }
+            return nil
         }
+        // Still in the tree and able to take focus (e.g. merely hidden or field flag cleared):
+        // nothing takes its keyboard. One that can't hold focus any more (disabled while focused)
+        // hands focus on as if it had left (`#1298`).
+        if let newIdx = nodeByPath[gone], nodeCanTakeFocus(flatNodes[newIdx]) { return nil }
         if prevFocusedPath == nil && !(atNode.el.handlers.editLens != nil || atNode.el.role == .textInput) {
             return nil
         }
@@ -7033,27 +7309,73 @@ public final class Runtime<State> {
             return root.isEmpty || (p.count > root.count && p.hasPrefix(root + "/"))
         }
 
+        var scopes: [(start: Int, end: Int)] = []
         var scope = prevNodes[at].parentIndex
         while let s = scope {
             if atNew(s) != nil {
                 let end = ((s + 1)..<prevNodes.count).first(where: { !within($0, s) }) ?? prevNodes.count
-                if let j = ((at + 1)..<end).lazy.compactMap(survivor).first
-                    ?? ((s + 1)..<at).reversed().lazy.compactMap(survivor).first
-                    ?? survivor(s) {
-                    return j
-                }
+                scopes.append((start: s, end: end))
             }
             scope = prevNodes[s].parentIndex
         }
-        return nil
+        let home = rovingHomeIn(prevNodes, at).flatMap(atNew)
+        let item: (Int) -> Int? = { i in
+            guard let j = survivor(i), let home, self.groupIn(self.flatNodes, j) == home else { return nil }
+            return j
+        }
+        let tab: (Int) -> Int? = { i in
+            guard let j = survivor(i), self.tabStopIn(self.flatNodes, j) else { return nil }
+            return j
+        }
+        let lostTabStop = (prevNodes[at].el.tabIndex ?? 0) >= 0 && groupIn(prevNodes, at) == nil
+        return Self.rescueFocus(
+            lostTabStop: lostTabStop,
+            at: at,
+            scopes: scopes,
+            item: item,
+            tab: tab,
+            any: survivor
+        )
     }
 
-    /// Climbs `gone` in `flatNodes` when the old tree held only a pathless moved stub (`#842`).
+    /// Climbs `gone` in `flatNodes` when the old tree held only a pathless moved stub or a
+    /// control rebuilt disabled (`#842`, `#1302`, `#1304`).
     internal func fallbackInNew(gone: String) -> Int? {
-        guard activeModalPath == nil, nodeByPath[gone] == nil else { return nil }
+        guard activeModalPath == nil else { return nil }
         let can: (Int) -> Bool = { j in
             let r = self.flatNodes[j].targetRect
             return r.width > 0 && r.height > 0 && self.canFocusIndex(j)
+        }
+        if let at = nodeByPath[gone] {
+            if nodeCanTakeFocus(flatNodes[at]) { return nil }
+            var scopes: [(start: Int, end: Int)] = []
+            var p = Substring(gone)
+            while let slash = p.lastIndex(of: "/") {
+                p = p[..<slash]
+                let prefix = String(p)
+                guard let c = nodeByPath[prefix] else { continue }
+                let childPrefix = prefix.isEmpty ? "" : (prefix + "/")
+                let end = ((c + 1)..<flatNodes.count).first(where: { idx in
+                    childPrefix.isEmpty ? flatNodes[idx].path.isEmpty : !flatNodes[idx].path.hasPrefix(childPrefix)
+                }) ?? flatNodes.count
+                scopes.append((start: c, end: end))
+            }
+            let any: (Int) -> Int? = { m in can(m) ? m : nil }
+            let home = rovingHomeIn(flatNodes, at)
+            let item: (Int) -> Int? = { m in
+                (can(m) && home != nil && self.groupIn(self.flatNodes, m) == home) ? m : nil
+            }
+            let tab: (Int) -> Int? = { m in
+                (can(m) && self.tabStopIn(self.flatNodes, m)) ? m : nil
+            }
+            return Self.rescueFocus(
+                lostTabStop: tabStopIn(flatNodes, at),
+                at: at,
+                scopes: scopes,
+                item: item,
+                tab: tab,
+                any: any
+            )
         }
         var p = Substring(gone)
         while let slash = p.lastIndex(of: "/") {
@@ -7365,6 +7687,7 @@ public final class Runtime<State> {
         }
         guard !isExiting, !effectiveInert, !el.noFocusRing,
               let within = el.focusWithinRing,
+              (!el.focusWithinKeyboard || inputMachines.focusMachine.enteredByKeys),
               let fp = focusedPath,
               (fp == snapPath || fp.hasPrefix(snapPath + "/")) else {
             return nil
@@ -7686,6 +8009,7 @@ public final class Runtime<State> {
         stuckShiftsByPath.removeAll(keepingCapacity: true)
         activePaintedLoopsAnimating = false
         activePaintedLoopWake = nil
+        beginAnimatedIconFrame()
         imeArea = nil
         let activeSelectionRanges = computeActiveSelectionRangesByPath()
         pixelSnapGlides.beginFrame(t: now, size: SIMD2<Float>(Float(devW), Float(devH)))
@@ -7967,6 +8291,7 @@ public final class Runtime<State> {
         var newPaintOrder: [String] = []
         newPaintOrder.reserveCapacity(frameOut.nodes.count)
         var newHelpHits: [HelpHitRecord] = []
+        var newHelpHeld: NodeId? = nil
         var nextImeCursorArea: [Float]? = nil
         var nextImeOptionAsAlt: Bool = false
         var nextNoWindowDragRects: [MotionRect] = []
@@ -9030,7 +9355,77 @@ public final class Runtime<State> {
                             && !boxGliding
                             && abs(effGlyphTurn) <= 1e-6
                             && abs(avgScale - 1.0) < 1e-5
-                        if drawn > 1e-4,
+                        let iconKind = textSystem.iconKind(svg)
+                        if iconKind == .animatedMono, !reducedMotion, drawn > 1e-4 {
+                            let canvas: Int
+                            let scaleSide: Float?
+                            let atX: Float
+                            let atY: Float
+                            let drawSide: Float
+                            if iconResting && exactSide > 1e-4 {
+                                canvas = max(1, Int(ceil(exactSide - 1.0 / 64.0)))
+                                scaleSide = exactSide
+                                let containPx = inh.snap.contain * pxScale
+                                atX = PixelSnap.onGrid(rExact[0] + (wExact - exactSide) * 0.5, contain: containPx.x)
+                                atY = PixelSnap.onGrid(rExact[1] + (hExact - exactSide) * 0.5, contain: containPx.y)
+                                drawSide = Float(canvas)
+                            } else {
+                                canvas = px
+                                scaleSide = nil
+                                atX = posX
+                                atY = posY
+                                drawSide = drawn
+                            }
+                            if let anim = sampleAnimatedIcon(
+                                svg,
+                                nodeId: p.id,
+                                pixelSize: canvas,
+                                drawnSize: scaleSide,
+                                origin: SIMD2<Float>(atX, atY),
+                                mirrored: snap.mirroredInRtl,
+                                color: resolvedColor,
+                                opacity: localAlpha,
+                                at: now
+                            ) {
+                                let entry = anim.entry
+                                let pxF = Float(max(1, entry.pixelSize.x))
+                                let nearWhole: (Float) -> Bool = { abs($0 - $0.rounded()) < 1.0 / 512.0 }
+                                let quadRect: SIMD4<Float>
+                                let quadUV: SIMD4<Float>
+                                if abs(effGlyphTurn) <= 1e-6 && nearWhole(atX) && nearWhole(atY) && abs(drawSide - pxF) < 1.0 / 512.0 {
+                                    quadRect = SIMD4<Float>(atX.rounded(), atY.rounded(), pxF, pxF)
+                                    quadUV = entry.uv
+                                } else {
+                                    let t = drawSide / pxF
+                                    let du = (entry.uv.z - entry.uv.x) / pxF
+                                    let dv = (entry.uv.w - entry.uv.y) / pxF
+                                    quadRect = SIMD4<Float>(atX - t, atY - t, drawSide + 2.0 * t, drawSide + 2.0 * t)
+                                    quadUV = SIMD4<Float>(entry.uv.x - du, entry.uv.y - dv, entry.uv.z + du, entry.uv.w + dv)
+                                }
+                                let primIdx = primitives.count
+                                primitives.append(attachFade(.glyph(
+                                    rect: quadRect,
+                                    uv: quadUV,
+                                    color: tint,
+                                    gamma: 1.0,
+                                    clip: devClip,
+                                    turn: effGlyphTurn
+                                )))
+                                recordGlyphPage(primIdx, entry.page)
+                            } else {
+                                let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: canvas, drawnSize: scaleSide, mirrored: snap.mirroredInRtl)
+                                let primIdx = primitives.count
+                                primitives.append(attachFade(.glyph(
+                                    rect: SIMD4<Float>(atX, atY, drawSide, drawSide),
+                                    uv: entry.uv,
+                                    color: tint,
+                                    gamma: 1.0,
+                                    clip: devClip,
+                                    turn: effGlyphTurn
+                                )))
+                                recordGlyphPage(primIdx, entry.page)
+                            }
+                        } else if iconKind == .color, drawn > 1e-4,
                            let colorDecoded = textSystem.colorIcons.rasterize(
                                svg,
                                pixelSize: px,
@@ -9507,6 +9902,31 @@ public final class Runtime<State> {
                                 devClip: devInputClip,
                                 rot: useLayer ? 0 : effRotate,
                                 insertImage: { imagePacker.insert($0) },
+                                emitInlineIcon: { [self] svg, iconPx, rect, iconCol, outPrims in
+                                    guard !reducedMotion, textSystem.iconKind(svg) == .animatedMono,
+                                          let anim = sampleAnimatedIcon(
+                                              svg,
+                                              nodeId: p.id,
+                                              pixelSize: iconPx,
+                                              drawnSize: nil,
+                                              origin: SIMD2<Float>(rect.x, rect.y),
+                                              mirrored: false,
+                                              color: iconCol,
+                                              opacity: localAlpha,
+                                              at: now
+                                          ) else { return false }
+                                    let idx = outPrims.count
+                                    outPrims.append(.glyph(
+                                        rect: rect,
+                                        uv: anim.entry.uv,
+                                        color: iconCol.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                                        gamma: 1.0,
+                                        clip: devInputClip,
+                                        turn: useLayer ? 0 : effRotate
+                                    ))
+                                    recordGlyphPage(idx, anim.entry.page)
+                                    return true
+                                },
                                 into: &primitives
                             )
                         }
@@ -9801,6 +10221,31 @@ public final class Runtime<State> {
                         roundedBaselines: roundedBaselines,
                         glideOffPx: SIMD2<Float>(glideOffPx.x, glideOffPx.y),
                         insertImage: { imagePacker.insert($0) },
+                        emitInlineIcon: { [self] svg, iconPx, rect, iconCol, outPrims in
+                            guard !reducedMotion, textSystem.iconKind(svg) == .animatedMono,
+                                  let anim = sampleAnimatedIcon(
+                                      svg,
+                                      nodeId: p.id,
+                                      pixelSize: iconPx,
+                                      drawnSize: nil,
+                                      origin: SIMD2<Float>(rect.x, rect.y),
+                                      mirrored: false,
+                                      color: iconCol,
+                                      opacity: localAlpha,
+                                      at: now
+                                  ) else { return false }
+                            let idx = outPrims.count
+                            outPrims.append(.glyph(
+                                rect: rect,
+                                uv: anim.entry.uv,
+                                color: iconCol.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                                gamma: 1.0,
+                                clip: devClip,
+                                turn: useLayer ? 0 : effRotate
+                            ))
+                            recordGlyphPage(idx, anim.entry.page)
+                            return true
+                        },
                         into: &primitives
                     )
                     if !el.elStrikes.isEmpty, let txt = paintedLabelValue {
@@ -10065,6 +10510,9 @@ public final class Runtime<State> {
                         side: el.helpSide,
                         linkIndex: nil
                     ))
+                    if newHelpHeld == nil && !snap.effectiveInert && !subtreeExiting(snap.index) && el.isHelpOpen && hitRect4.z > hitRect4.x && hitRect4.w > hitRect4.y {
+                        newHelpHeld = snap.nodeId
+                    }
                 }
                 if !snap.effectiveInert && (isInteractiveBlocker || el.hoverBg != nil || el.pressBg != nil ||
                    el.focusable || el.isHoverGroup || el.isHoverAlone) {
@@ -10660,6 +11108,7 @@ public final class Runtime<State> {
             isAnimating = true
             animSources |= AnimSource.loop
         }
+        finishAnimatedIconFrame(at: now)
         imeCursorArea = nextImeCursorArea
         imeOptionAsAlt = nextImeOptionAsAlt
         noWindowDragRects = nextNoWindowDragRects
@@ -10675,6 +11124,7 @@ public final class Runtime<State> {
         refreshHoverAfterPaint()
         kitHooks.unseenPresence.recordPostBuildFilterSeen(nodes: flatNodes)
         helpState.hits = newHelpHits
+        helpState.heldNodeId = newHelpHeld
         helpState.interactiveHits = newInteractiveHits
         updateHelp(at: now, primitives: &primitives, recordGlyphPage: recordGlyphPage)
         surfaces = builtSurfaces
@@ -11053,26 +11503,34 @@ public final class Runtime<State> {
     /// Fresh paint can move an authored hover under a stationary pointer. Deliver it
     /// with the next actions, before input that arrived after that paint.
     internal func dispatchPendingPaintHover(at now: Double) {
-        guard !pendingPaintHovers.isEmpty else { return }
-        let actions = pendingPaintHovers
-        pendingPaintHovers = []
-        var keysRun = 0
-        for action in actions {
-            if action.priorSentKeys > keysRun {
-                flushPendingSentKeys(at: now, prefix: action.priorSentKeys - keysRun)
-                keysRun = action.priorSentKeys
-            }
-            let route = hoverCallbackPaths(to: action.path)
-            guard route != hoveredCallbackPaths else { continue }
-            asInputObserver {
-                let previous = isDispatchingHover
-                isDispatchingHover = true
-                defer { isDispatchingHover = previous }
-                InputTime.withArrival(nil) {
-                    let (ran, allLiveOnly) = dispatchHoverCallbacks(route, at: now, fromPaint: true)
-                    if ran && !allLiveOnly { suppressSelectionEffectsFromHoverCommit = true }
+        dispatchPendingPaintHover(at: now, allowSettleBeforeInput: true)
+    }
+
+    internal func dispatchPendingPaintHover(at now: Double, allowSettleBeforeInput: Bool) {
+        if !pendingPaintHovers.isEmpty {
+            let actions = pendingPaintHovers
+            pendingPaintHovers = []
+            var keysRun = 0
+            for action in actions {
+                if action.priorSentKeys > keysRun {
+                    flushPendingSentKeys(at: now, prefix: action.priorSentKeys - keysRun)
+                    keysRun = action.priorSentKeys
+                }
+                let route = hoverCallbackPaths(to: action.path)
+                guard route != hoveredCallbackPaths else { continue }
+                asInputObserver {
+                    let previous = isDispatchingHover
+                    isDispatchingHover = true
+                    defer { isDispatchingHover = previous }
+                    InputTime.withArrival(nil) {
+                        let (ran, allLiveOnly) = dispatchHoverCallbacks(route, at: now, fromPaint: true)
+                        if ran && !allLiveOnly { suppressSelectionEffectsFromHoverCommit = true }
+                    }
                 }
             }
+        }
+        if allowSettleBeforeInput && !insideFramePollOrInput {
+            settleBeforeInputIfNeeded(at: now)
         }
     }
 
@@ -11468,6 +11926,7 @@ public final class Runtime<State> {
                     if focusedPath != rNode.path || !hoveredHighlightActive {
                         focusedPath = rNode.path
                         focusedKey = rNode.key
+                        inputMachines.focusMachine.entry = .other
                         hoveredHighlightActive = true
                         dirtyCommit(at: now, why: isPointerEvent ? CommitWhy.input : CommitWhy.dirty)
                         changed = true
@@ -11626,6 +12085,23 @@ public final class Runtime<State> {
                 }
                 if node.el.handlers.editLens != nil {
                     logEvent("secondary press \(node.path)")
+                    if let onPillSecondary = node.el.handlers.onPillSecondary,
+                       let pillId = inputPillAt(node.index, x: pos.x, y: pos.y) {
+                        let press = PointerPress(
+                            window: pos,
+                            local: local,
+                            elementSize: Vec2(rect.width, rect.height),
+                            button: .secondary,
+                            mods: mods,
+                            clicks: 1
+                        )
+                        var tx = makeTx(at: now, button: .secondary)
+                        let handled = onPillSecondary(&state, pillId, press, &tx)
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: handled)
+                        if handled {
+                            return
+                        }
+                    }
                     _ = openFieldMenu(node: node, at: pos, fromPointer: true, at: now)
                     return
                 }
@@ -11701,7 +12177,7 @@ public final class Runtime<State> {
                     focusedKey = nil
                     inputMachines.focusMachine.highlightedPath = nil
                     inputMachines.focusMachine.hoveredHighlight = false
-                    focusKeyboard = false
+                    inputMachines.focusMachine.step(.set(path: nil, keyboard: false))
                     blurredFocusPath = prevFp
                     focusHandoff = false
                     imeReset = true
@@ -11775,7 +12251,7 @@ public final class Runtime<State> {
                     focusedKey = belowNode.key
                     inputMachines.focusMachine.highlightedPath = nil
                     inputMachines.focusMachine.hoveredHighlight = false
-                    focusKeyboard = false
+                    inputMachines.focusMachine.step(.set(path: belowNode.path, keyboard: false))
                     blurredFocusPath = nil
                     focusHandoff = false
                     webFocusTabStartPath = nil
@@ -11787,7 +12263,7 @@ public final class Runtime<State> {
                     focusedKey = nil
                     inputMachines.focusMachine.highlightedPath = nil
                     inputMachines.focusMachine.hoveredHighlight = false
-                    focusKeyboard = false
+                    inputMachines.focusMachine.step(.set(path: nil, keyboard: false))
                     blurredFocusPath = prevFp
                     focusHandoff = false
                     imeReset = true
@@ -11819,7 +12295,7 @@ public final class Runtime<State> {
                     focusedKey = target.key
                     inputMachines.focusMachine.highlightedPath = nil
                     inputMachines.focusMachine.hoveredHighlight = false
-                    focusKeyboard = false
+                    inputMachines.focusMachine.step(.set(path: target.path, keyboard: false))
                     blurredFocusPath = nil
                     focusHandoff = false
                     webFocusTabStartPath = nil
@@ -11832,7 +12308,7 @@ public final class Runtime<State> {
                         focusedKey = nil
                         inputMachines.focusMachine.highlightedPath = nil
                         inputMachines.focusMachine.hoveredHighlight = false
-                        focusKeyboard = false
+                        inputMachines.focusMachine.step(.set(path: nil, keyboard: false))
                         blurredFocusPath = prevFp
                         focusHandoff = false
                         imeReset = true
@@ -12319,7 +12795,7 @@ public final class Runtime<State> {
 
     @discardableResult
     public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, baseChar: Character? = nil, at now: Double) -> Bool {
-        dispatchPendingPaintHover(at: now)
+        dispatchPendingPaintHover(at: now, allowSettleBeforeInput: event != .focusLost || InputTime.arrival() != nil)
         let prevCode = currentPhysicalKey
         let prevBase = currentKeyBase
         let prevRepeat = currentKeyRepeat
@@ -13470,7 +13946,7 @@ public final class Runtime<State> {
             kitHooks.pendingTxFocusVisible = tx.requestedFocusVisible
             pendingTxFocusVisible = tx.focusAskedByReturn ? tx.requestedFocusVisible : nil
             focusVisible = tx.requestedFocusVisible
-            focusKeyboard = tx.requestedFocusVisible
+            inputMachines.focusMachine.step(.set(path: matchedNode?.path, keyboard: tx.requestedFocusVisible))
             blurredFocusPath = nil
             focusHandoff = false
             webFocusTabStartPath = nil
@@ -14049,6 +14525,7 @@ public final class Runtime<State> {
         // frame.rs:77-81: only a selection's active/inactive pair makes the change itself dirty.
         let repaints = windowFocusRepaintsSelection
         let wasBlurred = !windowFocused
+        let windowReturnedClearedKeys = focused && wasBlurred && inputMachines.focusMachine.enteredByKeys
         if focused && wasBlurred {
             hoverPaused = false
             kitHooks.hoverHoldAfterActionUntilMove = false
@@ -14086,7 +14563,7 @@ public final class Runtime<State> {
             hoverPaused = true
             kitHooks.hoverHoldAfterActionUntilMove = true
         }
-        if !handledFocus && !cancelOrHoverDirty && !repaints && commitCount == previousCommits {
+        if !handledFocus && !cancelOrHoverDirty && !repaints && !windowReturnedClearedKeys && commitCount == previousCommits {
             // Nothing ran and nothing is dirty (frame.rs:90-92 queues no `WindowFocus`): the
             // commit and its causes stay as they were.
             needsCommit = prevStale
@@ -14479,6 +14956,7 @@ public final class Runtime<State> {
 
     internal func flushPendingSentKeys(at now: Double, prefix: Int? = nil) {
         guard !pendingSentKeys.isEmpty else { return }
+        settleBeforeInputIfNeeded(at: now)
         let count = min(prefix ?? pendingSentKeys.count, pendingSentKeys.count)
         let queued = pendingSentKeys.prefix(count)
         let stamps = queuedInputArrivals.sentKeys.prefix(count)
@@ -14622,7 +15100,7 @@ public final class Runtime<State> {
         focusedKey = flatNodes[nextIdx].key
         inputMachines.focusMachine.highlightedPath = nil
         inputMachines.focusMachine.hoveredHighlight = false
-        focusKeyboard = true
+        inputMachines.focusMachine.step(.set(path: flatNodes[nextIdx].path, keyboard: true))
         blurredFocusPath = nil
         focusHandoff = false
         webFocusTabStartPath = nil
@@ -14701,7 +15179,7 @@ public final class Runtime<State> {
         let nextNode = flatNodes[members[targetPos]]
         assignFocusPath(nextNode.path, keyboard: true)
         focusedKey = nextNode.key
-        focusKeyboard = true
+        inputMachines.focusMachine.step(.set(path: nextNode.path, keyboard: true))
         blurredFocusPath = nil
         focusHandoff = false
         webFocusTabStartPath = nil
@@ -14881,6 +15359,73 @@ public final class Runtime<State> {
         return hit
     }
 
+    /// The id of the `Mark.pill` in text field `index` under window point `(x, y)`, if any
+    /// (`runtime/selection/links.rs::input_pill_at`, #1293).
+    internal func inputPillAt(_ index: Int, x: Float, y: Float) -> String? {
+        guard flatNodes.indices.contains(index) else { return nil }
+        let node = flatNodes[index]
+        guard let editLens = node.el.handlers.editLens else { return nil }
+        let edit = editLens.get(state)
+        if node.el.isSecure || edit.isSecure || edit.preedit != nil { return nil }
+        let pills = edit.displayPills()
+        if pills.isEmpty { return nil }
+
+        let rect = presentedRectByPath[node.path] ?? node.targetRect
+        let sc = presentedScales[node.path] ?? Vec2(1, 1)
+        let sx = max(0.01, sc.x)
+        let sy = max(0.01, sc.y)
+        let innerW = max(0, rect.width - (node.el.layout.padding.left + node.el.layout.padding.right) * sx)
+        let resolvedInput = ElDisplayResolver.resolveInput(
+            el: node.el,
+            edit: edit,
+            innerWidth: innerW / sx,
+            pxScale: pixelScale
+        )
+        let shaped: ShapedText
+        if let request = Self.paragraphRequest(field: node.nodeId, el: node.el, edit: edit, resolved: resolvedInput) {
+            shaped = textSystem.layoutInput(
+                text: resolvedInput.renderedString,
+                spans: resolvedInput.spans,
+                pills: resolvedInput.pills,
+                style: resolvedInput.style,
+                maxWidth: resolvedInput.maxWidthForShape,
+                pixelScale: pixelScale,
+                emitGlyphs: false,
+                request: request
+            ).shaped
+        } else {
+            shaped = textSystem.shape(
+                text: resolvedInput.renderedString,
+                spans: resolvedInput.spans,
+                pills: resolvedInput.pills,
+                style: resolvedInput.style,
+                maxWidth: resolvedInput.maxWidthForShape,
+                pixelScale: pixelScale,
+                emitGlyphs: false,
+                bypassCache: false
+            )
+        }
+        let hScroll: Float = (node.el.isSingleLineInput || !edit.multiline)
+            ? (inputMachines.inputScroll[node.path] ?? 0)
+            : 0
+        let point = hitGeometryByPath[node.path]?.turn?.unturn(Vec2(x, y)) ?? Vec2(x, y)
+        let originX = rect.x + (node.el.layout.padding.left - hScroll) * sx
+        let originY = rect.y + node.el.layout.padding.top * sy
+        for (range, pillId) in pills {
+            let boxes = textSystem.selectionRects(in: shaped, utf8Range: range, pixelScale: pixelScale)
+            for box in boxes where box.z > 0 && box.w > 0 {
+                let x0 = originX + box.x * sx
+                let y0 = originY + box.y * sy
+                let x1 = x0 + box.z * sx
+                let y1 = y0 + box.w * sy
+                if point.x >= x0 && point.x < x1 && point.y >= y0 && point.y < y1 {
+                    return pillId
+                }
+            }
+        }
+        return nil
+    }
+
     // MARK: - Tooltips (`El.help` + `HelpLook`)
 
     /// Visible unoccluded help regions `[x0, y0, x1, y1]` + normalized text in paint order for native hosts.
@@ -14999,6 +15544,71 @@ public final class Runtime<State> {
         return parts
     }
 
+    private func helpOver() -> (over: HelpOver, underHit: HelpHitRecord?) {
+        // A tooltip held open shows first (a Copy button's "Copied"), noted as the frame's help
+        // hits were pushed (`helpState.heldNodeId`, #1300).
+        if let heldId = helpState.heldNodeId,
+           let heldIdx = nodeIndexById[heldId],
+           flatNodes.indices.contains(heldIdx) {
+            let node = flatNodes[heldIdx]
+            let target = HelpTarget(path: node.path, link: nil)
+            let hit = helpState.hits.last(where: { $0.path == node.path && $0.linkIndex == nil })
+            return (.forced(target), hit)
+        }
+        let (over, underHit) = pointerHelpOver()
+        // With the pointer on no help element, the one the keyboard focused shows its own
+        // (`HelpLook.onFocus`, #1300).
+        if (over == .nothing || over == .away),
+           currentHelpLook().onFocus,
+           focusKeyboard,
+           let fPath = focusedPath,
+           let fIdx = nodeByPath[fPath],
+           flatNodes.indices.contains(fIdx) {
+            let fNode = flatNodes[fIdx]
+            if let h = fNode.el.a11yHelp, !h.isEmpty,
+               !fNode.effectiveInert,
+               !subtreeExiting(fIdx) {
+                let hit = helpState.hits.last(where: { $0.path == fNode.path && $0.linkIndex == nil })
+                if !fNode.el.isHelpWhenTruncated || hit != nil {
+                    let target = HelpTarget(path: fNode.path, link: nil)
+                    return (.focused(target), hit)
+                }
+            }
+        }
+        return (over, underHit)
+    }
+
+    private func pointerHelpOver() -> (over: HelpOver, underHit: HelpHitRecord?) {
+        let inViewport = pointerPosition.x >= 0 && pointerPosition.x < viewport.x &&
+                         pointerPosition.y >= 0 && pointerPosition.y < viewport.y
+        if !inViewport {
+            return (.away, nil)
+        } else if heldHover() != nil {
+            // While moving layout holds hover, the tooltip keeps its element, and nothing sliding
+            // under the pointer starts a wait (`help.rs::help_over`).
+            if let kept = helpState.tipState.target, hoverLive(kept.path) != nil {
+                // Kept whenever the element is live, drawn into this frame's hits or not (a glide
+                // may carry it out of view); the tip draws from its hit when there is one.
+                let hit = helpState.hits.last(where: { $0.path == kept.path && $0.linkIndex == kept.link })
+                return (.help(kept), hit)
+            } else {
+                return (.nothing, nil)
+            }
+        } else if let u = helpUnder(point: pointerPosition) {
+            let target = HelpTarget(path: u.hit.path, link: u.hit.linkIndex)
+            // A press holds the pointer: a drag across other elements starts no tooltip.
+            if activeDrag != nil && helpState.tipState.target != target {
+                return (.nothing, nil)
+            } else if u.reaches {
+                return (.help(target), u.hit)
+            } else {
+                return (.covered(target), nil)
+            }
+        } else {
+            return (.nothing, nil)
+        }
+    }
+
     private func updateHelp(at now: Double, primitives: inout [Primitive], recordGlyphPage: (Int, UInt16) -> Void) {
         helpState.regions.removeAll(keepingCapacity: true)
         if useNativeHelp {
@@ -15018,42 +15628,7 @@ public final class Runtime<State> {
             return
         }
 
-        let inViewport = pointerPosition.x >= 0 && pointerPosition.x < viewport.x &&
-                         pointerPosition.y >= 0 && pointerPosition.y < viewport.y
-        let over: HelpOver
-        let underHit: HelpHitRecord?
-        if !inViewport {
-            over = .away
-            underHit = nil
-        } else if heldHover() != nil {
-            // While moving layout holds hover, the tooltip keeps its element, and nothing sliding
-            // under the pointer starts a wait (`help.rs::help_over`).
-            if let kept = helpState.tipState.target, hoverLive(kept.path) != nil {
-                // Kept whenever the element is live, drawn into this frame's hits or not (a glide
-                // may carry it out of view); the tip draws from its hit when there is one.
-                over = .help(kept)
-                underHit = helpState.hits.last(where: { $0.path == kept.path && $0.linkIndex == kept.link })
-            } else {
-                over = .nothing
-                underHit = nil
-            }
-        } else if let u = helpUnder(point: pointerPosition) {
-            let target = HelpTarget(path: u.hit.path, link: u.hit.linkIndex)
-            // A press holds the pointer: a drag across other elements starts no tooltip.
-            if activeDrag != nil && helpState.tipState.target != target {
-                over = .nothing
-                underHit = nil
-            } else if u.reaches {
-                over = .help(target)
-                underHit = u.hit
-            } else {
-                over = .covered(target)
-                underHit = nil
-            }
-        } else {
-            over = .nothing
-            underHit = nil
-        }
+        let (over, underHit) = helpOver()
 
         stepHelpState(event: .frame(over: over, now: now), at: now)
         helpState.currentTip = nil

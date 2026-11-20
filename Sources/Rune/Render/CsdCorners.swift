@@ -38,59 +38,91 @@ public struct CsdCorners: Sendable, Equatable {
         radiusPx > 0
     }
 
-    /// Vertex layout matching `render/csd_corners.rs`: `(clipX, clipY, squareX, squareY, radiusPx)`.
+    /// Vertex layout matching `render/csd_corners.rs` (`#1299`):
+    /// `(clipX, clipY, centreX, centreY, radiusPx)` with flat corner arc centre in device pixels.
     public struct Vertex: Sendable, Equatable {
         public var clipX: Float
         public var clipY: Float
-        public var squareX: Float
-        public var squareY: Float
+        public var centreX: Float
+        public var centreY: Float
         public var radius: Float
+
+        public init(clipX: Float, clipY: Float, centreX: Float, centreY: Float, radius: Float) {
+            self.clipX = clipX
+            self.clipY = clipY
+            self.centreX = centreX
+            self.centreY = centreY
+            self.radius = radius
+        }
     }
 
     /// Builds the 12 triangle vertices (2 corner squares × 2 triangles) in NDC space for the
-    /// bottom-left and bottom-right corners.
+    /// bottom-left and bottom-right corners, carrying each corner arc's flat centre in device pixels.
     public func vertices() -> [Vertex] {
         let r = radiusPx
         guard r > 0, sizePx.width > 0, sizePx.height > 0 else { return [] }
         let w = Float(sizePx.width)
         let h = Float(sizePx.height)
-        let dx = (2.0 * r) / w
-        let dy = (2.0 * r) / h
-        // Bottom-left corner: NDC x in [-1, -1 + dx], y in [-1, -1 + dy]
-        // square coordinates measure from arc center (0, 0) to corner (-1, 1).
-        let bl: [Vertex] = [
-            Vertex(clipX: -1.0,      clipY: -1.0 + dy, squareX: -1.0, squareY: 0.0, radius: r),
-            Vertex(clipX: -1.0,      clipY: -1.0,      squareX: -1.0, squareY: 1.0, radius: r),
-            Vertex(clipX: -1.0 + dx, clipY: -1.0,      squareX:  0.0, squareY: 1.0, radius: r),
-            Vertex(clipX: -1.0,      clipY: -1.0 + dy, squareX: -1.0, squareY: 0.0, radius: r),
-            Vertex(clipX: -1.0 + dx, clipY: -1.0,      squareX:  0.0, squareY: 1.0, radius: r),
-            Vertex(clipX: -1.0 + dx, clipY: -1.0 + dy, squareX:  0.0, squareY: 0.0, radius: r),
+        var out: [Vertex] = []
+        out.reserveCapacity(12)
+        // Each corner's square runs from the arc's centre out to the window's edges, a radius
+        // either way; the bottom two sit a radius in from the foot's sides and off its edge, one
+        // reaching left and the other right.
+        let corners: [(centre: (Float, Float), side: Float)] = [
+            ((r, h - r), -1.0),
+            ((w - r, h - r), 1.0),
         ]
-        // Bottom-right corner: NDC x in [1 - dx, 1], y in [-1, -1 + dy]
-        let br: [Vertex] = [
-            Vertex(clipX: 1.0 - dx, clipY: -1.0 + dy, squareX: 0.0, squareY: 0.0, radius: r),
-            Vertex(clipX: 1.0 - dx, clipY: -1.0,      squareX: 0.0, squareY: 1.0, radius: r),
-            Vertex(clipX: 1.0,      clipY: -1.0,      squareX: 1.0, squareY: 1.0, radius: r),
-            Vertex(clipX: 1.0 - dx, clipY: -1.0 + dy, squareX: 0.0, squareY: 0.0, radius: r),
-            Vertex(clipX: 1.0,      clipY: -1.0,      squareX: 1.0, squareY: 1.0, radius: r),
-            Vertex(clipX: 1.0,      clipY: -1.0 + dy, squareX: 1.0, squareY: 0.0, radius: r),
+        let unitSquare: [(Float, Float)] = [
+            (0.0, 0.0), (1.0, 0.0), (0.0, 1.0),
+            (1.0, 0.0), (1.0, 1.0), (0.0, 1.0),
         ]
-        return bl + br
+        for (centre, side) in corners {
+            for (u, v) in unitSquare {
+                let x = centre.0 + side * u * r
+                let y = centre.1 + v * r
+                out.append(Vertex(
+                    clipX: x / w * 2.0 - 1.0,
+                    clipY: 1.0 - y / h * 2.0,
+                    centreX: centre.0,
+                    centreY: centre.1,
+                    radius: r
+                ))
+            }
+        }
+        return out
     }
 
-    /// Evaluates the fraction of the pixel cleared outside the arc (`0` inside, `1` outside,
-    /// 1-pixel smoothstep band across the arc), matching `render/csd_corners.rs::fs`.
-    public static func outsideFraction(squareX: Float, squareY: Float, radiusPx: Float) -> Float {
+    /// Evaluates the fraction of the pixel at exact device-pixel centre `(pixelX, pixelY)` cleared
+    /// outside the arc centred at `(centreX, centreY)` (`0` inside, `1` outside, 1-pixel smoothstep
+    /// band across the arc), matching `render/csd_corners.rs::fs` (`#1299`).
+    public static func outsideFraction(
+        pixelX: Float,
+        pixelY: Float,
+        centreX: Float,
+        centreY: Float,
+        radiusPx: Float
+    ) -> Float {
         guard radiusPx > 0 else { return 0 }
-        let dist = hypotf(squareX, squareY) * radiusPx
+        let dist = hypotf(pixelX - centreX, pixelY - centreY)
         let edge0 = radiusPx - 0.5
         let edge1 = radiusPx + 0.5
         let t = min(1.0, max(0.0, (dist - edge0) / (edge1 - edge0)))
         return t * t * (3.0 - 2.0 * t)
     }
 
+    /// Normalized corner-square convenience overload (measures distance `hypot(squareX, squareY) * radiusPx`).
+    public static func outsideFraction(squareX: Float, squareY: Float, radiusPx: Float) -> Float {
+        outsideFraction(
+            pixelX: squareX * radiusPx,
+            pixelY: squareY * radiusPx,
+            centreX: 0,
+            centreY: 0,
+            radiusPx: radiusPx
+        )
+    }
+
     /// Applies the bottom-corner fade in place to a top-down premultiplied RGBA8 framebuffer
-    /// (for CPU verification and software surfaces).
+    /// (for CPU verification and software surfaces), evaluating at exact pixel centres `(px + 0.5, py + 0.5)`.
     public func applyInPlace(rgba: inout [UInt8]) {
         let r = radiusPx
         let w = Int(sizePx.width)
@@ -98,14 +130,23 @@ public struct CsdCorners: Sendable, Equatable {
         guard r > 0, w > 0, h > 0, rgba.count >= w * h * 4 else { return }
         let span = min(Int(ceilf(r)), min(w, h))
         let yStart = max(0, h - span)
+        let centreY = Float(h) - r
+        let leftCentreX = r
+        let rightCentreX = Float(w) - r
         for py in yStart..<h {
-            let cy = (Float(py) + 0.5) - (Float(h) - r)
-            guard cy > 0 else { continue }
+            let pixelY = Float(py) + 0.5
+            guard pixelY > centreY else { continue }
             // Bottom-left
             for px in 0..<span {
-                let cx = (Float(px) + 0.5) - r
-                guard cx < 0 else { continue }
-                let outside = Self.outsideFraction(squareX: cx / r, squareY: cy / r, radiusPx: r)
+                let pixelX = Float(px) + 0.5
+                guard pixelX < leftCentreX else { continue }
+                let outside = Self.outsideFraction(
+                    pixelX: pixelX,
+                    pixelY: pixelY,
+                    centreX: leftCentreX,
+                    centreY: centreY,
+                    radiusPx: r
+                )
                 if outside > 0 {
                     let keep = 1.0 - outside
                     let idx = (py * w + px) * 4
@@ -117,9 +158,15 @@ public struct CsdCorners: Sendable, Equatable {
             // Bottom-right
             let xRightStart = max(span, w - span)
             for px in xRightStart..<w {
-                let cx = (Float(px) + 0.5) - (Float(w) - r)
-                guard cx > 0 else { continue }
-                let outside = Self.outsideFraction(squareX: cx / r, squareY: cy / r, radiusPx: r)
+                let pixelX = Float(px) + 0.5
+                guard pixelX > rightCentreX else { continue }
+                let outside = Self.outsideFraction(
+                    pixelX: pixelX,
+                    pixelY: pixelY,
+                    centreX: rightCentreX,
+                    centreY: centreY,
+                    radiusPx: r
+                )
                 if outside > 0 {
                     let keep = 1.0 - outside
                     let idx = (py * w + px) * 4
@@ -131,37 +178,74 @@ public struct CsdCorners: Sendable, Equatable {
         }
     }
 
-    /// GLSL 330 core fragment shader matching `crates/rune/src/render/csd_corners.rs`.
+    /// GLSL 330 core fragment shader matching `crates/rune/src/render/csd_corners.rs` (`#1299`).
     public static let glslFragmentSource: String = """
     #version 330 core
-    in vec2 v_square;
+    uniform vec2 u_viewport;
+    flat in vec2 v_centre;
     flat in float v_radius;
     out vec4 out_color;
     void main() {
-        float dist = length(v_square) * v_radius;
+        vec2 pixel = vec2(gl_FragCoord.x, u_viewport.y - gl_FragCoord.y);
+        float dist = length(pixel - v_centre);
         float outside = smoothstep(v_radius - 0.5, v_radius + 0.5, dist);
         if (outside <= 0.0) discard;
         out_color = vec4(0.0, 0.0, 0.0, outside);
     }
     """
 
-    /// WGSL shader matching `crates/rune/src/render/csd_corners.rs`.
+    /// WGSL shader matching `crates/rune/src/render/csd_corners.rs` (`#1299`).
     public static let wgslSource: String = """
+    // `centre` is the corner arc's centre in device pixels, flat across the corner's square, and
+    // `radius` is the arc's radius in device pixels, so the fade is one pixel wide whatever the scale.
+    // Measuring from `@builtin(position).xy` uses the rasterizer's exact pixel centre instead of an
+    // interpolated quad coordinate that can drift by subpixel ULPs on D3D12.
     struct Vertex {
         @builtin(position) at: vec4<f32>,
-        @location(0) square: vec2<f32>,
+        @location(0) @interpolate(flat) centre: vec2<f32>,
         @location(1) @interpolate(flat) radius: f32,
     };
-    @vertex fn vs(@location(0) at: vec2<f32>, @location(1) square: vec2<f32>, @location(2) radius: f32) -> Vertex {
-        return Vertex(vec4(at, 0.0, 1.0), square, radius);
+    @vertex fn vs(@location(0) at: vec2<f32>, @location(1) centre: vec2<f32>, @location(2) radius: f32) -> Vertex {
+        return Vertex(vec4(at, 0.0, 1.0), centre, radius);
     }
     @fragment fn fs(frag: Vertex) -> @location(0) vec4<f32> {
-        let distance = length(frag.square) * frag.radius;
+        let distance = length(frag.at.xy - frag.centre);
         let outside = smoothstep(frag.radius - 0.5, frag.radius + 0.5, distance);
         if outside <= 0.0 {
             discard;
         }
         return vec4(0.0, 0.0, 0.0, outside);
+    }
+    """
+
+    /// MSL shader matching `crates/rune/src/render/csd_corners.rs` (`#1299`).
+    public static let mslSource: String = """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct CsdCornerVertexIn {
+        float2 at [[attribute(0)]];
+        float2 centre [[attribute(1)]];
+        float radius [[attribute(2)]];
+    };
+    struct CsdCornerVertexOut {
+        float4 at [[position]];
+        float2 centre [[flat]];
+        float radius [[flat]];
+    };
+    vertex CsdCornerVertexOut csd_corners_vs(CsdCornerVertexIn in [[stage_in]]) {
+        CsdCornerVertexOut out;
+        out.at = float4(in.at, 0.0, 1.0);
+        out.centre = in.centre;
+        out.radius = in.radius;
+        return out;
+    }
+    fragment float4 csd_corners_fs(CsdCornerVertexOut frag [[stage_in]]) {
+        float distance = length(frag.at.xy - frag.centre);
+        float outside = smoothstep(frag.radius - 0.5, frag.radius + 0.5, distance);
+        if (outside <= 0.0) {
+            discard_fragment();
+        }
+        return float4(0.0, 0.0, 0.0, outside);
     }
     """
 }

@@ -462,6 +462,7 @@ struct UpstreamParity100Tests {
         }
         #expect(badRelease.value == 1)
 
+        #if !os(Windows)
         // Valid linear XRGB8888 temp file mmap round-trip through NativeSurface.pushDmabuf
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("rune-dmabuf-\(UUID().uuidString).bin")
         let bytes = Data([0x10, 0x20, 0x30, 0x00, 0x40, 0x50, 0x60, 0x00,
@@ -491,6 +492,7 @@ struct UpstreamParity100Tests {
         #expect(planes[0][0] == 0x10 && planes[0][3] == 255)
         #expect(planes[0][12] == 0xA0 && planes[0][15] == 255)
         #expect(releaseCounter.value == 1)
+        #endif
     }
 
     // MARK: - 11. #1188 Wayland CsdCorners

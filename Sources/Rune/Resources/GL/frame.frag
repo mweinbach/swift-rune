@@ -327,13 +327,15 @@ void main() {
     vec2 halfSize = vRect.zw * 0.5;
     vec2 center = vRect.xy + halfSize;
     vec4 col = vec4(0.0);
-    vec2 clip_p = vec2(gl_FragCoord.x, uViewport.y - gl_FragCoord.y) + uOrigin;
+    // Fragment position is the rasterizer's exact pixel centre; interpolated `vPoint` drifts by
+    // subpixel ULPs on some drivers. Only rotated glyphs need interpolated `vPoint`.
+    vec2 screen = vec2(gl_FragCoord.x, uViewport.y - gl_FragCoord.y) + uOrigin;
 
 #ifdef RUNE_OUTLINES
-    if (uAtlasFill != 0) clip_p.y = gl_FragCoord.y;
+    if (uAtlasFill != 0) screen.y = gl_FragCoord.y;
 #endif
     if (kind < 0.5) {
-        float d = sd_rounded(vPoint - center, halfSize, vRadii);
+        float d = sd_rounded(screen - center, halfSize, vRadii);
         float soft = max(vParams.z, 0.5);
         float bw = vParams.x;
         if (bw > 0.0) {
@@ -344,7 +346,7 @@ void main() {
                 vec2 ih = max(halfSize - vec2(w.y + w.w, w.x + w.z) * 0.5, vec2(0.0));
                 vec2 ic = center + vec2(w.w - w.y, w.x - w.z) * 0.5;
                 vec4 cut = vec4(max(w.x, w.w), max(w.x, w.y), max(w.z, w.y), max(w.z, w.w));
-                inner_d = sd_rounded(vPoint - ic, ih, sign(vRadii) * max(abs(vRadii) - cut, vec4(0.0)));
+                inner_d = sd_rounded(screen - ic, ih, sign(vRadii) * max(abs(vRadii) - cut, vec4(0.0)));
             }
             col = border_over(vFill, vBorder, d, inner_d, soft, bw, vParams.w, !sides && any(notEqual(vRadii, vec4(0.0))));
         } else {
@@ -353,13 +355,13 @@ void main() {
     } else if (kind < 1.5) {
         float sigma = max(vParams.z, 0.01);
         float corner = min(abs(vRadii.x), min(halfSize.x, halfSize.y));
-        col = vFill * shadow_fn(vPoint - center, halfSize, sigma, corner);
+        col = vFill * shadow_fn(screen - center, halfSize, sigma, corner);
         if (vUV.z > 0.0) {
             vec2 hole = vUV.zw * 0.5;
-            col = col * clamp(0.5 + sd_rounded(vPoint - (vRect.xy + vUV.xy + hole), hole, vec4(vRadii.w)), 0.0, 1.0);
+            col = col * clamp(0.5 + sd_rounded(screen - (vRect.xy + vUV.xy + hole), hole, vec4(vRadii.w)), 0.0, 1.0);
         }
     } else if (kind > 6.5) {
-        float d = sd_rounded(vPoint - center, halfSize, vRadii);
+        float d = sd_rounded(screen - center, halfSize, vRadii);
         if (kind > 10.5) {
             float soft = max(vParams.z, 0.5);
             float cov = clamp(0.5 - d / (soft * 2.0), 0.0, 1.0);
@@ -371,9 +373,9 @@ void main() {
             float t1 = (upper_open ? t1_raw - 2.0 : t1_raw);
             float t;
             if (vUV.z > 0.0) {
-                t = length((vPoint - vRect.xy - vUV.xy) / vUV.zw);
+                t = length((screen - vRect.xy - vUV.xy) / vUV.zw);
             } else {
-                t = 0.5 + dot(vPoint - center, vUV.xy);
+                t = 0.5 + dot(screen - center, vUV.xy);
             }
             if ((lower_open && t < t0) || (upper_open && t >= t1)) {
                 col = vec4(0.0);
@@ -385,8 +387,8 @@ void main() {
             float soft = max(vParams.z, 0.5);
             float bw = vParams.x;
             float ring = clamp(0.5 - d / (soft * 2.0), 0.0, 1.0) - clamp(0.5 - (d + bw) / (soft * 2.0), 0.0, 1.0);
-            float t = clamp((vPoint.y - vRect.y) / max(vRect.w, 1.0), 0.0, 1.0);
-            vec2 arc = ring_arc(clip_p - vRect.xy, vRect.zw, vRadii, bw);
+            float t = clamp((screen.y - vRect.y) / max(vRect.w, 1.0), 0.0, 1.0);
+            vec2 arc = ring_arc(screen - vRect.xy, vRect.zw, vRadii, bw);
             col = mix(vFill, vBorder, t) * (ring * dash_cov(arc.x, arc.y, vUV.xyz));
         } else {
             vec2 size = vec2(textureSize(uImageAtlas, 0));
@@ -397,7 +399,7 @@ void main() {
             vec2 upper = clamp(hasBounds ? vBorder.zw : max(vUV.xy, end), vec2(0), size);
             vec2 lo = min(floor(lower + lower * 1.1920929e-7), size - 1.0);
             vec2 hi = clamp(ceil(upper - upper * 1.1920929e-7) - 1.0, lo, size - 1.0);
-            vec2 coords = (vPoint - vRect.xy) / vRect.zw;
+            vec2 coords = (screen - vRect.xy) / vRect.zw;
             vec2 pixel = clamp(vUV.xy + coords * vUV.zw - 0.5, lo, hi);
             ivec2 t0 = ivec2(floor(pixel));
             ivec2 t1 = min(t0 + ivec2(1), ivec2(hi));
@@ -411,24 +413,24 @@ void main() {
             col = c * (vFill.a * clamp(0.5 - d, 0.0, 1.0));
         }
     } else if (kind > 4.5 && kind < 5.5) {
-        col = vFill * segment_fn(clip_p, vRadii.xy, vRadii.zw, vParams.x, vParams.z > 0.5);
+        col = vFill * segment_fn(screen, vRadii.xy, vRadii.zw, vParams.x, vParams.z > 0.5);
     } else if (kind > 5.5 && kind < 6.5) {
-        col = vFill * triangle_fn(clip_p, vRadii.xy, vRadii.zw, vUV.xy, uint(vParams.x + 0.5));
+        col = vFill * triangle_fn(screen, vRadii.xy, vRadii.zw, vUV.xy, uint(vParams.x + 0.5));
     } else if (kind > 2.5) {
         if (kind < 3.5) {
             float spread = vParams.x;
             vec2 ih = max(halfSize - vec2(spread), vec2(0.0));
-            vec2 q = vPoint - center - vUV.xy;
+            vec2 q = screen - center - vUV.xy;
             float lit;
             if (vParams.z < 0.3) {
                 lit = box_cov(q, ih, sign(vRadii) * max(abs(vRadii) - vec4(spread), vec4(0.0)));
             } else {
                 lit = shadow_fn(q, ih, vParams.z, max(min(abs(vRadii.x) - spread, min(ih.x, ih.y)), 0.0));
             }
-            col = vFill * box_cov(vPoint - center, halfSize, vRadii) * (1.0 - clamp(lit, 0.0, 1.0));
+            col = vFill * box_cov(screen - center, halfSize, vRadii) * (1.0 - clamp(lit, 0.0, 1.0));
         } else {
-            float d = sd_rounded(vPoint - center, halfSize, vRadii);
-            float t = clamp((vPoint.y - vRect.y) / max(vRect.w, 1.0), 0.0, 1.0);
+            float d = sd_rounded(screen - center, halfSize, vRadii);
+            float t = clamp((screen.y - vRect.y) / max(vRect.w, 1.0), 0.0, 1.0);
             float soft = max(vParams.z, 0.5);
             float bw = vParams.x;
             if (bw > 0.0) {
@@ -438,7 +440,6 @@ void main() {
             }
         }
     } else {
-        vec2 screen = clip_p;
         bool rotated = vParams.x != 0.0;
         vec2 glyphPoint = rotated ? vPoint : screen;
         if (any(lessThan(glyphPoint, vRect.xy)) || any(greaterThanEqual(glyphPoint, vRect.xy + vRect.zw))) discard;
@@ -480,7 +481,7 @@ void main() {
             col = vFill * pow(cov, vParams.w);
         }
     }
-    vec4 source = col * clip_alpha(clip_p, vClip, vFade);
+    vec4 source = col * clip_alpha(screen, vClip, vFade);
     bool flatFill = kind == 0.0 && vParams.x == 0.0 && vFill.a > 0.0 && vFill.a < 1.0;
     bool grayMask = kind == 2.0 && vRadii.w == 0.0 && vRadii.x == 0.0
         && vParams.x == 0.0 && vUV.z == 0.0 && vParams.w >= 0.0;

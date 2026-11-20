@@ -294,7 +294,12 @@ extension Kit {
         case .pressed: kitOver(skin.pressed, skin.fill)
         default: skin.fill
         }
-        var button = node.bg(fill).shadows(skin.shadows).focusRing(2, offset: 2.5, c.borderFocus)
+        var button = focusRingState(
+            node.bg(fill).shadows(skin.shadows),
+            2.0,
+            2.0,
+            state == .focus && enabled
+        )
         if let (top, bottom) = skin.sheen {
             button = button.gradient(top, bottom)
         }
@@ -302,8 +307,6 @@ extension Kit {
         guard enabled else { return button.disabled() }
         if state == .rest {
             button = button.hover(skin.hover).press(kitPressOver(skin.hover, skin.pressed))
-        } else if state == .focus {
-            button = button.outline(width: 2, offset: 2.5, color: c.borderFocus)
         }
         button = button.focusable()
         if let onClick { button = button.onClick(onClick) }

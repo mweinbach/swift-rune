@@ -218,6 +218,20 @@
           "note": "App request queue + drain ordering (r309, gap2/shell P2-11)"
         },
         {
+          "upstream": "src/app/tests.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift",
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/IOSApp.swift",
+            "Sources/Rune/Platform/RuneMacView.swift",
+            "Sources/Rune/Platform/RuneSwiftUIView.swift",
+            "Sources/Rune/Text/IOSTextInputModel.swift",
+            "Sources/Rune/AndroidPlatform.swift"
+          ],
+          "status": "ported",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/app/web.rs",
           "swift": [
             "Sources/Rune/WebPlatform.swift",
@@ -231,7 +245,7 @@
             "Tests/Browser/document-wasi.html"
           ],
           "status": "ported",
-          "note": "The five pinned app builders select a named canvas, full viewport or document mode, and support both early and deferred font URLs. Stock Swift WASI exercised initial layout and resizing at CSS width, dynamic titles and restored ownership, including 320×80→320×117 on real WebGPU and Canvas2D."
+          "note": "The five pinned app builders select a named canvas, full viewport or document mode, and support both early and deferred font URLs. Stock Swift WASI exercised initial layout and resizing at CSS width, dynamic titles and restored ownership, including 320\u00d780\u2192320\u00d7117 on real WebGPU and Canvas2D."
         },
         {
           "upstream": "src/clipboard.rs",
@@ -263,6 +277,15 @@
             "Sources/Rune/Edit/RichTextEdit.swift"
           ],
           "status": "ported"
+        },
+        {
+          "upstream": "src/clipboard/html_tests.rs",
+          "swift": [
+            "Sources/Rune/Edit/ClipboardSanitizer.swift",
+            "Sources/Rune/Edit/RichTextEdit.swift"
+          ],
+          "status": "ported",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/clipboard/macos.rs",
@@ -311,6 +334,15 @@
           "status": "ported"
         },
         {
+          "upstream": "src/clipboard/tests.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/Edit/ClipboardSanitizer.swift"
+          ],
+          "status": "ported",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/clipboard/tx.rs",
           "swift": [
             "Sources/Rune/DesktopIntegration.swift"
@@ -357,6 +389,22 @@
           ],
           "status": "partial",
           "note": "Native drag sources use AppKit on macOS, OLE on Windows, and Xdnd or a Wayland data device on Linux. Source types, result delivery and previews are shared across the desktop runtime."
+        },
+        {
+          "upstream": "src/drag_out/tests.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/Platform/WindowsDragSource.swift",
+            "Sources/Rune/Platform/DesktopDragPreview.swift",
+            "Sources/Rune/Platform/LinuxDragSource.swift",
+            "Sources/CRuneDesktopServices/x11_drag.c",
+            "Sources/CRuneDesktopServices/wayland_drag.c",
+            "Tests/Support/WindowsDrag/Smoke.cpp",
+            "Tests/Support/X11Drag/test.py",
+            "scripts/test-linux-drag-out.py"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/drag_out/windows.rs",
@@ -601,7 +649,7 @@
             "Tests/RuneTests/PixelSnapParityTests.swift"
           ],
           "status": "ported",
-          "note": "The modifier keeps the child on its parent’s moving right edge. Runtime tests sample the child and parent edges along the animation."
+          "note": "The modifier keeps the child on its parent\u2019s moving right edge. Runtime tests sample the child and parent edges along the animation."
         },
         {
           "upstream": "src/el/scroll.rs",
@@ -717,6 +765,14 @@
           "status": "partial"
         },
         {
+          "upstream": "src/el/virtual_rows_tests.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/el/visual.rs",
           "swift": [
             "Sources/Rune/El.swift"
@@ -764,6 +820,18 @@
           "status": "partial"
         },
         {
+          "upstream": "src/file_dialog/tests.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/Platform/DesktopServices.swift",
+            "Sources/CRuneDesktopServices/windows.c",
+            "Sources/CRuneDesktopServices/linux.c",
+            "Sources/CRuneDesktopServices/GtkAccessibility.c"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/flight.rs",
           "swift": [
             "Sources/Rune/FlightAndMemo.swift"
@@ -789,13 +857,21 @@
           "status": "partial"
         },
         {
+          "upstream": "src/frame/clock_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/frame/clock_walk_tests.rs",
           "swift": [
             "Tests/RuneTests/FrameClockParityTests.swift",
             "Tests/RuneTests/ShellAuditParityTests.swift"
           ],
           "status": "partial",
-          "note": "Actual FrameClock/runtime fixtures exercise late/resume splitting, catch-up versus new motion, hold/present bounds and late spring retargeting. The original walks an eight-symbol schedule at exact depth 5 and compares returned step, last time and pending start set with an independent old implementation after each call. Swift’s sampled scenarios omit that differential."
+          "note": "Actual FrameClock/runtime fixtures exercise late/resume splitting, catch-up versus new motion, hold/present bounds and late spring retargeting. The original walks an eight-symbol schedule at exact depth 5 and compares returned step, last time and pending start set with an independent old implementation after each call. Swift\u2019s sampled scenarios omit that differential."
         },
         {
           "upstream": "src/frame/encoded.rs",
@@ -864,6 +940,19 @@
           "note": "Real native tracing records Mac shown/skipped Metal callbacks, including six frames from just the selected heterogeneous window. Normal Windows ARM64 WGL produced six submissions with public frame time within 0.0004 ms of its CPU submission. Linux SDL records wall-clock submissions. Compositor display timestamps remain provider-specific."
         },
         {
+          "upstream": "src/frame/present_time_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Tooling/NativeWindowTrace.swift",
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Platform/WindowHostingMacOS.swift",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/Rune/Win32Platform.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/frame/present_time_walk_tests.rs",
           "swift": [
             "Tests/RuneTests/ShellAuditParityTests.swift",
@@ -880,7 +969,7 @@
             "Tests/RuneTests/OverlayMetalSubmissionTests.swift"
           ],
           "status": "n/a",
-          "note": "The pinned worker is selected only by the optional macOS wgpu overlay backend. Swift uses the same single-command-buffer presentation as Rust’s default native Metal backend. Native overlay tests verified ordering, release while blocked, transparent pixels and recovery after rejection."
+          "note": "The pinned worker is selected only by the optional macOS wgpu overlay backend. Swift uses the same single-command-buffer presentation as Rust\u2019s default native Metal backend. Native overlay tests verified ordering, release while blocked, transparent pixels and recovery after rejection."
         },
         {
           "upstream": "src/frame/present_worker_tests.rs",
@@ -890,7 +979,7 @@
             "Tests/RuneTests/OverlayMetalSubmissionTests.swift"
           ],
           "status": "n/a",
-          "note": "The pinned worker is selected only by the optional macOS wgpu overlay backend. Swift uses the same single-command-buffer presentation as Rust’s default native Metal backend. Native overlay tests verified ordering, release while blocked, transparent pixels and recovery after rejection."
+          "note": "The pinned worker is selected only by the optional macOS wgpu overlay backend. Swift uses the same single-command-buffer presentation as Rust\u2019s default native Metal backend. Native overlay tests verified ordering, release while blocked, transparent pixels and recovery after rejection."
         },
         {
           "upstream": "src/frame/profile.rs",
@@ -916,12 +1005,24 @@
           "note": "WindowHandle and Runtime share the actual surface meter. Without devStats, real AppKit single and grouped, Catalyst UIKit, Windows ARM64 WGL, X11 and Wayland handles matched the runtime totals. Physical Windows DXGI and high-refresh iOS have separate verification paths."
         },
         {
+          "upstream": "src/frame/surface_stats_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/RecorderAndRewind.swift",
+            "Sources/Rune/Platform/WindowHostingMacOS.swift",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/Rune/IOSApp.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/frame/surface_stats_walk_tests.rs",
           "swift": [
             "Tests/RuneTests/ShellAuditParityTests.swift"
           ],
           "status": "partial",
-          "note": "Swift tests surface counters, pacing changes and summary/per-second readings using the meter. Rust compares every length ≤5 schedule against an independent counter/warning implementation after each event, checks all nine totals, time-window rolls and one spin warning on the second hot second. The Swift sampled tests do not reproduce that old-vs-new state walk."
+          "note": "Swift tests surface counters, pacing changes and summary/per-second readings using the meter. Rust compares every length \u22645 schedule against an independent counter/warning implementation after each event, checks all nine totals, time-window rolls and one spin warning on the second hot second. The Swift sampled tests do not reproduce that old-vs-new state walk."
         },
         {
           "upstream": "src/hot.rs",
@@ -932,6 +1033,16 @@
           ],
           "status": "partial",
           "note": "The Swift runtime supports file watching and state inspection; Luau has its own VM reload. Native Swift lacks the original Rust state-preserving patch dispatch, guarded publication and --hot/--snap-on-patch host. A normal Swift app with these flags wrote the ordinary --snap only."
+        },
+        {
+          "upstream": "src/hot_tests.rs",
+          "swift": [
+            "Sources/Rune/El.swift",
+            "Sources/Rune/Runtime/HotState.swift",
+            "Sources/Rune/Tooling.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/input.rs",
@@ -1399,7 +1510,7 @@
             "Sources/Rune/DesktopIntegration.swift"
           ],
           "status": "ported",
-          "note": "AppKit menu equivalents use lowercase accelerator characters, the original shift/control/option/command flag bits and matching AppKit codes for arrows, navigation, deletion and F1…F24. The real native menu setter applies them. Fixtures exercise Dvorak, symbol chords and the complete named-key table."
+          "note": "AppKit menu equivalents use lowercase accelerator characters, the original shift/control/option/command flag bits and matching AppKit codes for arrows, navigation, deletion and F1\u2026F24. The real native menu setter applies them. Fixtures exercise Dvorak, symbol chords and the complete named-key table."
         },
         {
           "upstream": "src/native_menu/key_equivalent_tests.rs",
@@ -1551,6 +1662,22 @@
             "Sources/Rune/Runtime.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/overlay/keys.rs",
+          "swift": [
+            "Sources/Rune/Platform/OverlayKeys.swift"
+          ],
+          "status": "ported",
+          "note": "Cross-platform overlay KeyPolicy keyboard capability & focus helper (#1240)"
+        },
+        {
+          "upstream": "src/overlay/keys_tests.rs",
+          "swift": [
+            "Tests/RuneTests/UpstreamSync1240to1299PlatformTests.swift"
+          ],
+          "status": "ported",
+          "note": "Overlay KeyPolicy tests across backends (#1240)"
         },
         {
           "upstream": "src/overlay/lifetime.rs",
@@ -1770,6 +1897,14 @@
           "note": "The Swift independent single-finger state and readiness model compare all sequences to touch depth 5 and configure/scale depth 6, matching the original walks, event order, chosen pointer and size/scale. They also verify replacement of unread configure sizes."
         },
         {
+          "upstream": "src/platform/layer_shell_tests.rs",
+          "swift": [
+            "Sources/Rune/LinuxPlatform.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/platform/macos.rs",
           "swift": [
             "Sources/Rune/MacOSApp.swift"
@@ -1799,6 +1934,14 @@
             "Sources/Rune/MacOSApp.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/platform/macos/drop_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/platform/macos/geometry.rs",
@@ -2261,7 +2404,7 @@
             "Tests/Windows/Startup/menu_theme.c"
           ],
           "status": "ported",
-          "note": "The native process menu theme follows focused window light/dark policy or the system. Repeated requests are deduplicated. Windows 11 ARM64 and emulated x64 verified follow-system→dark→dark→light→follow against real uxtheme state. Pre-1903 compatibility is source-guarded."
+          "note": "The native process menu theme follows focused window light/dark policy or the system. Repeated requests are deduplicated. Windows 11 ARM64 and emulated x64 verified follow-system\u2192dark\u2192dark\u2192light\u2192follow against real uxtheme state. Pre-1903 compatibility is source-guarded."
         },
         {
           "upstream": "src/platform/win32/dcomp_handover.rs",
@@ -2272,7 +2415,7 @@
             "Sources/Rune/Win32Platform.swift"
           ],
           "status": "partial",
-          "note": "Windows ARM64/x64 verified 108 actual DWM frames across four sources, dirty updates, resize and rollback. Four stock Swift windows then verified seamless CPU→GPU pixels, CPU-only operation, direct GPU and interactive CPU fallback after three real failed GPU retries. Physical direct WGL_NV_DX_interop2 and exact backend timing are separate."
+          "note": "Windows ARM64/x64 verified 108 actual DWM frames across four sources, dirty updates, resize and rollback. Four stock Swift windows then verified seamless CPU\u2192GPU pixels, CPU-only operation, direct GPU and interactive CPU fallback after three real failed GPU retries. Physical direct WGL_NV_DX_interop2 and exact backend timing are separate."
         },
         {
           "upstream": "src/platform/win32/dcomp_handover_tests.rs",
@@ -2444,7 +2587,7 @@
             "Sources/Rune/Platform/LinuxOverlayHost.swift"
           ],
           "status": "ported",
-          "note": "Both pinned input tests run through actual GDK/XInput on Weston and XWayland. At 2×, 40×20 physical pixels delivered 20×10 logical points. Real primary/secondary moves, ignored wheel buttons, held crossing and outside release matched the expected order."
+          "note": "Both pinned input tests run through actual GDK/XInput on Weston and XWayland. At 2\u00d7, 40\u00d720 physical pixels delivered 20\u00d710 logical points. Real primary/secondary moves, ignored wheel buttons, held crossing and outside release matched the expected order."
         },
         {
           "upstream": "src/playground.rs",
@@ -2459,7 +2602,7 @@
             "Tests/RuneTests/PlaygroundUnitParityTests.swift"
           ],
           "status": "ported",
-          "note": "The combined mounted test compares the chrome’s fill with both appearance tokens as the app setting changes and checks Dark appearance in the stage label. A second runtime with no explicit app appearance uses the system color."
+          "note": "The combined mounted test compares the chrome\u2019s fill with both appearance tokens as the app setting changes and checks Dark appearance in the stage label. A second runtime with no explicit app appearance uses the system color."
         },
         {
           "upstream": "src/playground/folds.rs",
@@ -2575,7 +2718,7 @@
             "Tests/RuneTests/PlaygroundIntegrationParityTests.swift"
           ],
           "status": "partial",
-          "note": "The mounted tests check the centered 300×200 scene, scrolling width/1600pt height and fill geometry. Other tests exercise handlers in a stage. The exact scrolling fixture asserting that the root with handlers remains the keyed tall story element rather than its margin wrapper was not located."
+          "note": "The mounted tests check the centered 300\u00d7200 scene, scrolling width/1600pt height and fill geometry. Other tests exercise handlers in a stage. The exact scrolling fixture asserting that the root with handlers remains the keyed tall story element rather than its margin wrapper was not located."
         },
         {
           "upstream": "src/playground/story.rs",
@@ -2821,7 +2964,7 @@
             "Tests/RuneTests/RenderParityTests.swift"
           ],
           "status": "ported",
-          "note": "The true GPU fill and clip cases sample a 96×80 image against the original piecewise cubic Apple curve. Both paths check worst coverage error below 0.04. The half-shorter-side case checks the filled center, corner opening and partially covered side."
+          "note": "The true GPU fill and clip cases sample a 96\u00d780 image against the original piecewise cubic Apple curve. Both paths check worst coverage error below 0.04. The half-shorter-side case checks the filled center, corner opening and partially covered side."
         },
         {
           "upstream": "src/render/cpu_boot.rs",
@@ -2927,7 +3070,7 @@
             "Tests/RuneTests/CpuBootRecordFormatTests.swift"
           ],
           "status": "ported",
-          "note": "The capture format stores 2048-square atlas pages and translates Swift’s stacked UVs. Two original Rust captures re-encoded byte-for-byte, including the rectangle-only variant, and Rust rendered the Swift cross-tile glyph capture identically."
+          "note": "The capture format stores 2048-square atlas pages and translates Swift\u2019s stacked UVs. Two original Rust captures re-encoded byte-for-byte, including the rectangle-only variant, and Rust rendered the Swift cross-tile glyph capture identically."
         },
         {
           "upstream": "src/render/cpu_boot/scroll.rs",
@@ -3016,7 +3159,7 @@
             "Tests/RuneTests/PortableGLRendererTests.swift"
           ],
           "status": "n/a",
-          "note": "These two tests regenerate and compare wgpu’s FXC-produced HLSL/DXBC shader artifacts. The stock Windows UI renderer uses WGL shader resources, and its DXGI presentation surface does not use those wgpu shader binaries."
+          "note": "These two tests regenerate and compare wgpu\u2019s FXC-produced HLSL/DXBC shader artifacts. The stock Windows UI renderer uses WGL shader resources, and its DXGI presentation surface does not use those wgpu shader binaries."
         },
         {
           "upstream": "src/render/fill.rs",
@@ -3135,6 +3278,14 @@
             "Sources/Rune/MetalRenderer.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/render/metallib_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/render/native_surface_tests.rs",
@@ -3850,6 +4001,17 @@
           "status": "partial"
         },
         {
+          "upstream": "src/runtime/input/focus_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/FocusWhenShownAndPollSplit.swift",
+            "Tests/RuneTests/FocusWhenShownParityTests.swift",
+            "Tests/RuneTests/Slice4EdgeParityWave3BTests.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/runtime/input/gesture.rs",
           "swift": [
             "Sources/Rune/Runtime.swift",
@@ -3858,6 +4020,14 @@
             "Tests/RuneTests/WheelChainParityTests.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/runtime/input/gesture_routing_tests.rs",
+          "swift": [
+            "Tests/RuneTests"
+          ],
+          "status": "ported",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/runtime/input/gesture_tests.rs",
@@ -3884,6 +4054,14 @@
           ],
           "status": "ported",
           "note": "Compiled the unchanged pinned Rust HelpLook implementation and called every public Swift style builder in the built Rune module. All 18 light/dark presets and finite, signed-zero, NaN and infinite setter combinations agreed numerically on colors, layout, clamping, fonts, duration and ordered non-inset shadow slots. 14 full rows match bit-for-bit; four have only +0/-0 sign differences on zero-length geometry/duration."
+        },
+        {
+          "upstream": "src/runtime/input/help_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/runtime/input/hit.rs",
@@ -3963,11 +4141,27 @@
           "status": "partial"
         },
         {
+          "upstream": "src/runtime/input/modifier_keys_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/runtime/input/physical.rs",
           "swift": [
             "Sources/Rune/Runtime.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/runtime/input/physical_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/runtime/input/pointer.rs",
@@ -4068,6 +4262,14 @@
           "status": "partial"
         },
         {
+          "upstream": "src/runtime/input/touch_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/runtime/input_click_tests.rs",
           "swift": [
             "Tests/RuneTests/PointerHitParityTests.swift"
@@ -4100,7 +4302,7 @@
             "Tests/RuneTests/RenderSlice3CacheTests.swift"
           ],
           "status": "partial",
-          "note": "All 21 real cache/eviction/60-wheel-frame/400-scale/multipage checks have corresponding historical macOS and Linux passes. One exact performance oracle differs: Swift counts the number of frames that rasterized any glyph during the 1200-frame 0.25→4 zoom, versus Rust bounding the total newly rasterized glyphs / first-frame glyph count. Additional repeated rasterizations in the same frame can escape the Swift bound; CoreText requires >=10 initial masks while GL-native text only checks >0."
+          "note": "All 21 real cache/eviction/60-wheel-frame/400-scale/multipage checks have corresponding historical macOS and Linux passes. One exact performance oracle differs: Swift counts the number of frames that rasterized any glyph during the 1200-frame 0.25\u21924 zoom, versus Rust bounding the total newly rasterized glyphs / first-frame glyph count. Additional repeated rasterizations in the same frame can escape the Swift bound; CoreText requires >=10 initial masks while GL-native text only checks >0."
         },
         {
           "upstream": "src/runtime/layer_tests.rs",
@@ -4123,7 +4325,7 @@
             "Tests/RuneTests/LineClampParityTests.swift"
           ],
           "status": "partial",
-          "note": "The ten runtime tests cover grapheme-safe elision, limits, full source copy, links and hidden spans, cache reuse, editable fields and wide words. The 2-line wrap-anywhere oracle reads only the final line’s width, whereas Rust reads whole TextFlow.full_width() at 2x to enforce the bound across both lines."
+          "note": "The ten runtime tests cover grapheme-safe elision, limits, full source copy, links and hidden spans, cache reuse, editable fields and wide words. The 2-line wrap-anywhere oracle reads only the final line\u2019s width, whereas Rust reads whole TextFlow.full_width() at 2x to enforce the bound across both lines."
         },
         {
           "upstream": "src/runtime/live_check_tests.rs",
@@ -4156,7 +4358,7 @@
             "Tests/RuneTests/ElSliceGroup2And3ParityTests.swift"
           ],
           "status": "partial",
-          "note": "Paired memo/fresh runtimes test moved ancestors and paths, exits, nested self-prefix keys, selection, focus, duplicate keys and virtual children. Geometry and metadata are compared across frames. Rust also checks retained spare-node capacity after content height probes and storage reuse through a move. Swift’s move/fresh equality does not establish retained allocations."
+          "note": "Paired memo/fresh runtimes test moved ancestors and paths, exits, nested self-prefix keys, selection, focus, duplicate keys and virtual children. Geometry and metadata are compared across frames. Rust also checks retained spare-node capacity after content height probes and storage reuse through a move. Swift\u2019s move/fresh equality does not establish retained allocations."
         },
         {
           "upstream": "src/runtime/motion.rs",
@@ -4181,7 +4383,7 @@
             "Tests/RuneTests/ContentSlideAndMotionTests.swift"
           ],
           "status": "ported",
-          "note": "All three reducer cases compare slide distance, transferred spring velocity, following versus settling liveness, and eventual stop across substeps. The tests run Rune’s actual SlidePhase transitions."
+          "note": "All three reducer cases compare slide distance, transferred spring velocity, following versus settling liveness, and eventual stop across substeps. The tests run Rune\u2019s actual SlidePhase transitions."
         },
         {
           "upstream": "src/runtime/motion/flights.rs",
@@ -4443,7 +4645,7 @@
             "Sources/Rune/Render/RenderElAndRuntime.swift"
           ],
           "status": "ported",
-          "note": "Both original Rust tests and native Swift passed all 37,448 transitions, including emitted layer reuse. Real Metal tests also verify an overflowing 2× scale settles, pinch reuses across 60 steps and the resting texture is upgraded at the final resolution."
+          "note": "Both original Rust tests and native Swift passed all 37,448 transitions, including emitted layer reuse. Real Metal tests also verify an overflowing 2\u00d7 scale settles, pinch reuses across 60 steps and the resting texture is upgraded at the final resolution."
         },
         {
           "upstream": "src/runtime/paint/content.rs",
@@ -4560,7 +4762,7 @@
             "Tests/RuneTests/ElInc2ParityTests.swift"
           ],
           "status": "ported",
-          "note": "Compiled original pinned Rust inherit_fade/in_fade and the Swift renderer’s actual private helpers. Across 65,536 deterministic inputs including signed widths, nested origins, empty bounds, edge ties and crossing rectangles, every component bit pattern and Boolean matched (digest 7332120261417384581). Native painter calls these helpers for nested and scrolled clips; shipped GPU tests inspect inherited linear/nested soft edges."
+          "note": "Compiled original pinned Rust inherit_fade/in_fade and the Swift renderer\u2019s actual private helpers. Across 65,536 deterministic inputs including signed widths, nested origins, empty bounds, edge ties and crossing rectangles, every component bit pattern and Boolean matched (digest 7332120261417384581). Native painter calls these helpers for nested and scrolled clips; shipped GPU tests inspect inherited linear/nested soft edges."
         },
         {
           "upstream": "src/runtime/paint/state.rs",
@@ -4631,7 +4833,7 @@
             "Tests/RuneTests/RenderSlice3RoundedClipTests.swift"
           ],
           "status": "partial",
-          "note": "All fourteen mapped Rust scenarios have macOS records. The baseline Linux inventory contains thirteen, including actual GPU clip readbacks. The remaining nested per-corner card fixture was Apple-only at baseline. Working-tree platform expansion requires the renderer owner’s receipt."
+          "note": "All fourteen mapped Rust scenarios have macOS records. The baseline Linux inventory contains thirteen, including actual GPU clip readbacks. The remaining nested per-corner card fixture was Apple-only at baseline. Working-tree platform expansion requires the renderer owner\u2019s receipt."
         },
         {
           "upstream": "src/runtime/row_reorder_tests.rs",
@@ -4670,6 +4872,18 @@
           "status": "partial"
         },
         {
+          "upstream": "src/runtime/scroll/bottom_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift",
+            "Tests/RuneTests/ScrollAndStickySlice2ParityTests.swift",
+            "Sources/Rune/Runtime/ContentSlide.swift",
+            "Tests/RuneTests/ContentSlideAndMotionTests.swift",
+            "Sources/Rune/Runtime/ScrollStateMachines.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/runtime/scroll/drawn.rs",
           "swift": [
             "Sources/Rune/Runtime/ScrollStateMachines.swift",
@@ -4692,6 +4906,14 @@
             "Sources/Rune/Runtime.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/runtime/scroll/mode_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/runtime/scroll/nudge.rs",
@@ -4761,11 +4983,30 @@
           "status": "partial"
         },
         {
+          "upstream": "src/runtime/scroll/sticky_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift",
+            "Tests/RuneTests/ScrollAndStickySlice2ParityTests.swift",
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift",
+            "Tests/RuneTests/ElInc4ParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/runtime/scroll/touch.rs",
           "swift": [
             "Sources/Rune/Runtime.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/runtime/scroll/touch_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/runtime/scroll/watch.rs",
@@ -4780,7 +5021,22 @@
             "Tests/RuneTests/ElAndLiveHooksParityTests.swift"
           ],
           "status": "partial",
-          "note": "Pointer and programmatic scrolling preserve Rust’s sampled hand flag. Sticky-bottom offsets include current slack in the same frame. Rust and Swift fixtures checked nested selectors, mixed axes, unmarked dock motion, immediate/page/far scrolling and distinct observer positions."
+          "note": "Pointer and programmatic scrolling preserve Rust\u2019s sampled hand flag. Sticky-bottom offsets include current slack in the same frame. Rust and Swift fixtures checked nested selectors, mixed axes, unmarked dock motion, immediate/page/far scrolling and distinct observer positions."
+        },
+        {
+          "upstream": "src/runtime/scroll/watch_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime/ScrollWatchAndLiveExt.swift",
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift",
+            "Sources/Rune/Runtime/ScrollStateMachines.swift",
+            "Sources/Rune/Runtime/ScrollOffsetRequests.swift",
+            "Tests/RuneTests/ScrollStateMachinesParityTests.swift",
+            "Tests/RuneTests/ScrollRuntimeSlice2ParityTests.swift",
+            "Tests/RuneTests/ElAndLiveHooksParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/runtime/scroll/wheel.rs",
@@ -4801,6 +5057,18 @@
             "Tests/RuneTests/WheelChainParityTests.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/runtime/scroll/x_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Input/WheelLock.swift",
+            "Tests/RuneTests/WheelOwnerHandoffParityTests.swift",
+            "Sources/Rune/Input/CanvasGestureAndTouch.swift",
+            "Tests/RuneTests/WheelChainParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/runtime/select_all_tests.rs",
@@ -4825,6 +5093,14 @@
             "Sources/Rune/Runtime.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/runtime/selection/caret_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/runtime/selection/click.rs",
@@ -4956,7 +5232,7 @@
             "Tests/RuneTests/WidthHoldParityTests.swift"
           ],
           "status": "ported",
-          "note": "Swift checks the stride of the actual inline El and Runtime.FlatNode structs against Rust’s 800 and 512 byte maxima."
+          "note": "Swift checks the stride of the actual inline El and Runtime.FlatNode structs against Rust\u2019s 800 and 512 byte maxima."
         },
         {
           "upstream": "src/runtime/system_settings.rs",
@@ -5028,7 +5304,7 @@
             "Tests/RuneTests/ElKitcTextGlyphReplayTests.swift"
           ],
           "status": "partial",
-          "note": "Forty paragraphs at 320×240 replay 12 forward/reverse wheel steps, assert zero additional flattening on return, compare >200 replayed glyphs to a fresh frame at equal offset and check secure cache counts. Rust compares all raw rendered instances. Swift compares arrays filtered to glyph primitives; extra non-glyph geometry or ordering differences could go unnoticed."
+          "note": "Forty paragraphs at 320\u00d7240 replay 12 forward/reverse wheel steps, assert zero additional flattening on return, compare >200 replayed glyphs to a fresh frame at equal offset and check secure cache counts. Rust compares all raw rendered instances. Swift compares arrays filtered to glyph primitives; extra non-glyph geometry or ordering differences could go unnoticed."
         },
         {
           "upstream": "src/runtime/tests/group_opacity.rs",
@@ -5123,7 +5399,7 @@
             "Tests/RuneTests/FlightsAndOneSnapProofParityTests.swift"
           ],
           "status": "partial",
-          "note": "All five cases have named owners. The 5×5 phase sweep, centroid/area probes, held and moving glyphs, and 210-frame proof are implemented. Native backend and per-oracle threshold equivalence across all ordinary hosts was not independently verified. Source paths include separate reference and GPU renderers."
+          "note": "All five cases have named owners. The 5\u00d75 phase sweep, centroid/area probes, held and moving glyphs, and 210-frame proof are implemented. Native backend and per-oracle threshold equivalence across all ordinary hosts was not independently verified. Source paths include separate reference and GPU renderers."
         },
         {
           "upstream": "src/runtime/tests/picture_scale.rs",
@@ -5167,7 +5443,7 @@
             "Tests/RuneTests/ResizeRelayoutParityTests.swift"
           ],
           "status": "partial",
-          "note": "Real relayout cases exist, but the narrowing window test at Swift line 286 omits Rust’s per-step spare(offset,false)<=viewport and allows fewer than 25 view runs for 80 steps, where Rust requires fewer than 20."
+          "note": "Real relayout cases exist, but the narrowing window test at Swift line 286 omits Rust\u2019s per-step spare(offset,false)<=viewport and allows fewer than 25 view runs for 80 steps, where Rust requires fewer than 20."
         },
         {
           "upstream": "src/runtime/tests/relayout/live.rs",
@@ -5228,7 +5504,7 @@
             "Tests/RuneTests/ScrollGlyphRasterWindowTests.swift"
           ],
           "status": "partial",
-          "note": "Virtual growth, streaming updates and manual unpinning have public fixtures. In the macOS native wrapped fixture, submissions fell from 11,511 to 350 at the top and 328 at the bottom, and first-frame hard paragraphs increased from 92 to Rust’s 230. Twenty Linux CPU/GL captures matched unwindowed outputs byte-for-byte. Non-text resize/growth cases retain separate coverage."
+          "note": "Virtual growth, streaming updates and manual unpinning have public fixtures. In the macOS native wrapped fixture, submissions fell from 11,511 to 350 at the top and 328 at the bottom, and first-frame hard paragraphs increased from 92 to Rust\u2019s 230. Twenty Linux CPU/GL captures matched unwindowed outputs byte-for-byte. Non-text resize/growth cases retain separate coverage."
         },
         {
           "upstream": "src/runtime/tests/scroll_hover.rs",
@@ -5290,6 +5566,14 @@
           "status": "ported"
         },
         {
+          "upstream": "src/runtime/tests/settle_input.rs",
+          "swift": [
+            "Tests/RuneTests/UpstreamSync1241to1304RuntimeTests.swift"
+          ],
+          "status": "ported",
+          "note": "Settle-before-input regression tests (#1241)"
+        },
+        {
           "upstream": "src/runtime/tests/shimmer.rs",
           "swift": [
             "Tests/RuneTests/ElSliceShimmerTests.swift"
@@ -5313,7 +5597,7 @@
             "Tests/RuneTests/ElKitcStreamParityTests.swift"
           ],
           "status": "partial",
-          "note": "The Swift runtime probes overflowing vs clipping rows but grows an arrivesWhole row across twenty frames. Rust closes a 600→40pt fold over sixty frames and asserts its entire mask trace is identical under both modes."
+          "note": "The Swift runtime probes overflowing vs clipping rows but grows an arrivesWhole row across twenty frames. Rust closes a 600\u219240pt fold over sixty frames and asserts its entire mask trace is identical under both modes."
         },
         {
           "upstream": "src/runtime/tests/stream_pace.rs",
@@ -5434,7 +5718,16 @@
           "note": "Runtime video playback tests."
         },
         {
-          "upstream": "src/runtime/virtual/fill.rs",
+          "upstream": "src/runtime/virtual_list.rs",
+          "swift": [
+            "Sources/Rune/VirtualList.swift",
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift"
+          ],
+          "status": "ported",
+          "note": "Virtual list runtime module root (#1255)"
+        },
+        {
+          "upstream": "src/runtime/virtual_list/fill.rs",
           "swift": [
             "Sources/Rune/Runtime/VirtualFill.swift",
             "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift",
@@ -5446,7 +5739,7 @@
           "note": "The twelve-frame fill and three increasingly delayed resumes reset on movement, check progress at the bound, ignore stale due events and stop a starved view. Runtime invokes the machine both on a fill frame and on its returning deadline."
         },
         {
-          "upstream": "src/runtime/virtual/fill_resume_tests.rs",
+          "upstream": "src/runtime/virtual_list/fill_resume_tests.rs",
           "swift": [
             "Tests/RuneTests/VirtualAndGrowthSlice2ParityTests.swift",
             "Tests/RuneTests/ScrollAndStickySlice2ParityTests.swift"
@@ -5455,7 +5748,7 @@
           "note": "Exercises jumps and progressive measurement of thin rows within the fill budget."
         },
         {
-          "upstream": "src/runtime/virtual/fill_tests.rs",
+          "upstream": "src/runtime/virtual_list/fill_tests.rs",
           "swift": [
             "Tests/RuneTests/VirtualMachinesParityTests.swift"
           ],
@@ -5463,7 +5756,7 @@
           "note": "Includes the independent twelve-frame counter oracle and the 36,001-tick trace with twenty abandoned deadlines."
         },
         {
-          "upstream": "src/runtime/virtual/handoff.rs",
+          "upstream": "src/runtime/virtual_list/handoff.rs",
           "swift": [
             "Sources/Rune/Runtime/TailHandoff.swift",
             "Sources/Rune/Runtime/LiveTail.swift",
@@ -5473,7 +5766,7 @@
           "note": "A newly delivered row borrows room from the adjacent panel, with both edges following its growth (#1100)."
         },
         {
-          "upstream": "src/runtime/virtual/live_tail_tests.rs",
+          "upstream": "src/runtime/virtual_list/live_tail_tests.rs",
           "swift": [
             "Tests/RuneTests/LiveTailParityTests.swift",
             "Tests/RuneTests/TailHandoffParityTests.swift",
@@ -5483,7 +5776,7 @@
           "note": "Covers delivery, geometry-only changes, width holds, policy controls, adjacent face/corner retargeting and covered polls. The ink, unpinned and panel-handoff recordings run at 120 Hz."
         },
         {
-          "upstream": "src/runtime/virtual/pins.rs",
+          "upstream": "src/runtime/virtual_list/pins.rs",
           "swift": [
             "Sources/Rune/VirtualList.swift",
             "Sources/Rune/Runtime/VirtualPinsAndSelection.swift",
@@ -5493,7 +5786,7 @@
           "status": "partial"
         },
         {
-          "upstream": "src/runtime/virtual/pins_tests.rs",
+          "upstream": "src/runtime/virtual_list/pins_tests.rs",
           "swift": [
             "Tests/RuneTests/VirtualMachinesParityTests.swift",
             "Tests/RuneTests/PreparedRowRemountTests.swift"
@@ -5502,7 +5795,7 @@
           "note": "Checks five-event pin histories with indexed and stored builder interruptions, provider retention, and nested prepared remount fallback driven by runtime scrolling."
         },
         {
-          "upstream": "src/runtime/virtual/row_reorder.rs",
+          "upstream": "src/runtime/virtual_list/row_reorder.rs",
           "swift": [
             "Sources/Rune/VirtualList.swift",
             "Sources/Rune/Runtime/LiveTail.swift",
@@ -5514,7 +5807,7 @@
           "note": "Pinned-tail eligibility, motion, ink and shared row boundaries have dedicated live-tail fixtures (#1085, #1098)."
         },
         {
-          "upstream": "src/runtime/virtual/row_reorder/joined.rs",
+          "upstream": "src/runtime/virtual_list/row_reorder/joined.rs",
           "swift": [
             "Sources/Rune/Runtime/JoinedRowSeams.swift",
             "Tests/RuneTests/JoinedRowSeamTests.swift"
@@ -5523,7 +5816,7 @@
           "note": "Previously visible faces share their drawn and interactive boundary through reordering in the reference and native render paths (#1098)."
         },
         {
-          "upstream": "src/runtime/virtual/selection.rs",
+          "upstream": "src/runtime/virtual_list/selection.rs",
           "swift": [
             "Sources/Rune/Runtime/Selection/VirtualSelectionEnds.swift",
             "Sources/Rune/Runtime/Selection/VirtualSelectRequest.swift",
@@ -5534,7 +5827,7 @@
           "note": "Resolves selection holders, focus and code-driven requests by stable row identity."
         },
         {
-          "upstream": "src/runtime/virtual/selection_collect.rs",
+          "upstream": "src/runtime/virtual_list/selection_collect.rs",
           "swift": [
             "Sources/Rune/Runtime/Selection/VirtualSelectionCollect.swift",
             "Sources/Rune/Runtime/Selection/CopyJoin.swift",
@@ -5544,7 +5837,7 @@
           "note": "Collects bounded mounted and offscreen virtual selections and joins copied rows."
         },
         {
-          "upstream": "src/runtime/virtual/window.rs",
+          "upstream": "src/runtime/virtual_list/window.rs",
           "swift": [
             "Sources/Rune/VirtualList.swift"
           ],
@@ -5665,7 +5958,7 @@
             "Tests/RuneTests/LayoutAnchorFitZoomReadParityTests.swift"
           ],
           "status": "partial",
-          "note": "Baseline tests call pageMode/setPageScroll and check visibility threshold and the effect of fractional page scrolling on rendered geometry. Nine pinned page tests include overscan band rebasing, negative rubber band, stable document-coordinate mirror and avoiding relayout on toolbar resizes. New WebPageRuntimeTests.swift is outside the reviewed baseline and should be accounted using its owner’s current results."
+          "note": "Baseline tests call pageMode/setPageScroll and check visibility threshold and the effect of fractional page scrolling on rendered geometry. Nine pinned page tests include overscan band rebasing, negative rubber band, stable document-coordinate mirror and avoiding relayout on toolbar resizes. New WebPageRuntimeTests.swift is outside the reviewed baseline and should be accounted using its owner\u2019s current results."
         },
         {
           "upstream": "src/runtime/web/runtime.rs",
@@ -5675,6 +5968,16 @@
             "Tests/RuneTests/A11yReaderParityTests.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/runtime/web/runtime_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/WebPlatform.swift",
+            "Tests/RuneTests/A11yReaderParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/runtime/width_hold_tests.rs",
@@ -5940,6 +6243,21 @@
           "status": "ported"
         },
         {
+          "upstream": "src/shortcuts/service/tests.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/Input/MacOSGlobalHotKey.swift",
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Shell/DesktopShortcutDriver.swift",
+            "Sources/Rune/Shell/AppShortcutService.swift",
+            "Tests/Windows/GlobalShortcuts/probe.c",
+            "scripts/test-linux-shortcuts.py",
+            "Tests/Support/PortalShortcuts/test.py"
+          ],
+          "status": "ported",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/shortcuts/wayland.rs",
           "swift": [
             "Sources/CRuneDesktopServices/PortalHotkeys.c",
@@ -6083,7 +6401,7 @@
             "Tests/RuneTests/HeadlessCropTests.swift"
           ],
           "status": "ported",
-          "note": "The CLI selects the live stage or keyed rectangle, rounds out and clips to frame pixels. Rust and Swift produced a 38×23 keyed snapshot and the same nonzero exit, diagnostic and lack of output for a missing key."
+          "note": "The CLI selects the live stage or keyed rectangle, rounds out and clips to frame pixels. Rust and Swift produced a 38\u00d723 keyed snapshot and the same nonzero exit, diagnostic and lack of output for a missing key."
         },
         {
           "upstream": "src/tooling/eased_input.rs",
@@ -6093,7 +6411,7 @@
             "Tests/RuneTests/HeadlessGestureParityTests.swift"
           ],
           "status": "ported",
-          "note": "Swipes use the pinned 120 Hz quadratic trajectory and optional terminal fling. Native scripted fixtures check both directions, actual inertial travel and identical screen travel at 1× and 2×. Eased resize interpolates from the outer window dimensions."
+          "note": "Swipes use the pinned 120 Hz quadratic trajectory and optional terminal fling. Native scripted fixtures check both directions, actual inertial travel and identical screen travel at 1\u00d7 and 2\u00d7. Eased resize interpolates from the outer window dimensions."
         },
         {
           "upstream": "src/tooling/headless.rs",
@@ -6365,7 +6683,7 @@
             "Tests/RuneTests/PlaygroundUnitParityTests.swift"
           ],
           "status": "ported",
-          "note": "The test runs the same headless playground script twice, checks identical output snapshots/frame sequences and advances the virtual clock. A shipped style variant and target crops verify 80×80 for the puck, 988×480 for stage, 1920×480 whole window and both list/side panel crop dimensions."
+          "note": "The test runs the same headless playground script twice, checks identical output snapshots/frame sequences and advances the virtual clock. A shipped style variant and target crops verify 80\u00d780 for the puck, 988\u00d7480 for stage, 1920\u00d7480 whole window and both list/side panel crop dimensions."
         },
         {
           "upstream": "src/tooling/record.rs",
@@ -6536,7 +6854,7 @@
             "Tests/Support/LinuxWindowHandle/float-sway.py"
           ],
           "status": "ported",
-          "note": "The Linux host fixes the initial minimum and maximum dimensions before mapping and restores the app’s bounds after the first buffer. On Sway the flagged window floated, later resized freely, and its unflagged control tiled. Weston tests also exercised bounded, unbounded and nonresizable windows."
+          "note": "The Linux host fixes the initial minimum and maximum dimensions before mapping and restores the app\u2019s bounds after the first buffer. On Sway the flagged window floated, later resized freely, and its unflagged control tiled. Weston tests also exercised bounded, unbounded and nonresizable windows."
         },
         {
           "upstream": "src/window/chrome/mac.rs",
@@ -6757,6 +7075,14 @@
             "Sources/Rune/MacOSApp.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/window/spec_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/window/state.rs",
@@ -6984,7 +7310,7 @@
             "Tests/Windows/Redraw/Run.ps1"
           ],
           "status": "ported",
-          "note": "The scheduler re-arms paint after input and prevents one active window from starving another. Original Rust matched 344,400 transitions. On Windows ARM64 and x64, the rear window painted six times under input flood at about 16–17 ms intervals; the same control previously saw no paint in 500 ms. Hidden/covered/in-paint gates and ordinary WGL passed."
+          "note": "The scheduler re-arms paint after input and prevents one active window from starving another. Original Rust matched 344,400 transitions. On Windows ARM64 and x64, the rear window painted six times under input flood at about 16\u201317 ms intervals; the same control previously saw no paint in 500 ms. Hidden/covered/in-paint gates and ordinary WGL passed."
         },
         {
           "upstream": "src/window/surface/win.rs",
@@ -7030,7 +7356,7 @@
             "Tests/Windows/CustomFrame/app.cpp"
           ],
           "status": "ported",
-          "note": "At 100–200% scale and app zoom, all 1,263,360 tested CPU/Metal caption pixels were within one byte of Rust. In a normal Windows ARM64 app, external UI Automation located and clicked maximize and Close, the actual hit returned HTMAXBUTTON and the window maximized and reported Restore. The physical shell Snap popup and Windows 10 border remain untested."
+          "note": "At 100\u2013200% scale and app zoom, all 1,263,360 tested CPU/Metal caption pixels were within one byte of Rust. In a normal Windows ARM64 app, external UI Automation located and clicked maximize and Close, the actual hit returned HTMAXBUTTON and the window maximized and reported Restore. The physical shell Snap popup and Windows 10 border remain untested."
         },
         {
           "upstream": "src/window/win32.rs",
@@ -7069,6 +7395,20 @@
           ],
           "status": "partial",
           "note": "Retained root damage and bounded redraw matched full output for 218 mixed-edit frames per provider: Windows WGL, macOS CGL, Linux GLES and Android emulator GLES (872 total). A separate Windows DXGI queue test verified full, dirty and resized display pixels and frame slots. Direct WGL-to-DXGI interop still needs an extension-capable driver."
+        },
+        {
+          "upstream": "src/window/win32/damage_tests.rs",
+          "swift": [
+            "Sources/CRuneGL/frame_damage.c",
+            "Sources/CRuneGL/renderer.c",
+            "Sources/CRuneGL/layers.c",
+            "Sources/CRuneWin32/PresentDXGI.cpp",
+            "Sources/CRuneWin32/PresentQueue.cpp",
+            "Tests/Windows/Presentation/queue_probe.cpp",
+            "Tests/RuneTests/WindowDamageTests.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/window/win32/handover.rs",
@@ -7244,6 +7584,16 @@
           "status": "partial"
         },
         {
+          "upstream": "src/containers/rolling_text_tests.rs",
+          "swift": [
+            "Sources/RuneKit/RollingText.swift",
+            "Tests/RuneKitTests/RollingTextRuntimeParityTests.swift",
+            "Tests/RuneKitTests/FeedbackAndInputsTests.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/containers/table.rs",
           "swift": [
             "Sources/RuneKit/Table.swift",
@@ -7362,11 +7712,27 @@
           "note": "Unified diff parser."
         },
         {
+          "upstream": "src/diff/model/tests.rs",
+          "swift": [
+            "Sources/RuneKit/Diff.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/diff/myers.rs",
           "swift": [
             "Sources/RuneKit/Diff.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/diff/myers_tests.rs",
+          "swift": [
+            "Sources/RuneKit/Diff.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/diff/pairs.rs",
@@ -7397,6 +7763,14 @@
           ],
           "status": "ported",
           "note": "Diff hunk/comment navigation."
+        },
+        {
+          "upstream": "src/diff/state/tests.rs",
+          "swift": [
+            "Sources/RuneKit/Diff.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/diff/view.rs",
@@ -8104,6 +8478,15 @@
           "status": "partial"
         },
         {
+          "upstream": "src/tokens/palette_tests.rs",
+          "swift": [
+            "Sources/RuneKit/Kit.swift",
+            "Tests/RuneKitTests/RuneKitTests.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/tree.rs",
           "swift": [
             "Sources/RuneKit/TreeModel.swift",
@@ -8245,6 +8628,14 @@
             "Sources/RuneMotion/Looping.swift"
           ],
           "status": "ported"
+        },
+        {
+          "upstream": "src/looping_tests.rs",
+          "swift": [
+            "Sources/RuneMotion/Looping.swift"
+          ],
+          "status": "ported",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/math.rs",
@@ -8450,6 +8841,16 @@
           "note": "Every preset/parameter is editable and generated Swift code chooses the nearest preset. Swift tests interpret emitted source and reconstruct each preset, individually modified parameter and all parameters together, equivalent to Rust catalog emission into Rust."
         },
         {
+          "upstream": "src/catalog_tests.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFXCatalog.swift",
+            "Tests/RuneFXTests/RuneFXParityTests.swift",
+            "Tests/RuneFXTests/RuneFXBlendAndPipelineTests.swift"
+          ],
+          "status": "ported",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/cpu.rs",
           "swift": [
             "Sources/RuneFX/RuneFXCPU.swift"
@@ -8481,6 +8882,16 @@
           ],
           "status": "ported",
           "note": "32 procedural fill style presets."
+        },
+        {
+          "upstream": "src/fill/tests.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFXFills.swift",
+            "Tests/RuneFXTests/FxPackingOracleTests.swift",
+            "Tests/RuneFXTests/FxMetalFrameTests.swift"
+          ],
+          "status": "ported",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/lib.rs",
@@ -8563,7 +8974,7 @@
             "Tests/RuneFXTests/RuneFXBlendAndPipelineTests.swift"
           ],
           "status": "ported",
-          "note": "Same 13-tap downsample. Both backends upsample a 3×3 [1,2,1] tent divided by 16 then mix by the per-level weight. Native off-center frost regression and GL frosted-backdrop test exercise these passes."
+          "note": "Same 13-tap downsample. Both backends upsample a 3\u00d73 [1,2,1] tent divided by 16 then mix by the per-level weight. Native off-center frost regression and GL frosted-backdrop test exercise these passes."
         },
         {
           "upstream": "src/shaders/common.wgsl",
@@ -8754,7 +9165,7 @@
             "Tests/RuneLightTests/RuneLightGLTests.swift"
           ],
           "status": "ported",
-          "note": "Compiled the pinned Rust cpu.rs and Swift RuneLightCPU.swift with identical scene inputs: 592 receiver points, two rounded slabs, one non-occluder, six outputs per point. Max error 4e-6 for distance, 1.76e-6 for analytic penumbra, zero for 8×8 brute-force occlusion and saved elevations. Source review confirms all four public entries. Native GPU reference tests also compare visibility/radiance."
+          "note": "Compiled the pinned Rust cpu.rs and Swift RuneLightCPU.swift with identical scene inputs: 592 receiver points, two rounded slabs, one non-occluder, six outputs per point. Max error 4e-6 for distance, 1.76e-6 for analytic penumbra, zero for 8\u00d78 brute-force occlusion and saved elevations. Source review confirms all four public entries. Native GPU reference tests also compare visibility/radiance."
         },
         {
           "upstream": "src/glass.rs",
@@ -9504,6 +9915,14 @@
           "note": "RenderFrame MetalRenderer differential parity passes with 0 outliers across seeded/dashed/radial/layers/glyphs/effect-slots/text-run; raw wgpu API N/A-wgpu"
         },
         {
+          "upstream": "src/layer.rs",
+          "swift": [
+            "Sources/RuneRef/Layer.swift"
+          ],
+          "status": "ported",
+          "note": "Reference renderer layer scope planning & scissor/turn bounds (#1264)"
+        },
+        {
           "upstream": "src/lib.rs",
           "swift": [
             "Sources/RuneRef/Oracle.swift",
@@ -9828,6 +10247,16 @@
             "Tests/Browser/DiagnosticsApp/Sources/DiagnosticsProbe/main.swift"
           ],
           "status": "ported"
+        },
+        {
+          "upstream": "src/tests.rs",
+          "swift": [
+            "Sources/RunePerf/ProcessTelemetry.swift",
+            "Sources/RunePerf/ProcessWatcher.swift",
+            "Tests/Browser/DiagnosticsApp/Sources/DiagnosticsProbe/main.swift"
+          ],
+          "status": "ported",
+          "note": "Extracted sibling unit tests"
         }
       ],
       "note": "Config, ProcessWatcher, serve, latest/mb/toJSON, GAUGES=64 cap, and alloc zone tracking ported",
@@ -10238,6 +10667,15 @@
           "note": "GrowBuffer, paddedRowBytes, unpadRows, and 2D Readback (#1224, #1230)."
         },
         {
+          "upstream": "src/health.rs",
+          "swift": [
+            "Sources/RuneStaging/Health.swift",
+            "Tests/RuneStagingTests/RuneStagingTests.swift"
+          ],
+          "status": "ported",
+          "note": "Staging device removal & command-buffer poll health (#1207)"
+        },
+        {
           "upstream": "src/lib.rs",
           "swift": [
             "Sources/RuneStaging/Staging.swift",
@@ -10282,6 +10720,14 @@
           "status": "partial"
         },
         {
+          "upstream": "src/env.rs",
+          "swift": [
+            "Sources/Rune/Platform/PortableExecution.swift"
+          ],
+          "status": "ported",
+          "note": "Process environment helpers"
+        },
+        {
           "upstream": "src/growth.rs",
           "swift": [
             "Sources/Rune/VirtualList.swift",
@@ -10290,6 +10736,17 @@
             "Sources/Rune/Shell/Growth.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/growth/tests.rs",
+          "swift": [
+            "Sources/Rune/VirtualList.swift",
+            "Sources/Rune/Runtime/ContentSlide.swift",
+            "Tests/RuneTests/ContentSlideAndMotionTests.swift",
+            "Sources/Rune/Shell/Growth.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/growth/walk.rs",
@@ -10391,11 +10848,29 @@
           "status": "partial"
         },
         {
+          "upstream": "src/prefs_tests.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift",
+            "Tests/RuneTests/ShellPartialCloseoutTests.swift",
+            "Tests/Browser/DiagnosticsApp/Sources/DiagnosticsProbe/main.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/shape.rs",
           "swift": [
             "Sources/Rune/Shape.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/shape_tests.rs",
+          "swift": [
+            "Sources/Rune/Shape.swift"
+          ],
+          "status": "partial",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/task.rs",
@@ -11033,6 +11508,17 @@
           "note": "The normal image, pixel and inline content paths pack into bounded page shelves. A 77-image grid occupied 36/36/5 slots. Two complete Swift CPU, Metal and GL frames matched the original Rust CPU and GPU output. Page-local edits upload only the changed rectangle."
         },
         {
+          "upstream": "src/pixels_tests.rs",
+          "swift": [
+            "Sources/Rune/Image/RuntimeImageAtlas.swift",
+            "Sources/Rune/Image/PixelsAtlas.swift",
+            "Tests/RuneTests/RuntimeImagePagesTests.swift",
+            "Tests/RuneTests/MetalImageAtlasUploadTests.swift"
+          ],
+          "status": "ported",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/place.rs",
           "swift": [
             "Sources/Rune/NativeSurface/NativeSurfaceTypes.swift",
@@ -11127,7 +11613,7 @@
             "Tests/RuneTests/NativeSurfaceParityTests.swift"
           ],
           "status": "partial",
-          "note": "Fit/fill edge geometry, unscaled placement and GPU readback for a stale top-left image are directly exercised. GPU stale texture/crop original is compiled per available GPU backend in Rust; Swift’s specific readback is inside a Metal-only conditional. All six fixture oracles lack an equivalent verified native non-Metal path."
+          "note": "Fit/fill edge geometry, unscaled placement and GPU readback for a stale top-left image are directly exercised. GPU stale texture/crop original is compiled per available GPU backend in Rust; Swift\u2019s specific readback is inside a Metal-only conditional. All six fixture oracles lack an equivalent verified native non-Metal path."
         },
         {
           "upstream": "src/native_surface/tests.rs",
@@ -11288,6 +11774,14 @@
             "Sources/Rune/MediaPipeline.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/video/phases_old_tests.rs",
+          "swift": [
+            "Tests/RuneTests"
+          ],
+          "status": "ported",
+          "note": "Extracted sibling unit tests"
         },
         {
           "upstream": "src/video/phases_poster_tests.rs",
@@ -11812,6 +12306,14 @@
           "status": "ported"
         },
         {
+          "upstream": "src/fonts/trak_tests.rs",
+          "swift": [
+            "Sources/Rune/Text/TrakParser.swift"
+          ],
+          "status": "ported",
+          "note": "Extracted sibling unit tests"
+        },
+        {
           "upstream": "src/icon.rs",
           "swift": [
             "Sources/Rune/Text.swift",
@@ -11842,6 +12344,24 @@
           ],
           "status": "ported",
           "note": "Skia analytic AA scan converter for Ganesh icon fills (27c31fc2 #828, gap2/render)"
+        },
+        {
+          "upstream": "src/icon/anim/mod.rs",
+          "swift": [
+            "Sources/Rune/Text/SVGIconAnim.swift",
+            "Tests/RuneTests/SVGIconAnimTests.swift"
+          ],
+          "status": "ported",
+          "note": "Monochrome SMIL SVG icon animator & double-buffered glyph atlas tiles (#1291)"
+        },
+        {
+          "upstream": "src/icon/anim/parse.rs",
+          "swift": [
+            "Sources/Rune/Text/SVGIconAnimParser.swift",
+            "Tests/RuneTests/SVGIconAnimTests.swift"
+          ],
+          "status": "ported",
+          "note": "Bounded SMIL SVG icon animation parser (#1291)"
         },
         {
           "upstream": "src/icon/area.rs",
@@ -12756,19 +13276,19 @@
       "upstreamPath": "crates/rune/examples/cache_pan_zoom.rs",
       "status": "partial",
       "swiftTarget": "RuneCachePanZoom",
-      "note": "The macOS example suite passed “rune-cache-pan-zoom benchmarks uncached vs cached Live pan/zoom layers”. See ContentExamplesParityTests.swift, cachePanZoomSmoke."
+      "note": "The macOS example suite passed \u201crune-cache-pan-zoom benchmarks uncached vs cached Live pan/zoom layers\u201d. See ContentExamplesParityTests.swift, cachePanZoomSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/canvas_input.rs",
       "status": "partial",
       "swiftTarget": "RuneCanvasInput",
-      "note": "The macOS example suite passed “canvas_input: wheel pan, pinch zoom, space+drag, middle drag, focus + scrollTo, and onDrawnLayout”. See Phase3CanvasInputTests.swift, canvasInputFullSequence."
+      "note": "The macOS example suite passed \u201ccanvas_input: wheel pan, pinch zoom, space+drag, middle drag, focus + scrollTo, and onDrawnLayout\u201d. See Phase3CanvasInputTests.swift, canvasInputFullSequence."
     },
     {
       "upstreamPath": "crates/rune/examples/coretext_compare.rs",
       "status": "partial",
       "swiftTarget": "RuneCoretextCompare",
-      "note": "The macOS example suite passed “coretext_compare: CLI parsing, live CoreText comparison table, PNG heatmap output, and export”. See Phase3PinchAndCoretextTests.swift, coretextCompareCLIAndExecution."
+      "note": "The macOS example suite passed \u201ccoretext_compare: CLI parsing, live CoreText comparison table, PNG heatmap output, and export\u201d. See Phase3PinchAndCoretextTests.swift, coretextCompareCLIAndExecution."
     },
     {
       "upstreamPath": "crates/rune/examples/custom_titlebar.rs",
@@ -12780,31 +13300,31 @@
       "upstreamPath": "crates/rune/examples/dock_menu_probe.rs",
       "status": "partial",
       "swiftTarget": "RuneDockMenuProbe",
-      "note": "The macOS example suite passed “rune-dock-menu-probe configures accessory dock items, icon, and actions”. See ContentExamplesParityTests.swift, dockMenuProbeSmoke."
+      "note": "The macOS example suite passed \u201crune-dock-menu-probe configures accessory dock items, icon, and actions\u201d. See ContentExamplesParityTests.swift, dockMenuProbeSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/embed_cost.rs",
       "status": "partial",
       "swiftTarget": "RuneEmbedCost",
-      "note": "The macOS example suite passed “rune-embed-cost exercises LayerHost frame pacing and memory reporting”. See ContentExamplesParityTests.swift, embedCostSmoke."
+      "note": "The macOS example suite passed \u201crune-embed-cost exercises LayerHost frame pacing and memory reporting\u201d. See ContentExamplesParityTests.swift, embedCostSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/expressive_press.rs",
       "status": "partial",
       "swiftTarget": "RuneExpressivePress",
-      "note": "The macOS example suite passed “rune-expressive-press handles p/u/r keys and renders still scene”. See Phase3CrateExamplesTests.swift, expressivePressScenesAndKeys."
+      "note": "The macOS example suite passed \u201crune-expressive-press handles p/u/r keys and renders still scene\u201d. See Phase3CrateExamplesTests.swift, expressivePressScenesAndKeys."
     },
     {
       "upstreamPath": "crates/rune/examples/gpu_springs.rs",
       "status": "partial",
       "swiftTarget": "RuneGpuSprings",
-      "note": "The macOS example suite passed “rune-gpu-springs passes differential, bench, and 8-primitive pixel parity checks”. See ContentExamplesParityTests.swift, gpuSpringsSmoke."
+      "note": "The macOS example suite passed \u201crune-gpu-springs passes differential, bench, and 8-primitive pixel parity checks\u201d. See ContentExamplesParityTests.swift, gpuSpringsSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/growth_reorder.rs",
       "status": "partial",
       "swiftTarget": "RuneGrowthReorder",
-      "note": "The macOS example suite passed “growth_reorder: default swap and steer launch + deliver reorder rows”. See Phase3ElMotionTests.swift, growthReorderSwapAndSteerDeliver."
+      "note": "The macOS example suite passed \u201cgrowth_reorder: default swap and steer launch + deliver reorder rows\u201d. See Phase3ElMotionTests.swift, growthReorderSwapAndSteerDeliver."
     },
     {
       "upstreamPath": "crates/rune/examples/hud_probe",
@@ -12816,25 +13336,25 @@
       "upstreamPath": "crates/rune/examples/interaction_cost.rs",
       "status": "partial",
       "swiftTarget": "RuneInteractionCost",
-      "note": "The macOS example suite passed “rune-interaction-cost reports press, wheel, and idle metrics”. See ContentExamplesParityTests.swift, interactionCostSmoke."
+      "note": "The macOS example suite passed \u201crune-interaction-cost reports press, wheel, and idle metrics\u201d. See ContentExamplesParityTests.swift, interactionCostSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/keep_stuck.rs",
       "status": "partial",
       "swiftTarget": "RuneKeepStuck",
-      "note": "The macOS example suite passed “keep_stuck: clicking header toggles group and invokes Tx.keepOnScreen”. See Phase3ElMotionTests.swift, keepStuckTogglesHeaderAndKeepsOnScreen."
+      "note": "The macOS example suite passed \u201ckeep_stuck: clicking header toggles group and invokes Tx.keepOnScreen\u201d. See Phase3ElMotionTests.swift, keepStuckTogglesHeaderAndKeepsOnScreen."
     },
     {
       "upstreamPath": "crates/rune/examples/live_resize_check.rs",
       "status": "partial",
       "swiftTarget": "RuneLiveResizeCheck",
-      "note": "The macOS example suite passed “rune-live-resize-check keeps edge bars aligned across viewport widths”. See ContentExamplesParityTests.swift, liveResizeCheckSmoke."
+      "note": "The macOS example suite passed \u201crune-live-resize-check keeps edge bars aligned across viewport widths\u201d. See ContentExamplesParityTests.swift, liveResizeCheckSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/long_note.rs",
       "status": "partial",
       "swiftTarget": "RuneLongNote",
-      "note": "The macOS example suite passed “rune-long-note runs editing, IME commit, undo/paste, scroll, and caret tracking”. See ContentExamplesParityTests.swift, longNoteSmoke."
+      "note": "The macOS example suite passed \u201crune-long-note runs editing, IME commit, undo/paste, scroll, and caret tracking\u201d. See ContentExamplesParityTests.swift, longNoteSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/material_check.rs",
@@ -12846,7 +13366,7 @@
       "upstreamPath": "crates/rune/examples/menu_probe.rs",
       "status": "partial",
       "swiftTarget": "RuneMenuProbe",
-      "note": "The macOS example suite passed “rune-menu-probe validates NativeMenuBar items and dispatches actions”. See ContentExamplesParityTests.swift, menuProbeSmoke."
+      "note": "The macOS example suite passed \u201crune-menu-probe validates NativeMenuBar items and dispatches actions\u201d. See ContentExamplesParityTests.swift, menuProbeSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/metal_dispatch.rs",
@@ -12858,37 +13378,37 @@
       "upstreamPath": "crates/rune/examples/one_snap.rs",
       "status": "partial",
       "swiftTarget": "RuneOneSnap",
-      "note": "The macOS example suite passed “rune-one-snap: zooms stage from (0,0) origin and swaps Path disc <-> Icon disc on badge click”. See Phase3OneSnapTests.swift, stageZoomAndBadgeSwap."
+      "note": "The macOS example suite passed \u201crune-one-snap: zooms stage from (0,0) origin and swaps Path disc <-> Icon disc on badge click\u201d. See Phase3OneSnapTests.swift, stageZoomAndBadgeSwap."
     },
     {
       "upstreamPath": "crates/rune/examples/overlay_hud_cost.rs",
       "status": "partial",
       "swiftTarget": "RuneOverlayHudCost",
-      "note": "The macOS example suite passed “rune-overlay-hud-cost drives Compositor frame/UI draw and OverlaySpec lifecycle”. See ContentExamplesParityTests.swift, overlayHudCostSmoke."
+      "note": "The macOS example suite passed \u201crune-overlay-hud-cost drives Compositor frame/UI draw and OverlaySpec lifecycle\u201d. See ContentExamplesParityTests.swift, overlayHudCostSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/pacing.rs",
       "status": "partial",
       "swiftTarget": "RunePacing",
-      "note": "The macOS example suite passed “rune-pacing advances spring pill layout across frames cleanly”. See ContentExamplesParityTests.swift, pacingSmoke."
+      "note": "The macOS example suite passed \u201crune-pacing advances spring pill layout across frames cleanly\u201d. See ContentExamplesParityTests.swift, pacingSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/pacing_overlay.rs",
       "status": "partial",
       "swiftTarget": "RunePacingOverlay",
-      "note": "The macOS example suite passed “rune-pacing-overlay renders looping overlay pill and fades in/out”. See ContentExamplesParityTests.swift, pacingOverlaySmoke."
+      "note": "The macOS example suite passed \u201crune-pacing-overlay renders looping overlay pill and fades in/out\u201d. See ContentExamplesParityTests.swift, pacingOverlaySmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/pinch_bench.rs",
       "status": "partial",
       "swiftTarget": "RunePinchBench",
-      "note": "The macOS example suite passed “pinch_bench: live_only skips commits during magnify while updating camera/toolbar live values”. See Phase3PinchAndCoretextTests.swift, pinchBenchLiveOnlyVsRebuild."
+      "note": "The macOS example suite passed \u201cpinch_bench: live_only skips commits during magnify while updating camera/toolbar live values\u201d. See Phase3PinchAndCoretextTests.swift, pinchBenchLiveOnlyVsRebuild."
     },
     {
       "upstreamPath": "crates/rune/examples/popup_menu.rs",
       "status": "partial",
       "swiftTarget": "RunePopupMenu",
-      "note": "The macOS example suite passed “rune-popup-menu renders picker, context menu items, and headless menu-pick script”. See ContentExamplesParityTests.swift, popupMenuRendersAndPicks."
+      "note": "The macOS example suite passed \u201crune-popup-menu renders picker, context menu items, and headless menu-pick script\u201d. See ContentExamplesParityTests.swift, popupMenuRendersAndPicks."
     },
     {
       "upstreamPath": "crates/rune/examples/regen_dxbc.rs",
@@ -12900,67 +13420,67 @@
       "upstreamPath": "crates/rune/examples/rewind_cost.rs",
       "status": "partial",
       "swiftTarget": "RuneRewindCost",
-      "note": "The macOS example suite passed “rune-rewind-cost measures rewind overhead and minute stream footprint”. See ContentExamplesParityTests.swift, rewindCostSmoke."
+      "note": "The macOS example suite passed \u201crune-rewind-cost measures rewind overhead and minute stream footprint\u201d. See ContentExamplesParityTests.swift, rewindCostSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/scroll_anchor.rs",
       "status": "partial",
       "swiftTarget": "RuneScrollAnchor",
-      "note": "The macOS example suite passed “scroll_anchor: Enter adds earlier rows while anchor mode preserves viewport item”. See Phase3ElMotionTests.swift, scrollAnchorAddsEarlierMessagesOnEnter."
+      "note": "The macOS example suite passed \u201cscroll_anchor: Enter adds earlier rows while anchor mode preserves viewport item\u201d. See Phase3ElMotionTests.swift, scrollAnchorAddsEarlierMessagesOnEnter."
     },
     {
       "upstreamPath": "crates/rune/examples/scroll_commits.rs",
       "status": "partial",
       "swiftTarget": "RuneScrollCommits",
-      "note": "The macOS example suite passed “rune-scroll-commits measures pure scroll commits with layout reads and video”. See ContentExamplesParityTests.swift, scrollCommitsSmoke."
+      "note": "The macOS example suite passed \u201crune-scroll-commits measures pure scroll commits with layout reads and video\u201d. See ContentExamplesParityTests.swift, scrollCommitsSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/scroll_keys.rs",
       "status": "partial",
       "swiftTarget": "RuneScrollKeys",
-      "note": "The macOS example suite passed “rune-scroll-keys updates selection and scrolls viewport on Up/Down”. See Phase3CrateExamplesTests.swift, scrollKeysNavigation."
+      "note": "The macOS example suite passed \u201crune-scroll-keys updates selection and scrolls viewport on Up/Down\u201d. See Phase3CrateExamplesTests.swift, scrollKeysNavigation."
     },
     {
       "upstreamPath": "crates/rune/examples/shortcut_probe.rs",
       "status": "partial",
       "swiftTarget": "RuneShortcutProbe",
-      "note": "The macOS example suite passed “rune-shortcut-probe registers, detects conflict, dispatches, and unregisters shortcuts”. See ContentExamplesParityTests.swift, shortcutProbeSmoke."
+      "note": "The macOS example suite passed \u201crune-shortcut-probe registers, detects conflict, dispatches, and unregisters shortcuts\u201d. See ContentExamplesParityTests.swift, shortcutProbeSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/slow_click.rs",
       "status": "partial",
       "swiftTarget": "RuneSlowClick",
-      "note": "The macOS example suite passed “rune-slow-click and rune-sticky render and handle actions”. See Phase3CrateExamplesTests.swift, slowClickAndSticky."
+      "note": "The macOS example suite passed \u201crune-slow-click and rune-sticky render and handle actions\u201d. See Phase3CrateExamplesTests.swift, slowClickAndSticky."
     },
     {
       "upstreamPath": "crates/rune/examples/spaces_probe.rs",
       "status": "partial",
       "swiftTarget": "RuneSpacesProbe",
-      "note": "The macOS example suite passed “rune-spaces-probe configures capture-excluded prewarmed overlay and resize/hide”. See ContentExamplesParityTests.swift, spacesProbeSmoke."
+      "note": "The macOS example suite passed \u201crune-spaces-probe configures capture-excluded prewarmed overlay and resize/hide\u201d. See ContentExamplesParityTests.swift, spacesProbeSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/sticky.rs",
       "status": "partial",
       "swiftTarget": "RuneSticky",
-      "note": "The macOS example suite passed “rune-slow-click and rune-sticky render and handle actions”. See Phase3CrateExamplesTests.swift, slowClickAndSticky."
+      "note": "The macOS example suite passed \u201crune-slow-click and rune-sticky render and handle actions\u201d. See Phase3CrateExamplesTests.swift, slowClickAndSticky."
     },
     {
       "upstreamPath": "crates/rune/examples/taffy_adapter_bench.rs",
       "status": "partial",
       "swiftTarget": "RuneTaffyAdapterBench",
-      "note": "The macOS example suite passed “rune-taffy-adapter-bench compares LayoutStore vs TaffyTree and runs KitchenSink digest”. See ContentExamplesParityTests.swift, taffyAdapterBenchSmoke."
+      "note": "The macOS example suite passed \u201crune-taffy-adapter-bench compares LayoutStore vs TaffyTree and runs KitchenSink digest\u201d. See ContentExamplesParityTests.swift, taffyAdapterBenchSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/text_coverage.rs",
       "status": "partial",
       "swiftTarget": "RuneTextCoverage",
-      "note": "The macOS example suite passed “rune-text-glide and rune-text-coverage render scenes headlessly”. See Phase3CrateExamplesTests.swift, textGlideAndCoverage."
+      "note": "The macOS example suite passed \u201crune-text-glide and rune-text-coverage render scenes headlessly\u201d. See Phase3CrateExamplesTests.swift, textGlideAndCoverage."
     },
     {
       "upstreamPath": "crates/rune/examples/text_glide.rs",
       "status": "partial",
       "swiftTarget": "RuneTextGlide",
-      "note": "The macOS example suite passed “rune-text-glide and rune-text-coverage render scenes headlessly”. See Phase3CrateExamplesTests.swift, textGlideAndCoverage."
+      "note": "The macOS example suite passed \u201crune-text-glide and rune-text-coverage render scenes headlessly\u201d. See Phase3CrateExamplesTests.swift, textGlideAndCoverage."
     },
     {
       "upstreamPath": "crates/rune/examples/text_gpu.rs",
@@ -12978,49 +13498,49 @@
       "upstreamPath": "crates/rune/examples/tree_swap.rs",
       "status": "partial",
       "swiftTarget": "RuneTreeSwap",
-      "note": "The macOS example suite passed “rune-tree-swap benchmarks list <-> grid replacement across first, quick, recent, and stale”. See ContentExamplesParityTests.swift, treeSwapSmoke."
+      "note": "The macOS example suite passed \u201crune-tree-swap benchmarks list <-> grid replacement across first, quick, recent, and stale\u201d. See ContentExamplesParityTests.swift, treeSwapSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/upload_bench.rs",
       "status": "partial",
       "swiftTarget": "RuneUploadBench",
-      "note": "The macOS example suite passed “rune-upload-bench measures steady and scroll 2000-instance GPU upload frames”. See ContentExamplesParityTests.swift, uploadBenchSmoke."
+      "note": "The macOS example suite passed \u201crune-upload-bench measures steady and scroll 2000-instance GPU upload frames\u201d. See ContentExamplesParityTests.swift, uploadBenchSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/window-panel.rs",
       "status": "partial",
       "swiftTarget": "RuneWindowPanel",
-      "note": "The macOS example suite passed “rune-window-panel validates multi-window panel spec and Escape/blur dismissal”. See ContentExamplesParityTests.swift, windowPanelSmoke."
+      "note": "The macOS example suite passed \u201crune-window-panel validates multi-window panel spec and Escape/blur dismissal\u201d. See ContentExamplesParityTests.swift, windowPanelSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/window_resize.rs",
       "status": "partial",
       "swiftTarget": "RuneWindowResize",
-      "note": "The macOS example suite passed “window_resize: fitContentHeight follows toggled body height”. See Phase3WindowResizeTests.swift, fitContentHeightTogglesHeight."
+      "note": "The macOS example suite passed \u201cwindow_resize: fitContentHeight follows toggled body height\u201d. See Phase3WindowResizeTests.swift, fitContentHeightTogglesHeight."
     },
     {
       "upstreamPath": "crates/rune/examples/window_scroll_cost.rs",
       "status": "partial",
       "swiftTarget": "RuneWindowScrollCost",
-      "note": "The macOS example suite passed “rune-window-scroll-cost measures scrollable list CPU cost and scroll offset”. See ContentExamplesParityTests.swift, windowScrollCostSmoke."
+      "note": "The macOS example suite passed \u201crune-window-scroll-cost measures scrollable list CPU cost and scroll offset\u201d. See ContentExamplesParityTests.swift, windowScrollCostSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/zoom_sweep.rs",
       "status": "partial",
       "swiftTarget": "RuneZoomSweep",
-      "note": "The macOS example suite passed “rune-zoom-sweep sweeps liveScale and fontScale while preserving settled glyphs”. See ContentExamplesParityTests.swift, zoomSweepSmoke."
+      "note": "The macOS example suite passed \u201crune-zoom-sweep sweeps liveScale and fontScale while preserving settled glyphs\u201d. See ContentExamplesParityTests.swift, zoomSweepSmoke."
     },
     {
       "upstreamPath": "crates/rune-fx/examples/first_glow.rs",
       "status": "partial",
       "swiftTarget": "RuneFxFirstGlow",
-      "note": "The macOS example suite passed “rune-fx-first-glow creates FxRenderer, renders first glow, and writes PNG snap”. See FxAndLightExamplesTests.swift, fxFirstGlowSnap."
+      "note": "The macOS example suite passed \u201crune-fx-first-glow creates FxRenderer, renders first glow, and writes PNG snap\u201d. See FxAndLightExamplesTests.swift, fxFirstGlowSnap."
     },
     {
       "upstreamPath": "crates/rune-fx/examples/gallery",
       "status": "partial",
       "swiftTarget": "RuneFxGallery",
-      "note": "The macOS example suite passed “rune-fx-gallery lists effects and renders glow & blend snaps”. See FxAndLightExamplesTests.swift, fxGallerySnaps."
+      "note": "The macOS example suite passed \u201crune-fx-gallery lists effects and renders glow & blend snaps\u201d. See FxAndLightExamplesTests.swift, fxGallerySnaps."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/diff.rs",
@@ -13032,55 +13552,55 @@
       "upstreamPath": "crates/rune-kit/examples/glyphs.rs",
       "status": "partial",
       "swiftTarget": "RuneKitGlyphs",
-      "note": "The macOS example suite passed “rune-kit-glyphs renders all 28 KitIcons light beside dark”. See Phase3CrateExamplesTests.swift, kitGlyphsRendersAll28."
+      "note": "The macOS example suite passed \u201crune-kit-glyphs renders all 28 KitIcons light beside dark\u201d. See Phase3CrateExamplesTests.swift, kitGlyphsRendersAll28."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/layout_text_cost",
       "status": "partial",
       "swiftTarget": "RuneKitLayoutTextCost",
-      "note": "The macOS example suite passed “rune-kit-layout-text-cost measures Markdown + Kit cold open, resize, and scroll”. See ContentExamplesParityTests.swift, kitLayoutTextCostSmoke."
+      "note": "The macOS example suite passed \u201crune-kit-layout-text-cost measures Markdown + Kit cold open, resize, and scroll\u201d. See ContentExamplesParityTests.swift, kitLayoutTextCostSmoke."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/markdown_resize.rs",
       "status": "partial",
       "swiftTarget": "RuneKitMarkdownResize",
-      "note": "The macOS example suite passed “rune-kit-markdown-resize measures open, live resize, scroll, highlights, and font switch”. See ContentExamplesParityTests.swift, kitMarkdownResizeSmoke."
+      "note": "The macOS example suite passed \u201crune-kit-markdown-resize measures open, live resize, scroll, highlights, and font switch\u201d. See ContentExamplesParityTests.swift, kitMarkdownResizeSmoke."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/rich_editor.rs",
       "status": "partial",
       "swiftTarget": "RuneKitRichEditor",
-      "note": "The macOS example suite passed “kit-rich-editor: rich marks, mention pills, syntax decorations, and toolbar script replay”. See Phase3KitUnblockedTests.swift, kitRichEditorParity."
+      "note": "The macOS example suite passed \u201ckit-rich-editor: rich marks, mention pills, syntax decorations, and toolbar script replay\u201d. See Phase3KitUnblockedTests.swift, kitRichEditorParity."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/scroll_bench.rs",
       "status": "partial",
       "swiftTarget": "RuneKitScrollBench",
-      "note": "The macOS example suite passed “rune-kit-scroll-bench exercises list, markdown, sticky, growth, prose, and card workloads”. See ContentExamplesParityTests.swift, kitScrollBenchSmoke."
+      "note": "The macOS example suite passed \u201crune-kit-scroll-bench exercises list, markdown, sticky, growth, prose, and card workloads\u201d. See ContentExamplesParityTests.swift, kitScrollBenchSmoke."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/scroll_x.rs",
       "status": "partial",
       "swiftTarget": "RuneKitScrollX",
-      "note": "The macOS example suite passed “rune-kit-scroll-x renders horizontal filmstrip and wide markdown”. See Phase3CrateExamplesTests.swift, kitScrollXRendersFilmstripAndMarkdown."
+      "note": "The macOS example suite passed \u201crune-kit-scroll-x renders horizontal filmstrip and wide markdown\u201d. See Phase3CrateExamplesTests.swift, kitScrollXRendersFilmstripAndMarkdown."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/shell.rs",
       "status": "partial",
       "swiftTarget": "RuneKitShell",
-      "note": "The macOS example suite passed “kit-shell: default, virtual (5k), page scenes and keyboard shortcuts”. See Phase3KitUnblockedTests.swift, kitShellScenesAndShortcuts."
+      "note": "The macOS example suite passed \u201ckit-shell: default, virtual (5k), page scenes and keyboard shortcuts\u201d. See Phase3KitUnblockedTests.swift, kitShellScenesAndShortcuts."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/shortcut_recorder.rs",
       "status": "partial",
       "swiftTarget": "RuneKitShortcutRecorder",
-      "note": "The macOS example suite passed “rune-kit-shortcut-recorder detects conflict on Ctrl+Shift+Space and records valid chord”. See Phase3CrateExamplesTests.swift, kitShortcutRecorderBehavior."
+      "note": "The macOS example suite passed \u201crune-kit-shortcut-recorder detects conflict on Ctrl+Shift+Space and records valid chord\u201d. See Phase3CrateExamplesTests.swift, kitShortcutRecorderBehavior."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/tab_strip.rs",
       "status": "partial",
       "swiftTarget": "RuneKitTabStrip",
-      "note": "The macOS example suite passed “kit-tab-strip: tabs, overflow (40), single (1) scenes and script actions”. See Phase3KitUnblockedTests.swift, kitTabStripScenesAndActions."
+      "note": "The macOS example suite passed \u201ckit-tab-strip: tabs, overflow (40), single (1) scenes and script actions\u201d. See Phase3KitUnblockedTests.swift, kitTabStripScenesAndActions."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/table.rs",
@@ -13098,7 +13618,7 @@
       "upstreamPath": "crates/rune-light/examples/frame_bench.rs",
       "status": "partial",
       "swiftTarget": "RuneLightFrameBench",
-      "note": "The macOS example suite passed “rune-light-frame-bench runs --fast GPU recording benchmark and writes PNG snap”. See FxAndLightExamplesTests.swift, lightFrameBenchFastSnap."
+      "note": "The macOS example suite passed \u201crune-light-frame-bench runs --fast GPU recording benchmark and writes PNG snap\u201d. See FxAndLightExamplesTests.swift, lightFrameBenchFastSnap."
     },
     {
       "upstreamPath": "crates/rune-light/examples/light.rs",
@@ -13116,37 +13636,37 @@
       "upstreamPath": "crates/rune-light/examples/live.rs",
       "status": "partial",
       "swiftTarget": "RuneLightLive",
-      "note": "The macOS example suite passed “rune-light-live renders flashlight and chat snaps headlessly”. See FxAndLightExamplesTests.swift, lightLiveSnaps."
+      "note": "The macOS example suite passed \u201crune-light-live renders flashlight and chat snaps headlessly\u201d. See FxAndLightExamplesTests.swift, lightLiveSnaps."
     },
     {
       "upstreamPath": "crates/rune-light/examples/reel",
       "status": "partial",
       "swiftTarget": "RuneLightReel",
-      "note": "The macOS example suite passed “rune-light-reel renders deterministic frame still at t=5.5”. See FxAndLightExamplesTests.swift, lightReelSnap."
+      "note": "The macOS example suite passed \u201crune-light-reel renders deterministic frame still at t=5.5\u201d. See FxAndLightExamplesTests.swift, lightReelSnap."
     },
     {
       "upstreamPath": "crates/rune-light/examples/shader_first_use.rs",
       "status": "partial",
       "swiftTarget": "RuneLightShaderFirstUse",
-      "note": "The macOS example suite passed “rune-light-shader-first-use builds every Fx/Light/Glass pipeline and writes PNG snap”. See FxAndLightExamplesTests.swift, lightShaderFirstUseSnap."
+      "note": "The macOS example suite passed \u201crune-light-shader-first-use builds every Fx/Light/Glass pipeline and writes PNG snap\u201d. See FxAndLightExamplesTests.swift, lightShaderFirstUseSnap."
     },
     {
       "upstreamPath": "crates/rune-motion/examples/bench.rs",
       "status": "partial",
       "swiftTarget": "RuneMotionBench",
-      "note": "The macOS example suite passed “rune-motion-bench reports active AnimationStore, Scene reflow, and standalone sample metrics”. See ContentExamplesParityTests.swift, motionBenchSmoke."
+      "note": "The macOS example suite passed \u201crune-motion-bench reports active AnimationStore, Scene reflow, and standalone sample metrics\u201d. See ContentExamplesParityTests.swift, motionBenchSmoke."
     },
     {
       "upstreamPath": "crates/rune-motion/examples/curves.rs",
       "status": "partial",
       "swiftTarget": "RuneMotionCurves",
-      "note": "The macOS example suite passed “rune-motion-curves emits all 5 SVG plot sheets”. See Phase3CrateExamplesTests.swift, motionCurvesGeneratesSVGs."
+      "note": "The macOS example suite passed \u201crune-motion-curves emits all 5 SVG plot sheets\u201d. See Phase3CrateExamplesTests.swift, motionCurvesGeneratesSVGs."
     },
     {
       "upstreamPath": "crates/rune-ref/examples/hashes.rs",
       "status": "partial",
       "swiftTarget": "RuneRefHashes",
-      "note": "The macOS example suite passed “rune-ref-hashes computes deterministic 16-seed BLAKE3 corpus matching upstream goldens”. See Phase3CrateExamplesTests.swift, refHashesCorpus."
+      "note": "The macOS example suite passed \u201crune-ref-hashes computes deterministic 16-seed BLAKE3 corpus matching upstream goldens\u201d. See Phase3CrateExamplesTests.swift, refHashesCorpus."
     }
   ],
   "extraBins": [

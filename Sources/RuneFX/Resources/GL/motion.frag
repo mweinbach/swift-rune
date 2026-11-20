@@ -12,7 +12,7 @@ vec3 pose_at(uint base, uint k, vec2 p) {
 void main() {
     Globals g = fxGlobals;
     BackdropEncoding enc = fxBackdrop;
-    vec2 pixel = runePixel;
+    vec2 pixel = recover_pixel(g);
     Inst i = fxInstance;
     vec2 p = pixel / i.shape.y;
     uint first = uint(i.xf.x);

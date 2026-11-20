@@ -54,6 +54,15 @@ public enum OracleShader {
         return sqrtf(v0 * v0 + v1 * v1) - e * g
     }
 
+    /// Matches WGSL `sign(r) * max(abs(r) - cut, 0.0)`: zero stays zero even when `cut < 0.0`.
+    static func insetRadius(_ r: Float, _ cut: Float) -> Float {
+        if r == 0.0 {
+            return 0.0
+        } else {
+            return copySign(max(abs(r) - cut, 0.0), r)
+        }
+    }
+
     static func ramp(_ d: Float, _ fade: Float) -> Float {
         if fade == 0.0 {
             return clamp(d + 0.5)
@@ -89,6 +98,91 @@ public enum OracleShader {
             y += step
         }
         return v
+    }
+
+    /// Coverage of a stroke segment from `a` to `b`, `hw` half width, round or butt caps
+    /// (`shader.wgsl` `segment`).
+    private static func segment(_ p: (Float, Float), _ a: (Float, Float), _ b: (Float, Float), _ hw: Float, _ round: Bool) -> Float {
+        let w = max(hw, 0.5)
+        let weight = min(hw * 2.0, 1.0)
+        let ab = (b.0 - a.0, b.1 - a.1)
+        let len = sqrtf(ab.0 * ab.0 + ab.1 * ab.1)
+        let ap = (p.0 - a.0, p.1 - a.1)
+        let d: Float
+        if len < 1e-4 {
+            if !round {
+                return 0.0
+            }
+            d = sqrtf(ap.0 * ap.0 + ap.1 * ap.1) - w
+        } else {
+            let dir = (ab.0 / len, ab.1 / len)
+            let along = ap.0 * dir.0 + ap.1 * dir.1
+            if round {
+                let t = min(max(along, 0.0), len)
+                let dx = ap.0 - dir.0 * t
+                let dy = ap.1 - dir.1 * t
+                d = sqrtf(dx * dx + dy * dy) - w
+            } else {
+                let across = abs(dir.0 * ap.1 - dir.1 * ap.0)
+                let q0 = abs(along - len * 0.5) - len * 0.5
+                let q1 = across - w
+                let mx = max(q0, 0.0)
+                let my = max(q1, 0.0)
+                d = min(max(q0, q1), 0.0) + sqrtf(mx * mx + my * my)
+            }
+        }
+        return clamp(0.5 - d) * weight
+    }
+
+    /// Signed distance from `p` to edge `a -> b`, positive on `c`'s side (`shader.wgsl` `edge`).
+    private static func edge(_ p: (Float, Float), _ a: (Float, Float), _ b: (Float, Float), _ c: (Float, Float)) -> Float {
+        let e = (b.0 - a.0, b.1 - a.1)
+        let l = max(sqrtf(e.0 * e.0 + e.1 * e.1), 1e-6)
+        let n = (-e.1 / l, e.0 / l)
+        let s: Float = ((c.0 - a.0) * n.0 + (c.1 - a.1) * n.1 >= 0.0) ? 1.0 : -1.0
+        return ((p.0 - a.0) * n.0 + (p.1 - a.1) * n.1) * s
+    }
+
+    /// Tie-breaking shared-edge ownership (`shader.wgsl` `owns`).
+    private static func owns(_ p: (Float, Float), _ a: (Float, Float), _ b: (Float, Float), _ c: (Float, Float)) -> Bool {
+        let swap = a.0 > b.0 || (a.0 == b.0 && a.1 > b.1)
+        let (lo, hi) = swap ? (b, a) : (a, b)
+        let e = (hi.0 - lo.0, hi.1 - lo.1)
+        let side = e.0 * (c.1 - lo.1) - e.1 * (c.0 - lo.0)
+        let v = e.0 * (p.1 - lo.1) - e.1 * (p.0 - lo.0)
+        return side > 0.0 ? v >= 0.0 : v < 0.0
+    }
+
+    /// Antialiased coverage across a boundary edge `a -> b` (`shader.wgsl` `soft`).
+    private static func soft(_ p: (Float, Float), _ a: (Float, Float), _ b: (Float, Float), _ c: (Float, Float)) -> Float {
+        let d = edge(p, a, b, c)
+        let e = (b.0 - a.0, b.1 - a.1)
+        let t = ((p.0 - a.0) * e.0 + (p.1 - a.1) * e.1) / max(e.0 * e.0 + e.1 * e.1, 1e-6)
+        if !(0.0...1.0).contains(t) {
+            return d >= 0.0 ? 1.0 : 0.0
+        }
+        return clamp(d + 0.5)
+    }
+
+    /// Filled triangle coverage with per-edge antialiasing bitmask (`shader.wgsl` `triangle`).
+    private static func triangle(_ p: (Float, Float), _ a: (Float, Float), _ b: (Float, Float), _ c: (Float, Float), _ aa: UInt32) -> Float {
+        var cov: Float = 1.0
+        if (aa & 1) == 1 {
+            cov *= soft(p, a, b, c)
+        } else if !owns(p, a, b, c) {
+            return 0.0
+        }
+        if (aa & 2) == 2 {
+            cov *= soft(p, b, c, a)
+        } else if !owns(p, b, c, a) {
+            return 0.0
+        }
+        if (aa & 4) == 4 {
+            cov *= soft(p, c, a, b)
+        } else if !owns(p, c, a, b) {
+            return 0.0
+        }
+        return cov
     }
 
     static func ringArc(_ p: (Float, Float), _ size: (Float, Float), _ radii: [Float], _ bw: Float) -> (Float, Float) {
@@ -228,14 +322,19 @@ public enum OracleShader {
         let grow: Float = switch kind {
         case 1: i.params[2] * 3.0 + 1.0
         case 2: 0.0
-        case 3: 1.0
+        case 3, 5, 6: 1.0
         default: 1.0 + i.params[2] * 2.0
         }
-        if p.0 < i.rect[0] - grow
-            || p.1 < i.rect[1] - grow
-            || p.0 >= i.rect[0] + i.rect[2] + grow
-            || p.1 >= i.rect[1] + i.rect[3] + grow
-        {
+        var lo = (i.rect[0] - grow, i.rect[1] - grow)
+        var hi = (lo.0 + (i.rect[2] + 2.0 * grow), lo.1 + (i.rect[3] + 2.0 * grow))
+        // One band of a big shadow or border ring rasterizes only its window (`shader.wgsl` `base_vs`).
+        if kind <= 1 && i.uv[2] < 0.0 {
+            lo = (max(lo.0, i.rect[0] + i.uv[0]), max(lo.1, i.rect[1] + i.uv[1]))
+            hi = (max(min(hi.0, i.rect[0] - i.uv[2]), lo.0), max(min(hi.1, i.rect[1] + i.uv[3]), lo.1))
+        }
+        // Rasterization bounds matter for glyphs, bands and very soft shadows. Pixel centers,
+        // half-open right/bottom edges, matching the two axis-aligned GPU triangles.
+        if p.0 < lo.0 || p.1 < lo.1 || p.0 >= hi.0 || p.1 >= hi.1 {
             return (0, 0, 0, 0)
         }
         let h = (i.rect[2] * 0.5, i.rect[3] * 0.5)
@@ -256,7 +355,7 @@ public enum OracleShader {
                     let at = (q.0 - (w[3] - w[1]) * 0.5, q.1 - (w[0] - w[2]) * 0.5)
                     let cut = [max(w[0], w[3]), max(w[0], w[1]), max(w[2], w[1]), max(w[2], w[3])]
                     let innerRadii = (0..<4).map { n in
-                        copySign(max(abs(i.radii[n]) - cut[n], 0.0), i.radii[n])
+                        insetRadius(i.radii[n], cut[n])
                     }
                     innerD = sd(at, ih, innerRadii)
                 } else {
@@ -308,7 +407,7 @@ public enum OracleShader {
             let iq = (q.0 - i.uv[0], q.1 - i.uv[1])
             let lit: Float
             if i.params[2] < 0.3 {
-                let innerRadii = i.radii.map { copySign(max(abs($0) - spread, 0.0), $0) }
+                let innerRadii = i.radii.map { insetRadius($0, spread) }
                 lit = boxCov(iq, ih, innerRadii)
             } else {
                 lit = shadow(iq, ih, i.params[2], max(min(abs(i.radii[0]) - spread, min(ih.0, ih.1)), 0.0))
@@ -338,6 +437,26 @@ public enum OracleShader {
                     mix(i.fill[3], i.uv[3], t) * cov
                 )
             }
+
+        case 5:
+            let cov = segment(
+                screen,
+                (i.radii[0], i.radii[1]),
+                (i.radii[2], i.radii[3]),
+                i.params[0],
+                i.params[2] > 0.5
+            )
+            col = (i.fill[0] * cov, i.fill[1] * cov, i.fill[2] * cov, i.fill[3] * cov)
+
+        case 6:
+            let cov = triangle(
+                screen,
+                (i.radii[0], i.radii[1]),
+                (i.radii[2], i.radii[3]),
+                (i.uv[0], i.uv[1]),
+                UInt32(i.params[0] + 0.5)
+            )
+            col = (i.fill[0] * cov, i.fill[1] * cov, i.fill[2] * cov, i.fill[3] * cov)
 
         case 10:
             let d = sd(q, h, i.radii)
@@ -406,6 +525,16 @@ public enum OracleShader {
         return clamp((sqrtf(dx * dx + dy * dy) - (h[2] + h[3]) * 0.5) / max(h[3] - h[2], 1.0) + 0.5)
     }
 
+    /// Matches `instance.rs::pack_clip_radii` so CPU clipping sees the same packed quantization
+    /// (`0.5` px / `2.0` px mixed steps, clamped to half the shorter clip side) as `clip.wgsl`.
+    static func packClipRadii(_ clip: [Float], _ radii: [Float]) -> UInt32 {
+        OraclePrimitive.packClipRadii(clip: clip, radii: radii)
+    }
+
+    static func unpackClipRadii(_ w: UInt32) -> [Float] {
+        OraclePrimitive.unpackClipRadii(w)
+    }
+
     public static func clipCoverage(_ i: OraclePrimitive, screen: (Float, Float)) -> Float {
         let origin = i.fadeOrigin ?? i.clip
         let hard = [
@@ -433,10 +562,11 @@ public enum OracleShader {
             alpha *= edgeCov
         }
         let radii = i.params[1] == 8.0 ? (i.clipRadii ?? i.border) : (i.clipRadii ?? [0, 0, 0, 0])
-        if radii != [0, 0, 0, 0] {
+        let packed = packClipRadii(i.clip, radii)
+        if packed != 0 {
             let half = ((i.clip[2] - i.clip[0]) * 0.5, (i.clip[3] - i.clip[1]) * 0.5)
             let q = (screen.0 - i.clip[0] - half.0, screen.1 - i.clip[1] - half.1)
-            alpha *= clamp(0.5 - sd(q, half, radii))
+            alpha *= clamp(0.5 - sd(q, half, unpackClipRadii(packed)))
         }
         return alpha
     }

@@ -9,6 +9,7 @@ struct WebDocumentAccessibilityNode: Equatable, Sendable {
     var selectable = false
     var scrollX: Float?
     var contentWidth: Float?
+    var rtl = false
     var font: Font?
     var text: String?
     var inlineRange: Range<Int>?
@@ -106,6 +107,7 @@ struct WebAccessibilityDocument<State> {
                 if el.layout.scrollAxes == [.horizontal] {
                     metadata.scrollX = runtime.scrollOffsets[model.path]?.x ?? 0
                     metadata.contentWidth = max(model.localSize.x, model.contentSize.x)
+                    metadata.rtl = model.flow == .rtl
                 }
                 if !item.isSecure, el.handlers.editLens == nil,
                    let text = el.plainText ?? el.richSpans?.map(\.text).joined() {

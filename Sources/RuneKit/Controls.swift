@@ -129,9 +129,7 @@ public struct Switch<State> {
         if disabled && !isStandard {
             control = control.layerOpacity(0.5)
         }
-        if visualState == .focus && !isStandard {
-            control = control.outline(width: 2, offset: 1, color: c.borderFocus)
-        }
+        control = k.focusRingState(control, 2.0, 2.0, visualState == .focus)
 
         var root: El<State> = row()
             .key(key)
@@ -155,12 +153,9 @@ public struct Switch<State> {
         }
 
         control = control.key("\(key)-control")
-        root = root.child(control.focusRing(2, offset: 1, c.borderFocus).a11yHidden()).focusable(!disabled).disabled(disabled)
-        if !disabled {
-            root = root.focusRing(c.borderFocus, offset: 1.0)
-            if let onPress {
-                root = root.onClick(onPress)
-            }
+        root = root.child(control.a11yHidden()).focusable(!disabled).disabled(disabled)
+        if !disabled, let onPress {
+            root = root.onClick(onPress)
         }
         return root
     }
@@ -301,7 +296,6 @@ public struct Checkbox<State> {
         let (fill, border): (Color, Color) = switch visualState {
         case .disabled: (c.surfaceDisabled, c.borderDisabled)
         case .hover: (c.surfaceHover, c.borderHover)
-        case .focus: (on ? c.surfaceWeak : .transparent, c.borderActive)
         default: on ? (c.surfaceWeak, c.stdBorder) : (.transparent, c.borderWeak)
         }
         let glyphEl: El<State> = if let customIcon {
@@ -328,13 +322,10 @@ public struct Checkbox<State> {
             .role(.checkbox)
             .gap(12)
             .itemsCenter()
-            .child(control.focusRing(1, offset: 0, c.borderActive).a11yHidden())
+            .child(k.focusRingState(control, 2.0, 2.0, visualState == .focus).a11yHidden())
             .focusable(!disabled)
             .disabled(disabled)
         root = isIndeterminate ? root.checkedMixed() : root.checked(checked)
-        if !disabled {
-            root = root.focusRing(c.borderActive, offset: 1.0)
-        }
 
         if let descriptionText {
             root = root.description(descriptionText)
@@ -434,9 +425,7 @@ public struct RadioItem<State> {
         if disabled {
             control = control.layerOpacity(0.5)
         }
-        if visualState == .focus {
-            control = control.outline(width: 2, offset: 1, color: c.borderFocus)
-        }
+        control = k.focusRingState(control, 2.0, 2.0, visualState == .focus)
 
         let labelColor = disabled ? c.textMuted : c.textBase
         var words: El<State> = col()
@@ -456,13 +445,10 @@ public struct RadioItem<State> {
             .focusSelected(checked)
             .gap(8)
             .itemsStart()
-            .child(el().key("\(key)-stack").size(16, 20).child(control.focusRing(2, offset: 1, c.borderFocus)).a11yHidden())
+            .child(el().key("\(key)-stack").size(16, 20).child(control).a11yHidden())
             .child(words.a11yHidden())
             .focusable(!disabled)
             .disabled(disabled)
-        if !disabled {
-            root = root.focusRing(c.borderFocus, offset: 1.0)
-        }
         if let descriptionText {
             root = root.description(descriptionText)
         }
@@ -614,23 +600,27 @@ public struct SegmentedControl<State> {
                 .color(ink)
                 .ellipsis().a11yHidden()
             if hovers { labelEl = labelEl.groupColor(c.textBase) }
-            var seg: El<State> = row()
-                .key("\(key)-segment\(i)")
-                .role(.radio)
-                .focusable(st != .disabled)
-                .focusSelected(on)
-                .checked(on)
-                .positionInSet(i + 1, size: n)
-                .focusRing(2, offset: 1, c.borderFocus)
-                .disabled(st == .disabled)
-                .label(l)
-                .grow(1)
-                .shrink(1)
-                .h(28)
-                .px(12)
-                .center()
-                .rounded(6)
-                .child(labelEl)
+            var seg: El<State> = k.focusRingState(
+                row()
+                    .key("\(key)-segment\(i)")
+                    .role(.radio)
+                    .focusable(st != .disabled)
+                    .focusSelected(on)
+                    .checked(on)
+                    .positionInSet(i + 1, size: n)
+                    .disabled(st == .disabled)
+                    .label(l)
+                    .grow(1)
+                    .shrink(1)
+                    .h(28)
+                    .px(12)
+                    .center()
+                    .rounded(6)
+                    .child(labelEl),
+                2.0,
+                -2.0,
+                st == .focus
+            )
 
             if widthMode == .fit {
                 seg = seg.gridCell(column: i)
@@ -641,7 +631,6 @@ public struct SegmentedControl<State> {
                     .shadows([Shadow(x: 0, y: 0, blur: 0, spread: 0.5, color: c.borderStrong)])
             }
             switch st {
-            case .focus: seg = seg.outline(width: 2, offset: 1, color: c.borderFocus)
             case .disabled: seg = seg.layerOpacity(0.45)
             case .hover where !on: seg = seg.bg(c.hover)
             default: break
@@ -958,7 +947,7 @@ extension Kit {
                         .noWrap()
                         .z(1).a11yHidden()
                 )
-                .focusRing(c.borderFocus)
+                .focusRing(c.borderFocus, offset: -2.0)
                 .onClick { state, _ in onSelect(&state, opt.id) }
 
             bar = bar.child(seg)

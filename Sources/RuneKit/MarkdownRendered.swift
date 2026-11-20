@@ -72,16 +72,19 @@ enum MarkdownTableCodePad {
             let rest = String(decoding: bytes[max(0, end)...], as: UTF8.self)
             return rest.unicodeScalars.first.map(\.properties.isWhitespace) ?? true
         }
+        func inLink(_ a: Int, _ b: Int) -> Bool {
+            inl.links.contains { $0.start <= a && b <= $0.end }
+        }
         var last = false
         var word = false
-        // The padding that closes a code span: a pad starting where code ends.
-        for s in inl.spans where s.style == .codePad && inl.spans.contains(where: { $0.style == .code && $0.end == s.start }) {
+        // The padding that closes a code span: a pad starting where code ends (not inside a link).
+        for s in inl.spans where s.style == .codePad && inl.spans.contains(where: { $0.style == .code && $0.end == s.start && !inLink($0.start, $0.end) }) {
             last = last || s.end == len
             word = word || endsCode(s.end)
         }
         // Code that ends the cell lost its end padding with the line's trailing space
         // (`parser::trimmed_len`), but a page still counts it: the cell is as wide as the chip (#953).
-        let ends = inl.spans.contains { $0.style == .code && $0.end >= len }
+        let ends = inl.spans.contains { $0.style == .code && $0.end >= len && !inLink($0.start, $0.end) }
         return (last || ends, word || ends)
     }
 }

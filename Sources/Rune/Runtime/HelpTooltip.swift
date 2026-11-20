@@ -81,6 +81,8 @@ public struct HelpLook: Sendable, Equatable {
     public var margin: Float
     public var delaySeconds: Double?
     public var skipSeconds: Double
+    /// The keyboard focusing a help element shows its tooltip at once (`HelpLook::on_focus`, #1300).
+    public var onFocus: Bool
     public var fadeEnter: Double
     public var fadeExit: Double
     public var fadeScale: Float
@@ -120,6 +122,7 @@ public struct HelpLook: Sendable, Equatable {
             margin: 4.0,
             delaySeconds: nil,
             skipSeconds: 0.0,
+            onFocus: false,
             fadeEnter: 0.0,
             fadeExit: 0.0,
             fadeScale: 1.0,
@@ -232,6 +235,16 @@ public struct HelpLook: Sendable, Equatable {
         return copy
     }
 
+    /// The keyboard moving focus onto a help element (a Tab, an arrow) shows its tooltip at once,
+    /// with no delay, as a web tooltip opens on `focus`; a press that focuses it doesn't. The
+    /// pointer resting on another help element shows that one instead. Off by default
+    /// (`HelpLook::on_focus`, #1300).
+    public func onFocus(_ on: Bool) -> HelpLook {
+        var copy = self
+        copy.onFocus = on
+        return copy
+    }
+
     public func fade(enter: Double, exit: Double, scale: Float = 1.0) -> HelpLook {
         var copy = self
         copy.fadeEnter = max(0.0, enter)
@@ -294,6 +307,10 @@ internal enum HelpOver: Equatable, Sendable {
     case nothing
     case help(HelpTarget)
     case covered(HelpTarget)
+    /// The help element the keyboard focused, with the pointer on no other (`HelpLook.onFocus`, #1300).
+    case focused(HelpTarget)
+    /// A help element held open (`El.helpOpen`), whatever the pointer does (#1300).
+    case forced(HelpTarget)
 }
 
 internal enum HelpStepEvent: Equatable, Sendable {
@@ -317,6 +334,8 @@ internal struct HelpDrawnTip: Sendable {
 
 internal struct HelpRuntimeState: Sendable {
     var hits: [HelpHitRecord] = []
+    /// The first visible help element this frame that `El.helpOpen` holds open (`HitState::help_held`, #1300).
+    var heldNodeId: NodeId? = nil
     var interactiveHits: [HelpInteractiveHitRecord] = []
     var tipState: HelpTipState = .idle
     var currentTip: (text: String, rect: SIMD4<Float>)? = nil
@@ -375,6 +394,17 @@ internal func stepHelpTip(
         return effects
     }
 
+    func openNow(_ t: inout HelpTipState, at: HelpTarget, now: Double) -> [HelpEffect] {
+        let effects: [HelpEffect]
+        if case .open = t {
+            effects = [.fadeOut]
+        } else {
+            effects = []
+        }
+        t = .open(target: at, since: now)
+        return effects
+    }
+
     switch event {
     case .dismiss:
         return suppress(&tip)
@@ -383,6 +413,14 @@ internal func stepHelpTip(
         switch over {
         case .away where { if case .suppressed = tip { return true }; return false }():
             effects = []
+        case .forced(let at) where { if case .open(let target, _) = tip { return target == at }; return false }():
+            effects = []
+        case .forced(let at):
+            effects = openNow(&tip, at: at, now: now)
+        case .focused(let at) where tip.target == at:
+            effects = []
+        case .focused(let at):
+            effects = openNow(&tip, at: at, now: now)
         case .covered(let at) where tip.target == at:
             effects = suppress(&tip)
         case .help(let at) where tip.target == at:

@@ -63,9 +63,14 @@ private func oraclePrimitive(from inst: RenderInstance, node: UInt32, source: St
 private func renderInstance(from p: OraclePrimitive) -> RenderInstance {
     let kind = p.params.count > 1 ? p.params[1] : 0
     let rect = SIMD4<Float>(p.rect[0], p.rect[1], p.rect[2], p.rect[3])
-    let radii = SIMD4<Float>(p.radii[0], p.radii[1], p.radii[2], p.radii[3])
+    // `OracleScene` carries one grayscale R8 glyph atlas and no outline store; clear legacy
+    // non-zero `radii` and `params[2]` on glyphs so Metal never routes them to
+    // `outline_glyph`, `lcd_mask`, or secondary atlas pages.
+    let radii: SIMD4<Float> = kind == 2.0 ? .zero : SIMD4<Float>(p.radii[0], p.radii[1], p.radii[2], p.radii[3])
     let fill = SIMD4<Float>(p.fill[0], p.fill[1], p.fill[2], p.fill[3])
-    let params = SIMD4<Float>(p.params[0], p.params[1], p.params[2], p.params[3])
+    let params: SIMD4<Float> = kind == 2.0
+        ? SIMD4<Float>(p.params[0], p.params[1], 0.0, p.params[3])
+        : SIMD4<Float>(p.params[0], p.params[1], p.params[2], p.params[3])
     let uv = SIMD4<Float>(p.uv[0], p.uv[1], p.uv[2], p.uv[3])
     let clip = SIMD4<Float>(p.clip[0], p.clip[1], p.clip[2], p.clip[3])
     let fadeWidth = SIMD4<Float>(p.fade[0], p.fade[1], p.fade[2], p.fade[3])
@@ -1085,6 +1090,347 @@ struct MetalDifferentialTests {
 
         let report = Oracle.compare(scene: doubled, cpu: cpuDoubled, gpu: gpuDoubled, tolerance: 2)
         #expect(report.outlierPixels == 0, "turned-plus-lighter: \(report)")
+    }
+
+    private static func parityScene(width: UInt32, height: UInt32, instances: [RenderInstance]) -> OracleScene {
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = width
+        scene.height = height
+        scene.primitives = instances.enumerated().map { idx, inst in
+            oraclePrimitive(from: inst, node: UInt32(idx + 1), source: "parity/\(idx)")
+        }
+        return scene
+    }
+
+    private static func checkParity(gpu: MetalRenderer, scene: OracleScene, tolerance: UInt8 = 2) async throws {
+        try scene.validate()
+        var cpu = OracleFrame(width: scene.width, height: scene.height, provenance: true)
+        cpu.render(scene)
+        let rf = makeRenderFrame(from: scene, glyphGeneration: await sharedGen.allocate())
+        let actual = try gpu.renderOffscreen(rf)
+        let diff = Oracle.compare(scene: scene, cpu: cpu, gpu: actual.rgba, tolerance: tolerance)
+        #expect(diff.outlierPixels == 0, "CPU vs GPU mismatch: \(diff)")
+    }
+
+    private static func zeroRenderInstance() -> RenderInstance {
+        RenderInstance(
+            rect: .zero,
+            radii: .zero,
+            fill: .zero,
+            border: .zero,
+            params: .zero,
+            uv: .zero,
+            clip: NO_CLIP,
+            fade: .zero
+        )
+    }
+
+    @Test("parity.rs: cpu_gpu_banded_rects_and_shadows")
+    func cpuGpuBandedRectsAndShadows() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+
+        var ring = Self.zeroRenderInstance()
+        ring.rect = SIMD4<Float>(8.0, 8.0, 48.0, 48.0)
+        ring.radii = SIMD4<Float>(repeating: -8.0)
+        ring.border = SIMD4<Float>(0.85, 0.35, 0.2, 0.9)
+        ring.params = SIMD4<Float>(3.0, KIND_RECT, 0.0, 0.9)
+
+        var shadow = Self.zeroRenderInstance()
+        shadow.rect = SIMD4<Float>(14.0, 14.0, 36.0, 36.0)
+        shadow.radii = SIMD4<Float>(repeating: 6.0)
+        shadow.fill = SIMD4<Float>(0.0, 0.0, 0.0, 0.6)
+        shadow.params = SIMD4<Float>(0.0, KIND_SHADOW, 3.0, 1.0)
+
+        func bands(_ inst: RenderInstance, q: SIMD4<Float>, hole: SIMD4<Float>) -> [RenderInstance] {
+            let rects: [SIMD4<Float>] = [
+                SIMD4<Float>(q.x, q.y, q.z, hole.y),
+                SIMD4<Float>(q.x, hole.y, hole.x, hole.w),
+                SIMD4<Float>(hole.z, hole.y, q.z, hole.w),
+                SIMD4<Float>(q.x, hole.w, q.z, q.w),
+            ]
+            return rects.map { r in
+                var b = inst
+                b.uv = SIMD4<Float>(r.x, r.y, -r.z, r.w)
+                return b
+            }
+        }
+        let ringBands = bands(ring, q: SIMD4<Float>(-1.0, -1.0, 49.0, 49.0), hole: SIMD4<Float>(16.0, 16.0, 32.0, 32.0))
+        let shadowBands = bands(shadow, q: SIMD4<Float>(-10.0, -10.0, 46.0, 46.0), hole: SIMD4<Float>(8.0, 8.0, 28.0, 28.0))
+
+        try await Self.checkParity(gpu: gpu, scene: Self.parityScene(width: 64, height: 64, instances: ringBands))
+        try await Self.checkParity(gpu: gpu, scene: Self.parityScene(width: 64, height: 64, instances: shadowBands))
+        try await Self.checkParity(gpu: gpu, scene: Self.parityScene(width: 64, height: 64, instances: [shadowBands[0], ringBands[1]]))
+    }
+
+    @Test("parity.rs: cpu_gpu_segments_and_triangles")
+    func cpuGpuSegmentsAndTriangles() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+
+        var seg1 = Self.zeroRenderInstance()
+        seg1.rect = SIMD4<Float>(4.0, 4.0, 30.0, 24.0)
+        seg1.radii = SIMD4<Float>(8.0, 8.0, 30.0, 24.0)
+        seg1.fill = SIMD4<Float>(0.9, 0.35, 0.15, 0.95)
+        seg1.params = SIMD4<Float>(2.25, KIND_SEGMENT, 1.0, 1.0)
+
+        var seg2 = Self.zeroRenderInstance()
+        seg2.rect = SIMD4<Float>(32.0, 4.0, 26.0, 20.0)
+        seg2.radii = SIMD4<Float>(36.0, 10.0, 54.0, 18.0)
+        seg2.fill = SIMD4<Float>(0.16, 0.68, 0.4, 0.8)
+        seg2.params = SIMD4<Float>(0.3, KIND_SEGMENT, 0.0, 1.0)
+
+        var dot = Self.zeroRenderInstance()
+        dot.rect = SIMD4<Float>(42.0, 20.0, 12.0, 12.0)
+        dot.radii = SIMD4<Float>(48.0, 26.0, 48.0, 26.0)
+        dot.fill = SIMD4<Float>(0.9, 0.85, 0.2, 1.0)
+        dot.params = SIMD4<Float>(3.0, KIND_SEGMENT, 1.0, 1.0)
+
+        var triA = Self.zeroRenderInstance()
+        triA.rect = SIMD4<Float>(8.0, 32.0, 24.0, 24.0)
+        triA.radii = SIMD4<Float>(8.0, 32.0, 32.0, 32.0)
+        triA.uv = SIMD4<Float>(32.0, 56.0, 0.0, 0.0)
+        triA.fill = SIMD4<Float>(0.175, 0.315, 0.63, 0.7)
+        triA.params = SIMD4<Float>(3.0, KIND_TRIANGLE, 0.0, 1.0)
+
+        var triB = Self.zeroRenderInstance()
+        triB.rect = SIMD4<Float>(8.0, 32.0, 24.0, 24.0)
+        triB.radii = SIMD4<Float>(8.0, 32.0, 32.0, 56.0)
+        triB.uv = SIMD4<Float>(8.0, 56.0, 0.0, 0.0)
+        triB.fill = SIMD4<Float>(0.175, 0.315, 0.63, 0.7)
+        triB.params = SIMD4<Float>(6.0, KIND_TRIANGLE, 0.0, 1.0)
+
+        var triClipped = Self.zeroRenderInstance()
+        triClipped.rect = SIMD4<Float>(34.0, 32.0, 24.0, 24.0)
+        triClipped.radii = SIMD4<Float>(46.0, 33.0, 57.0, 55.0)
+        triClipped.uv = SIMD4<Float>(35.0, 52.0, 0.0, 0.0)
+        triClipped.fill = SIMD4<Float>(0.72, 0.17, 0.55, 0.85)
+        triClipped.params = SIMD4<Float>(7.0, KIND_TRIANGLE, 0.0, 1.0)
+        triClipped.clip = SIMD4<Float>(38.0, 36.0, 54.0, 53.0)
+
+        try await Self.checkParity(gpu: gpu, scene: Self.parityScene(width: 64, height: 64, instances: [seg1, seg2, dot, triA, triB, triClipped]))
+    }
+
+    @Test("parity.rs: cpu_gpu_negative_spread_inset_shadows")
+    func cpuGpuNegativeSpreadInsetShadows() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+
+        var s1 = Self.zeroRenderInstance()
+        s1.rect = SIMD4<Float>(4.0, 4.0, 26.0, 26.0)
+        s1.fill = SIMD4<Float>(0.68, 0.2, 0.12, 0.8)
+        s1.params = SIMD4<Float>(-4.0, KIND_INSET, 0.0, 1.0)
+        s1.uv = SIMD4<Float>(0.0, 6.0, 0.0, 0.0)
+
+        var s2 = Self.zeroRenderInstance()
+        s2.rect = SIMD4<Float>(34.0, 4.0, 26.0, 26.0)
+        s2.radii = SIMD4<Float>(repeating: 6.0)
+        s2.fill = SIMD4<Float>(0.12, 0.56, 0.34, 0.75)
+        s2.params = SIMD4<Float>(-2.0, KIND_INSET, 3.0, 1.0)
+        s2.uv = SIMD4<Float>(3.0, 4.0, 0.0, 0.0)
+
+        var s3 = Self.zeroRenderInstance()
+        s3.rect = SIMD4<Float>(10.0, 34.0, 44.0, 24.0)
+        s3.radii = SIMD4<Float>(repeating: -6.0)
+        s3.fill = SIMD4<Float>(0.14, 0.28, 0.63, 0.7)
+        s3.params = SIMD4<Float>(-3.0, KIND_INSET, 0.0, 1.0)
+        s3.uv = SIMD4<Float>(-4.0, 5.0, 0.0, 0.0)
+
+        try await Self.checkParity(gpu: gpu, scene: Self.parityScene(width: 64, height: 64, instances: [s1, s2, s3]))
+    }
+
+    @Test("parity.rs: cpu_gpu_mixed_clip_radii_quantization")
+    func cpuGpuMixedClipRadiiQuantization() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+
+        var fine = OracleGenerator.scene(records: [])
+        fine.width = 64
+        fine.height = 64
+        fine.primitives = [OraclePrimitive(
+            node: 1,
+            source: "clip-fine",
+            rect: [0.0, 0.0, 64.0, 64.0],
+            radii: [0.0, 0.0, 0.0, 0.0],
+            fill: [0.9, 0.4, 0.2, 1.0],
+            border: [0.0, 0.0, 0.0, 0.0],
+            params: [0.0, KIND_RECT, 0.0, 1.0],
+            uv: [0.0, 0.0, 0.0, 0.0],
+            clip: [4.0, 4.0, 60.0, 60.0],
+            fade: [0.0, 0.0, 0.0, 0.0],
+            fadeOrigin: nil,
+            turn: nil,
+            clipRadii: [10.3, 4.7, 0.0, 8.2]
+        )]
+        try await Self.checkParity(gpu: gpu, scene: fine)
+
+        var coarse = OracleGenerator.scene(records: [])
+        coarse.width = 200
+        coarse.height = 200
+        coarse.primitives = [OraclePrimitive(
+            node: 1,
+            source: "clip-coarse",
+            rect: [0.0, 0.0, 200.0, 200.0],
+            radii: [0.0, 0.0, 0.0, 0.0],
+            fill: [0.2, 0.7, 0.9, 1.0],
+            border: [0.0, 0.0, 0.0, 0.0],
+            params: [0.0, KIND_RECT, 0.0, 1.0],
+            uv: [0.0, 0.0, 0.0, 0.0],
+            clip: [10.0, 10.0, 190.0, 190.0],
+            fade: [0.0, 0.0, 0.0, 0.0],
+            fadeOrigin: nil,
+            turn: nil,
+            clipRadii: [-71.3, -13.1, 0.0, -40.7]
+        )]
+        try await Self.checkParity(gpu: gpu, scene: coarse)
+    }
+
+    @Test("parity.rs: cpu_gpu_layer_expansion_offscreen_turns_and_scissor_inline")
+    func cpuGpuLayerExpansionOffscreenTurnsAndScissorInline() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+
+        // 1. Uncached opacity layer with small initial rect containing a child + outer drop shadow.
+        var sh = Self.zeroRenderInstance()
+        sh.rect = SIMD4<Float>(16.0, 16.0, 28.0, 24.0)
+        sh.radii = SIMD4<Float>(repeating: 6.0)
+        sh.fill = SIMD4<Float>(0.0, 0.0, 0.0, 0.7)
+        sh.params = SIMD4<Float>(0.0, KIND_SHADOW, 5.0, 1.0)
+
+        var box = Self.zeroRenderInstance()
+        box.rect = SIMD4<Float>(16.0, 16.0, 28.0, 24.0)
+        box.radii = SIMD4<Float>(repeating: 6.0)
+        box.fill = SIMD4<Float>(0.8, 0.3, 0.2, 1.0)
+        box.params = SIMD4<Float>(0.0, KIND_RECT, 0.0, 1.0)
+
+        let expanded: [RenderInstance] = [
+            RenderInstance.beginLayer(
+                bounds: SIMD4<Float>(24.0, 24.0, 8.0, 8.0),
+                clip: NO_CLIP,
+                spec: LayerSpec(opacity: 0.65)
+            ),
+            sh,
+            box,
+            RenderInstance.endLayer(),
+        ]
+        try await Self.checkParity(gpu: gpu, scene: Self.parityScene(width: 64, height: 64, instances: expanded))
+
+        // 2. Uncached layer with empty initial rect [24, 24, 0, 0].
+        var eA = Self.zeroRenderInstance()
+        eA.rect = SIMD4<Float>(10.0, 10.0, 26.0, 26.0)
+        eA.radii = SIMD4<Float>(repeating: 4.0)
+        eA.fill = SIMD4<Float>(0.7, 0.2, 0.1, 0.7)
+        eA.params = SIMD4<Float>(0.0, KIND_RECT, 0.0, 1.0)
+
+        var eB = Self.zeroRenderInstance()
+        eB.rect = SIMD4<Float>(20.0, 20.0, 26.0, 26.0)
+        eB.radii = SIMD4<Float>(repeating: 4.0)
+        eB.fill = SIMD4<Float>(0.14, 0.42, 0.56, 0.7)
+        eB.params = SIMD4<Float>(0.0, KIND_RECT, 0.0, 1.0)
+
+        let emptySeed: [RenderInstance] = [
+            RenderInstance.beginLayer(
+                bounds: SIMD4<Float>(24.0, 24.0, 0.0, 0.0),
+                clip: NO_CLIP,
+                spec: LayerSpec(opacity: 0.5, blend: .plusLighter)
+            ),
+            eA,
+            eB,
+            RenderInstance.endLayer(),
+        ]
+        try await Self.checkParity(gpu: gpu, scene: Self.parityScene(width: 64, height: 64, instances: emptySeed))
+
+        // 3. Turned layer whose upright content starts at x < 0 and rotates into the viewport.
+        var offBox = Self.zeroRenderInstance()
+        offBox.rect = SIMD4<Float>(-12.0, 22.0, 24.0, 16.0)
+        offBox.radii = SIMD4<Float>(repeating: 4.0)
+        offBox.fill = SIMD4<Float>(0.2, 0.85, 0.45, 1.0)
+        offBox.params = SIMD4<Float>(0.0, KIND_RECT, 0.0, 1.0)
+
+        let offscreenTurn: [RenderInstance] = [
+            RenderInstance.beginLayer(
+                bounds: SIMD4<Float>(-12.0, 22.0, 24.0, 16.0),
+                clip: NO_CLIP,
+                spec: LayerSpec()
+            ).turned(angle: Float.pi * 0.5, pivot: SIMD2<Float>(16.0, 30.0)),
+            offBox,
+            RenderInstance.endLayer(),
+        ]
+        try await Self.checkParity(gpu: gpu, scene: Self.parityScene(width: 64, height: 64, instances: offscreenTurn))
+
+        // 4. Integer-clipped opaque layer (`Disposition::Inline` with hardware scissor) with overlapping children.
+        var scissoredInner = RenderInstance.beginLayer(
+            bounds: SIMD4<Float>(10.0, 10.0, 32.0, 32.0),
+            clip: SIMD4<Float>(12.0, 12.0, 40.0, 40.0),
+            spec: LayerSpec(opacity: 0.7)
+        )
+        scissoredInner.fade.w = packClipRadii(clip: scissoredInner.clip, radii: SIMD4<Float>(repeating: 8.0))
+
+        var bg1 = Self.zeroRenderInstance()
+        bg1.rect = SIMD4<Float>(0.0, 0.0, 64.0, 64.0)
+        bg1.fill = SIMD4<Float>(0.2, 0.1, 0.3, 0.5)
+        bg1.params = SIMD4<Float>(0.0, KIND_RECT, 0.0, 1.0)
+
+        var bg2 = Self.zeroRenderInstance()
+        bg2.rect = SIMD4<Float>(4.0, 4.0, 56.0, 56.0)
+        bg2.fill = SIMD4<Float>(0.72, 0.48, 0.08, 0.8)
+        bg2.params = SIMD4<Float>(0.0, KIND_RECT, 0.0, 1.0)
+
+        let scissored: [RenderInstance] = [
+            RenderInstance.beginLayer(
+                bounds: SIMD4<Float>(8.0, 8.0, 48.0, 48.0),
+                clip: SIMD4<Float>(8.0, 8.0, 48.0, 48.0),
+                spec: LayerSpec()
+            ),
+            bg1,
+            scissoredInner,
+            bg2,
+            RenderInstance.endLayer(),
+            RenderInstance.endLayer(),
+        ]
+        try await Self.checkParity(gpu: gpu, scene: Self.parityScene(width: 64, height: 64, instances: scissored))
+    }
+
+    @Test("parity.rs: cpu_gpu_effect_slot_with_mark_and_legacy_glyph_radii")
+    func cpuGpuEffectSlotWithMarkAndLegacyGlyphRadii() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+
+        let mark: UInt32 = 0x1234_5678
+        var slot = Self.zeroRenderInstance()
+        slot.rect = SIMD4<Float>(8.0, 8.0, 24.0, 24.0)
+        slot.fill = SIMD4<Float>(0.0, 0.0, 0.0, 1.0)
+        slot.border = SIMD4<Float>(Float(mark & 0xFFFF), Float(mark >> 16), 0.0, 0.0)
+        slot.params = SIMD4<Float>(1.0, KIND_EFFECT, 4.0, 1.0)
+        slot.uv = SIMD4<Float>(-3.0, 7.5, 1.0, 0.25)
+
+        var bg = Self.zeroRenderInstance()
+        bg.rect = SIMD4<Float>(4.0, 4.0, 40.0, 40.0)
+        bg.fill = SIMD4<Float>(0.3, 0.5, 0.8, 1.0)
+        bg.params = SIMD4<Float>(0.0, KIND_RECT, 0.0, 1.0)
+
+        try await Self.checkParity(gpu: gpu, scene: Self.parityScene(width: 64, height: 64, instances: [bg, slot]))
+
+        var glyphScene = OracleGenerator.scene(records: [])
+        glyphScene.primitives = [OraclePrimitive(
+            node: 1,
+            source: "legacy-glyph",
+            rect: [12.0, 12.0, 16.0, 16.0],
+            radii: [12.0, 8.0, 4.0, 2.0],
+            fill: [0.8, 0.7, 0.5, 0.9],
+            border: [0.0, 0.0, 0.0, 0.0],
+            params: [0.0, 2.0, 3.5, 1.2],
+            uv: [1.0, 1.0, 0.0, 0.0],
+            clip: oracleNoClip,
+            fade: [0.0, 0.0, 0.0, 0.0],
+            fadeOrigin: nil,
+            turn: nil,
+            clipRadii: nil
+        )]
+        let inst = renderInstance(from: glyphScene.primitives[0])
+        #expect(inst.radii == .zero)
+        #expect(inst.params.z == 0.0)
+        try await Self.checkParity(gpu: gpu, scene: glyphScene)
     }
 
     private static func runCLI(binaryURL: URL, arguments: [String]) throws -> (status: Int32, stdout: String, stderr: String) {

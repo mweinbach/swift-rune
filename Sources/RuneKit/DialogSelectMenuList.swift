@@ -362,6 +362,11 @@ public struct Select<State> {
         case .inline:
             let font = k.ty.uiMedium.lh(16.0)
             let isHover = controlState == .hover || isOpen
+            // select.css: the inline trigger takes the default ring, 2 out, while closed
+            // (opencode#64909).
+            trigger = isOpen
+                ? trigger.noFocusRing()
+                : k.focusRingState(trigger, 2.0, 2.0, controlState == .focus)
             trigger = trigger
                 .h(24.0)
                 .pl(8.0)

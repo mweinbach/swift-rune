@@ -408,6 +408,14 @@ vec4 finish(vec4 c0, vec2 px, Globals g) {
     return c;
 }
 
+// The fragment's pixel centre in px, exactly: the interpolated `runePixel` drifts by a few ulps
+// that differ between quads, so two equal shapes at different places would shade a little apart.
+// GL's gl_FragCoord has Y pointing up, while Rune's pixel space has Y pointing down.
+vec2 recover_pixel(Globals g) {
+    vec2 pos = vec2(gl_FragCoord.x, g.viewport.y - gl_FragCoord.y);
+    return pos + round((runePixel - pos) * 256.0) / 256.0;
+}
+
 vec4 fx_fs(
     vec4 shaded,
     Inst i,

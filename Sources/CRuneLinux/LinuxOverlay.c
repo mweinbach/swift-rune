@@ -493,8 +493,16 @@ void rune_overlay_input(RuneLinuxOverlay *s, int all, const RuneOverlayRect *rec
 void rune_overlay_focus(RuneLinuxOverlay *s) {
     if (!s->mapped || !rune_overlay_has_keys(s)) return;
     gtk_window_set_accept_focus(GTK_WINDOW(s->window), TRUE);
-    if (s->backend == RuneOverlayLayer) layer.set_keyboard(GTK_WINDOW(s->window), 2); /* OnDemand */
-    else gdk_window_focus(gtk_widget_get_window(s->window), GDK_CURRENT_TIME);
+    if (s->backend == RuneOverlayLayer) {
+        layer.set_keyboard(GTK_WINDOW(s->window), 2); /* OnDemand */
+    } else {
+        GdkWindow *w = gtk_widget_get_window(s->window);
+        if (w && GDK_IS_X11_WINDOW(w)) {
+            Display *dpy = GDK_DISPLAY_XDISPLAY(s->display);
+            XSetInputFocus(dpy, gdk_x11_window_get_xid(w), RevertToParent, CurrentTime);
+            XFlush(dpy);
+        }
+    }
     gtk_widget_grab_focus(s->area);
 }
 void rune_overlay_redraw(RuneLinuxOverlay *s) { if (s->mapped) gtk_gl_area_queue_render(GTK_GL_AREA(s->area)); }

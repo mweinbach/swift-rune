@@ -213,7 +213,7 @@ vec4 shade_distort(
 void main() {
     Globals g = fxGlobals;
     BackdropEncoding enc = fxBackdrop;
-    vec2 pixel = runePixel;
+    vec2 pixel = recover_pixel(g);
     Inst i = fxInstance;
     vec4 shaded = shade_distort(pixel, i, g, uTex0, uTex2, enc);
     fragColor = fx_fs(shaded, i, pixel, g, uTex0, enc);

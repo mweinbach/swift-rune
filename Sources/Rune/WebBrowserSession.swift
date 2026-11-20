@@ -28,6 +28,12 @@ final class WebBrowserSession {
         var activate: Bool
     }
 
+    struct ScrollXUpdate: Encodable, Equatable {
+        var path: String
+        var x: Float
+        var rtl: Bool
+    }
+
     private var fieldUpdate: FieldUpdate?
     private var drawAfterInput = true
     private(set) var cpuCanvas: WebCPUCanvas?
@@ -58,6 +64,7 @@ final class WebBrowserSession {
     let deferredAccessibility: () -> Int
     let enableAccessibilityPatches: () -> Void
     let takeAccessibility: () -> Data?
+    let takeScrollX: () -> Data?
 
     init<State>(_ host: WebAppHost<State>) {
         waker = host.runtime.waker
@@ -106,6 +113,26 @@ final class WebBrowserSession {
         deferredAccessibility = { accessibility.deferredPull(host.runtime) }
         enableAccessibilityPatches = accessibility.enablePatches
         takeAccessibility = { accessibility.update(host.runtime) }
+        var lastScrollX: [ScrollXUpdate] = []
+        takeScrollX = {
+            guard host.config.webDocument else { return nil }
+            let runtime = host.runtime
+            var next: [ScrollXUpdate] = []
+            for node in runtime.flatNodes where node.el.layout.scrollAxes == [.horizontal] {
+                let x = runtime.scrollOffsets[node.path]?.x ?? 0
+                next.append(ScrollXUpdate(path: node.path, x: x, rtl: node.flow == .rtl))
+            }
+            var changed: [ScrollXUpdate] = []
+            for item in next {
+                let known = lastScrollX.first(where: { $0.path == item.path })
+                if known == nil || abs((known?.x ?? 0) - item.x) > 0.5 || known?.rtl != item.rtl {
+                    changed.append(item)
+                }
+            }
+            lastScrollX = next
+            guard !changed.isEmpty else { return nil }
+            return try? JSONEncoder().encode(changed)
+        }
         route = { event, now in
             let key = event.key ?? ""
             switch event.kind {
@@ -222,6 +249,9 @@ final class WebBrowserSession {
                 let moved = host.runtime.setPageScrollX(path, x: x)
                 if moved, let offset = host.runtime.scrollOffsets[path], abs(offset.x - x) < 0.5 {
                     accessibility.acknowledgeDocumentScroll(path, x: offset.x)
+                    if let idx = lastScrollX.firstIndex(where: { $0.path == path }) {
+                        lastScrollX[idx].x = offset.x
+                    }
                 }
                 return moved
             case "resize":
@@ -541,6 +571,13 @@ func runeWebSecondaryClaim() -> Int {
 @MainActor @_cdecl("rune_web_clipboard")
 func runeWebClipboard() -> Int {
     guard let data = RuneWebReactor.session?.takeClipboard(), let bytes = RuneWebReactor.reserve(data.count) else { return 0 }
+    data.copyBytes(to: bytes.assumingMemoryBound(to: UInt8.self), count: data.count)
+    return data.count
+}
+
+@MainActor @_cdecl("rune_web_scroll_x")
+func runeWebScrollX() -> Int {
+    guard let data = RuneWebReactor.session?.takeScrollX(), let bytes = RuneWebReactor.reserve(data.count) else { return 0 }
     data.copyBytes(to: bytes.assumingMemoryBound(to: UInt8.self), count: data.count)
     return data.count
 }

@@ -629,8 +629,8 @@ struct RuneRefParityTests {
             ).validate()
         }
 
-        // Kinds 5 (segment), 6 (triangle), 7 (image) and 13 (backdrop blur) are not implemented here.
-        for kind: Float in [5.0, 6.0, 7.0, 13.0] {
+        // Kinds 7 (image) and 13 (backdrop blur) are not implemented here.
+        for kind: Float in [7.0, 13.0] {
             var unsupported = rect
             unsupported.params[1] = kind
             #expect(throws: (any Error).self, "kind \(kind) must be rejected") {
@@ -642,6 +642,342 @@ struct RuneRefParityTests {
                     atlas: base.atlas
                 ).validate()
             }
+        }
+    }
+
+    private func plainPrim(_ kind: Float) -> OraclePrimitive {
+        OraclePrimitive(
+            node: 1,
+            source: "test",
+            rect: [0.0, 0.0, 16.0, 16.0],
+            radii: [0.0, 0.0, 0.0, 0.0],
+            fill: [0.0, 0.0, 0.0, 0.0],
+            border: [0.0, 0.0, 0.0, 0.0],
+            params: [0.0, kind, 0.0, 1.0],
+            uv: [0.0, 0.0, 0.0, 0.0],
+            clip: oracleNoClip,
+            fade: [0.0, 0.0, 0.0, 0.0],
+            fadeOrigin: nil,
+            turn: nil,
+            clipRadii: nil
+        )
+    }
+
+    private func renderOracle(_ scene: OracleScene) throws -> OracleFrame {
+        try scene.validate()
+        var frame = OracleFrame(width: scene.width, height: scene.height, provenance: true)
+        frame.render(scene)
+        return frame
+    }
+
+    @Test("shader.rs: pack_clip_radii matches uniform, fine, coarse, and continuous encoding")
+    func packClipRadiiMatchesUniformFineCoarseAndContinuousEncoding() {
+        let clip: [Float] = [0.0, 0.0, 600.0, 600.0]
+        #expect(OracleShader.packClipRadii(clip, [0.0, 0.0, 0.0, 0.0]) == 0)
+        // Uniform corners round-trip as exact f32 bits.
+        let uniform = OracleShader.packClipRadii(clip, [-12.25, -12.25, -12.25, -12.25])
+        #expect(OracleShader.unpackClipRadii(uniform) == [-12.25, -12.25, -12.25, -12.25])
+        // Mixed corners <= 63.5 px quantize to 0.5 px steps.
+        let fine = OracleShader.packClipRadii(clip, [10.2, 4.8, 0.0, 63.4])
+        #expect(OracleShader.unpackClipRadii(fine) == [10.0, 5.0, 0.0, 63.5])
+        // Mixed corners > 63.5 px quantize to 2.0 px steps and saturate at 254 px.
+        let coarse = OracleShader.packClipRadii(clip, [-71.3, -280.0, 0.0, -13.1])
+        #expect(OracleShader.unpackClipRadii(coarse) == [-72.0, -254.0, 0.0, -14.0])
+        // Radii clamp to half the shorter clip side.
+        let smallClip: [Float] = [0.0, 0.0, 20.0, 40.0]
+        #expect(OracleShader.unpackClipRadii(OracleShader.packClipRadii(smallClip, [50.0, 12.0, 15.0, 10.0])) == [10.0, 10.0, 10.0, 10.0])
+    }
+
+    @Test("shader.rs: inset_radius keeps zero corners square under negative spread")
+    func insetRadiusKeepsZeroCornersSquareUnderNegativeSpread() {
+        #expect(OracleShader.insetRadius(0.0, -4.0) == 0.0)
+        #expect(OracleShader.insetRadius(6.0, -4.0) == 10.0)
+        #expect(OracleShader.insetRadius(-6.0, -4.0) == -10.0)
+        let clampedNeg = OracleShader.insetRadius(-6.0, 8.0)
+        #expect(clampedNeg == 0.0 && clampedNeg.sign == .minus)
+    }
+
+    @Test("reference.rs: banded rects and shadows rasterize only their window")
+    func bandedRectsAndShadowsRasterizeOnlyTheirWindow() throws {
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = 64
+        scene.height = 64
+        scene.clear = [0.0, 0.0, 0.0, 1.0]
+
+        var whole = plainPrim(0.0)
+        whole.rect = [12.0, 12.0, 40.0, 40.0]
+        whole.radii = [4.0, 4.0, 4.0, 4.0]
+        whole.border = [0.8, 0.4, 0.2, 1.0]
+        whole.params = [3.0, 0.0, 0.0, 1.0]
+
+        var bandedRing = scene
+        let (qx0, qy0, qx1, qy1): (Float, Float, Float, Float) = (-1.0, -1.0, 41.0, 41.0)
+        let (hx0, hy0, hx1, hy1): (Float, Float, Float, Float) = (10.0, 10.0, 30.0, 30.0)
+        let windows: [[Float]] = [
+            [qx0, qy0, qx1, hy0],
+            [qx0, hy0, hx0, hy1],
+            [hx1, hy0, qx1, hy1],
+            [qx0, hy1, qx1, qy1],
+        ]
+        for (idx, w) in windows.enumerated() {
+            var band = whole
+            band.node = UInt32(idx + 1)
+            band.uv = [w[0], w[1], -w[2], w[3]]
+            bandedRing.primitives.append(band)
+        }
+        scene.primitives = [whole]
+        let expected = try renderOracle(scene)
+        let actual = try renderOracle(bandedRing)
+        #expect(expected.rgba == actual.rgba, "4-band border ring must match unbanded ring")
+
+        // A single banded shadow must leave pixels outside its band window untouched (even inside the rect).
+        var sh = plainPrim(1.0)
+        sh.rect = [12.0, 12.0, 40.0, 40.0]
+        sh.radii = [4.0, 4.0, 4.0, 4.0]
+        sh.fill = [0.0, 0.0, 0.8, 0.8]
+        sh.params = [0.0, 1.0, 3.0, 1.0]
+        sh.uv = [-10.0, -10.0, -50.0, 8.0] // top band only: y < 20
+        var shScene = scene
+        shScene.primitives = [sh]
+        let topOnly = try renderOracle(shScene)
+        let topIdx = (15 * 64 + 32) * 4
+        let botIdx = (48 * 64 + 32) * 4
+        let topPx = Array(topOnly.rgba[topIdx..<(topIdx + 4)])
+        let bottomPx = Array(topOnly.rgba[botIdx..<(botIdx + 4)])
+        #expect(topPx[2] > 50, "top band must shade inside its window: \(topPx)")
+        #expect(bottomPx == [0, 0, 0, 255], "top band must not shade outside its window")
+    }
+
+    @Test("reference.rs: segments and triangles render and translate")
+    func segmentsAndTrianglesRenderAndTranslate() throws {
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = 48
+        scene.height = 48
+        scene.clear = [0.0, 0.0, 0.0, 1.0]
+
+        var segRound = plainPrim(5.0)
+        segRound.rect = [4.0, 4.0, 20.0, 12.0]
+        segRound.radii = [8.0, 8.0, 20.0, 12.0]
+        segRound.fill = [1.0, 0.0, 0.0, 1.0]
+        segRound.params = [1.5, 5.0, 1.0, 1.0]
+
+        var segButt = plainPrim(5.0)
+        segButt.node = 2
+        segButt.rect = [24.0, 4.0, 18.0, 12.0]
+        segButt.radii = [28.0, 10.0, 38.0, 10.0]
+        segButt.fill = [0.0, 1.0, 0.0, 1.0]
+        segButt.params = [0.25, 5.0, 0.0, 1.0] // hairline < 1px
+
+        // Two right triangles forming a 16x16 square [8..24, 20..36] with a shared diagonal (hard edge).
+        var triA = plainPrim(6.0)
+        triA.node = 3
+        triA.rect = [8.0, 20.0, 16.0, 16.0]
+        triA.radii = [8.0, 20.0, 24.0, 20.0]
+        triA.uv = [24.0, 36.0, 0.0, 0.0]
+        triA.fill = [0.0, 0.0, 0.5, 0.5]
+        triA.params = [3.0, 6.0, 0.0, 1.0]
+
+        var triB = plainPrim(6.0)
+        triB.node = 4
+        triB.rect = [8.0, 20.0, 16.0, 16.0]
+        triB.radii = [8.0, 20.0, 24.0, 36.0]
+        triB.uv = [8.0, 36.0, 0.0, 0.0]
+        triB.fill = [0.0, 0.0, 0.5, 0.5]
+        triB.params = [6.0, 6.0, 0.0, 1.0]
+
+        scene.primitives = [segRound, segButt, triA, triB]
+        let frame = try renderOracle(scene)
+
+        // Every interior pixel of the square—including every pixel along the shared diagonal—must be
+        // painted exactly once at 0.5 linear blue (sRGB ~188), with no crack and no double-blend seam.
+        for y in 22..<34 {
+            for x in 10..<22 {
+                let idx = (y * 48 + x) * 4
+                let px = Array(frame.rgba[idx..<(idx + 4)])
+                #expect(abs(Int(px[2]) - 188) <= 1, "shared diagonal seam at (\(x),\(y)): \(px)")
+            }
+        }
+
+        // Translation invariance shifts segment endpoints and triangle vertices with the scene.
+        var shifted = scene
+        shifted.width += 5
+        shifted.height += 3
+        OracleGenerator.translate(&shifted, x: 5.0, y: 3.0)
+        let actual = try renderOracle(shifted)
+        for y in 0..<48 {
+            let row = Array(frame.rgba[(y * 48 * 4)..<((y + 1) * 48 * 4)])
+            let start = ((y + 3) * 53 + 5) * 4
+            #expect(row == Array(actual.rgba[start..<(start + row.count)]))
+        }
+    }
+
+    @Test("reference.rs: inset shadow supports negative spread and keeps square corners square")
+    func insetShadowSupportsNegativeSpreadAndKeepsSquareCornersSquare() throws {
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = 48
+        scene.height = 48
+        scene.clear = [0.0, 0.0, 0.0, 1.0]
+
+        var inset = plainPrim(3.0)
+        inset.rect = [8.0, 8.0, 32.0, 32.0]
+        inset.radii = [0.0, 0.0, 0.0, 0.0]
+        inset.fill = [1.0, 1.0, 1.0, 1.0]
+        inset.params = [-4.0, 3.0, 0.0, 1.0]
+        inset.uv = [0.0, 6.0, 0.0, 0.0]
+
+        scene.primitives = [inset]
+        let frame = try renderOracle(scene)
+        let topIdx = (8 * 48 + 24) * 4
+        let blIdx = (39 * 48 + 8) * 4
+        let brIdx = (39 * 48 + 39) * 4
+        #expect(Array(frame.rgba[topIdx..<(topIdx + 4)]) == [255, 255, 255, 255], "top strip must receive the offset inset shadow")
+        #expect(Array(frame.rgba[blIdx..<(blIdx + 4)]) == [0, 0, 0, 255], "square corner must stay square under negative spread")
+        #expect(Array(frame.rgba[brIdx..<(brIdx + 4)]) == [0, 0, 0, 255], "square corner must stay square under negative spread")
+    }
+
+    @Test("reference.rs: effect slots with nonzero mark validate and draw nothing")
+    func effectSlotsWithNonzeroMarkValidateAndDrawNothing() throws {
+        var scene = OracleGenerator.scene(records: [])
+        var slot = plainPrim(12.0)
+        slot.rect = [4.0, 4.0, 24.0, 24.0]
+        slot.fill = [0.0, 0.0, 0.0, 1.0]
+        slot.border = [Float(0x5678), Float(0x1234), 0.0, 0.0]
+        slot.params = [1.0, 12.0, 8.0, 2.0]
+        slot.uv = [-12.5, 42.0, 0.75, 100.0]
+        scene.primitives = [slot]
+        let frame = try renderOracle(scene)
+        #expect((frame.owners ?? []).allSatisfy { $0 == nil })
+    }
+
+    @Test("reference.rs: uncached and turned layers expand to children and offscreen upright content")
+    func uncachedAndTurnedLayersExpandToChildrenAndOffscreenUprightContent() throws {
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = 48
+        scene.height = 48
+        scene.clear = [0.0, 0.0, 0.0, 1.0]
+
+        var open = makeOracleLayer(kind: 8.0, blur: 0.0)
+        open.rect = [20.0, 20.0, 0.0, 0.0]
+        open.fill = [0.0, 0.0, 0.0, 0.5]
+        var child = plainPrim(0.0)
+        child.node = 2
+        child.rect = [8.0, 8.0, 20.0, 20.0]
+        child.fill = [1.0, 0.0, 0.0, 1.0]
+        scene.primitives = [open, child, makeOracleLayer(kind: 9.0, blur: 0.0)]
+        let frame = try renderOracle(scene)
+        let insideIdx = (12 * 48 + 12) * 4
+        let insideChild = Array(frame.rgba[insideIdx..<(insideIdx + 4)])
+        #expect(abs(Int(insideChild[0]) - 188) <= 1, "uncached layer must expand to child: \(insideChild)")
+
+        // Cached layer (`params[3] == 1.0`) must NOT expand past its declared `rect`.
+        var cachedOpen = makeOracleLayer(kind: 8.0, blur: 0.0)
+        cachedOpen.rect = [20.0, 20.0, 16.0, 16.0]
+        cachedOpen.params[3] = 1.0
+        var cachedScene = scene
+        cachedScene.primitives = [cachedOpen, child, makeOracleLayer(kind: 9.0, blur: 0.0)]
+        let cached = try renderOracle(cachedScene)
+        let outIdx = (12 * 48 + 12) * 4
+        let inIdx = (22 * 48 + 22) * 4
+        #expect(Array(cached.rgba[outIdx..<(outIdx + 4)]) == [0, 0, 0, 255], "cached layer must keep its declared bounds")
+        #expect(Array(cached.rgba[inIdx..<(inIdx + 4)]) == [255, 0, 0, 255])
+
+        // Turned layer whose upright child sits at x = -12..0 and rotates +90° clockwise about (12, 24).
+        var turned = makeOracleLayer(kind: 8.0, blur: 0.0)
+        turned.rect = [-12.0, 20.0, 12.0, 8.0]
+        turned.turn = [Float.pi * 0.5, 12.0, 24.0]
+        var offscreenChild = plainPrim(0.0)
+        offscreenChild.node = 7
+        offscreenChild.source = "offscreen-child"
+        offscreenChild.rect = [-12.0, 20.0, 12.0, 8.0]
+        offscreenChild.fill = [0.0, 1.0, 0.0, 1.0]
+        var turnedScene = scene
+        turnedScene.primitives = [turned, offscreenChild, makeOracleLayer(kind: 9.0, blur: 0.0)]
+        let turnedFrame = try renderOracle(turnedScene)
+        let rotIdx = (6 * 48 + 12) * 4
+        #expect(Array(turnedFrame.rgba[rotIdx..<(rotIdx + 4)]) == [0, 255, 0, 255], "off-viewport upright child must turn into view")
+        #expect(turnedFrame.blame(turnedScene, x: 12, y: 6)?.node == 7, "turned layer blame must resolve through the inverse turn to the child")
+    }
+
+    @Test("reference.rs: mixed clip radii quantize to packed ABI steps")
+    func mixedClipRadiiQuantizeToPackedABISteps() throws {
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = 64
+        scene.height = 64
+        scene.clear = [0.0, 0.0, 0.0, 1.0]
+        var a = plainPrim(0.0)
+        a.rect = [0.0, 0.0, 64.0, 64.0]
+        a.fill = [1.0, 1.0, 1.0, 1.0]
+        a.clip = [0.0, 0.0, 64.0, 64.0]
+        a.clipRadii = [10.2, 4.8, 0.0, 0.0]
+        var b = a
+        b.clipRadii = [10.0, 5.0, 0.0, 0.0]
+        var sa = scene; sa.primitives = [a]
+        var sb = scene; sb.primitives = [b]
+        let fa = try renderOracle(sa)
+        let fb = try renderOracle(sb)
+        #expect(fa.rgba == fb.rgba, "mixed clip radii must match packed 0.5 px steps")
+    }
+
+    @Test("reference.rs: generated glyphs have clean radii and page zero")
+    func generatedGlyphsHaveCleanRadiiAndPageZero() {
+        for seed: UInt64 in 0..<32 {
+            let scene = OracleGenerator.seeded(seed: seed, count: 16)
+            for p in scene.primitives where p.params[1] == 2.0 {
+                #expect(p.radii == [0.0, 0.0, 0.0, 0.0], "seed \(seed): glyph radii must be zero")
+                #expect(p.params[2] == 0.0, "seed \(seed): glyph page must be zero")
+            }
+        }
+    }
+
+    @Test("reference.rs: translate moves fade origin, turn pivot, and layer hole")
+    func translateMovesFadeOriginTurnPivotAndLayerHole() throws {
+        var scene = OracleGenerator.scene(records: [])
+        scene.width = 48
+        scene.height = 48
+        scene.clear = [0.0, 0.0, 0.0, 1.0]
+
+        var faded = plainPrim(0.0)
+        faded.rect = [4.0, 4.0, 24.0, 24.0]
+        faded.fill = [0.9, 0.3, 0.2, 1.0]
+        faded.clip = [8.0, 8.0, 28.0, 28.0]
+        faded.fade = [-12.0, 0.0, 0.0, 0.0]
+        faded.fadeOrigin = [2.0, 8.0, 28.0, 28.0]
+
+        var holeLayer = makeOracleLayer(kind: 8.0, blur: 0.0)
+        holeLayer.rect = [20.0, 20.0, 20.0, 20.0]
+        holeLayer.radii = [30.0, 30.0, 4.0, 6.0]
+        var holeChild = plainPrim(0.0)
+        holeChild.node = 2
+        holeChild.rect = [20.0, 20.0, 20.0, 20.0]
+        holeChild.fill = [0.2, 0.8, 0.4, 1.0]
+
+        var turned = makeOracleLayer(kind: 8.0, blur: 0.0)
+        turned.rect = [24.0, 4.0, 12.0, 12.0]
+        turned.turn = [0.5, 30.0, 10.0]
+        var turnedChild = plainPrim(0.0)
+        turnedChild.node = 3
+        turnedChild.rect = [24.0, 4.0, 12.0, 12.0]
+        turnedChild.fill = [0.2, 0.4, 0.9, 1.0]
+
+        scene.primitives = [
+            faded,
+            holeLayer,
+            holeChild,
+            makeOracleLayer(kind: 9.0, blur: 0.0),
+            turned,
+            turnedChild,
+            makeOracleLayer(kind: 9.0, blur: 0.0),
+        ]
+        let original = try renderOracle(scene)
+        var shifted = scene
+        shifted.width += 6
+        shifted.height += 4
+        OracleGenerator.translate(&shifted, x: 6.0, y: 4.0)
+        let actual = try renderOracle(shifted)
+        for y in 0..<48 {
+            let row = Array(original.rgba[(y * 48 * 4)..<((y + 1) * 48 * 4)])
+            let start = ((y + 4) * 54 + 6) * 4
+            #expect(row == Array(actual.rgba[start..<(start + row.count)]))
         }
     }
 

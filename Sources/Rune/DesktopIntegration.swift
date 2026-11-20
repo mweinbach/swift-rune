@@ -2547,6 +2547,54 @@ public final class Prefs: @unchecked Sendable {
         return values.keys.sorted()
     }
 
+    /// Windows retry schedule for transient atomic-replace conflicts (`crates/rune-core/src/prefs.rs`, `#1284`):
+    /// yield + 1, 2, 4, 8, 16 ms (6 retries / 7 attempts, at most 31 ms sleep).
+    internal static let windowsReplaceDelaysMs: [UInt32] = [0, 1, 2, 4, 8, 16]
+
+    /// Win32 error codes treated as transient sharing conflicts during `prefs.json` replacement.
+    /// `5` = `ERROR_ACCESS_DENIED`, `32` = `ERROR_SHARING_VIOLATION`, `13` = `EACCES` (permission denied).
+    internal static func isTransientWindowsReplaceError(_ code: UInt32) -> Bool {
+        code == 5 || code == 32 || code == 13
+    }
+
+    /// Runs an atomic-replace closure with the bounded Windows retry schedule, retrying only on
+    /// transient `ERROR_ACCESS_DENIED` / `ERROR_SHARING_VIOLATION` / permission-denied errors.
+    /// Returns `0` on success or the final failing error code.
+    internal static func renameReplaceWithRetry(
+        delaysMs: [UInt32] = windowsReplaceDelaysMs,
+        sleep: (UInt32) -> Void,
+        attempt: () -> UInt32
+    ) -> UInt32 {
+        for delay in delaysMs {
+            let code = attempt()
+            if code == 0 { return 0 }
+            if !isTransientWindowsReplaceError(code) { return code }
+            sleep(delay)
+        }
+        return attempt()
+    }
+
+    private static func renameReplace(from tmp: URL, to path: URL) throws {
+        #if os(Windows)
+        // On Windows, renaming over an existing file fails transiently with ERROR_ACCESS_DENIED
+        // while a concurrent rename's replaced target is delete-pending or another reader holds
+        // the file, and with ERROR_SHARING_VIOLATION when another handle lacks delete sharing.
+        // Retry a bounded number of times (7 attempts, <= 31 ms sleep) on those two errors only (#1284).
+        let code = renameReplaceWithRetry(sleep: { runeWindowsYieldOrSleep(ms: $0) }) {
+            runeWindowsReplaceFile(from: tmp, to: path)
+        }
+        if code != 0 {
+            throw NSError(domain: "RuneWin32Error", code: Int(code), userInfo: [
+                NSLocalizedDescriptionKey: "MoveFileExW failed with Windows error \(code)",
+            ])
+        }
+        #else
+        if rename(tmp.path, path.path) != 0 {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        #endif
+    }
+
     private func persist(_ snapshot: [String: Data]) throws {
         #if os(WASI)
         guard path == nil else { throw PrefsError.io("prefs files are unsupported on web") }
@@ -2561,11 +2609,12 @@ public final class Prefs: @unchecked Sendable {
             }
             let out = try JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])
             let tmp = dir.appendingPathComponent(".prefs.\(UUID().uuidString).tmp")
-            try out.write(to: tmp, options: .runeOutput)
-            if rename(tmp.path, path.path) != 0 {
-                let err = errno
+            do {
+                try out.write(to: tmp, options: .runeOutput)
+                try Self.renameReplace(from: tmp, to: path)
+            } catch {
                 try? FileManager.default.removeItem(at: tmp)
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(err))
+                throw error
             }
         } catch {
             throw PrefsError.io(error.localizedDescription)

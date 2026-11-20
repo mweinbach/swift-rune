@@ -560,7 +560,7 @@ public final class RuneOverlayMacOSHost<State> {
         self.presence = MacOSPanelPresence(requested: options.excludeFromCapture)
         self.capabilities = OverlayCapabilities(
             captureExclusion: options.excludeFromCapture ? .requested : .supported,
-            nonactivatingKeys: .supported,
+            nonactivatingKeys: OverlayKeys.keysSupport(options.keyPolicy, focuser: true),
             globalPointer: .supported
         )
     }
@@ -664,7 +664,7 @@ public final class RuneOverlayMacOSHost<State> {
         self.surfaceDescription = "macOS NSPanel Metal (\(deviceName))"
         capabilities = OverlayCapabilities(
             captureExclusion: presence.requested ? .requested : .supported,
-            nonactivatingKeys: .supported,
+            nonactivatingKeys: OverlayKeys.keysSupport(options.keyPolicy, focuser: true),
             globalPointer: .supported
         )
         onCreated?(OverlayCreated(windowNumber: windowNumber, capabilities: capabilities))
@@ -745,7 +745,7 @@ public final class RuneOverlayMacOSHost<State> {
     }
 
     public func requestKeys() {
-        guard options.keyPolicy != .none, let panel else { return }
+        guard OverlayKeys.canTakeKeys(options.keyPolicy), let panel else { return }
         panel.allowsKeyFocus = true
         panel.makeKey()
     }
@@ -765,6 +765,11 @@ public final class RuneOverlayMacOSHost<State> {
         self.overlayPlacement = placement
         self.resolvedPlacementSize = placement.size
         self.options = options
+        let nextKeys = OverlayKeys.keysSupport(options.keyPolicy, focuser: true)
+        if capabilities.nonactivatingKeys != nextKeys {
+            capabilities.nonactivatingKeys = nextKeys
+            onPanelStateChanged?(windowNumber, capabilities)
+        }
         if let panel {
             panel.allowsKeyFocus = (options.keyPolicy == .activating)
         }

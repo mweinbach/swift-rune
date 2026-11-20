@@ -329,7 +329,11 @@ extension Runtime {
             return "app"
         }
         if n.el.handlers.editLens != nil {
-            return onMisspelledWord(path: path) ? "app" : "field"
+            let onPill = n.el.handlers.onPillSecondary != nil
+                && pointerPosition.x > -9000
+                && pointerPosition.y > -9000
+                && inputPillAt(idx, x: pointerPosition.x, y: pointerPosition.y) != nil
+            return (onPill || onMisspelledWord(path: path)) ? "app" : "field"
         }
         return "text"
     }

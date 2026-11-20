@@ -484,6 +484,9 @@ public struct MarkdownInline: Sendable, Equatable, Hashable {
     public static let pad = "\u{202f}\u{202f}"
     public static let openPad = "\u{202f}\u{202f}\u{2066}"
     public static let closePad = "\u{2069}\u{202f}\u{202f}"
+    /// Inside a link, inline code keeps its directional isolate without pill padding (`a code { padding: 0 }`).
+    public static let linkOpenPad = "\u{2066}"
+    public static let linkClosePad = "\u{2069}"
 
     public var text: String { didSet { preparedBidi = nil } }
     public var spans: [MarkdownStyleSpan] { didSet { preparedBidi = nil } }
@@ -511,6 +514,8 @@ public struct MarkdownInline: Sendable, Equatable, Hashable {
     public static func unpadded(_ text: String) -> String {
         text.replacingOccurrences(of: openPad, with: "")
             .replacingOccurrences(of: closePad, with: "")
+            .replacingOccurrences(of: linkOpenPad, with: "")
+            .replacingOccurrences(of: linkClosePad, with: "")
     }
 
     public var unpaddedText: String {
@@ -2437,14 +2442,17 @@ public struct MarkdownTailStream: Sendable, Equatable {
         return (left && isWordStart(before), right)
     }
 
-    private static func dropClosingPad(in doc: inout MarkdownParsedDoc) {
+    static func dropClosingPad(in doc: inout MarkdownParsedDoc) {
         guard !doc.blocks.isEmpty, !doc.maps.isEmpty else { return }
         func stripPad(_ inl: inout MarkdownInline, _ map: inout MarkdownSpanMap) {
             let len = inl.text.utf8.count
             let closeLen = MarkdownInline.closePad.utf8.count
-            guard let k = inl.spans.firstIndex(where: { $0.style == .codePad && $0.end == len && $0.start + closeLen == len }) else { return }
+            let linkCloseLen = MarkdownInline.linkClosePad.utf8.count
+            guard let k = inl.spans.firstIndex(where: {
+                $0.style == .codePad && $0.end == len && ($0.start + closeLen == len || $0.start + linkCloseLen == len)
+            }) else { return }
+            let cut = inl.spans[k].start
             inl.spans.remove(at: k)
-            let cut = len - closeLen
             inl.text = utf8Slice(inl.text, range: 0..<cut) ?? inl.text
             inl.spans = inl.spans.compactMap { s in
                 let hi = min(s.end, cut)
@@ -3791,7 +3799,7 @@ public enum MarkdownParser {
             pushMappedRanges(inputLo: srcLo, inputHi: srcHi, outLo: out0, outHi: out1)
         }
 
-        func parseRange(_ lo: Int, _ hi: Int, linkDepth: Int, emDepth: Int) {
+        func parseRange(_ lo: Int, _ hi: Int, linkDepth: Int, emDepth: Int, inLink: Bool) {
             var i = lo
             while i < hi {
                 let b = bytes[i]
@@ -3838,12 +3846,14 @@ public enum MarkdownParser {
                             contentLo += 1
                             contentHi -= 1
                         }
+                        let open = inLink ? MarkdownInline.linkOpenPad : MarkdownInline.openPad
+                        let close = inLink ? MarkdownInline.linkClosePad : MarkdownInline.closePad
                         let padOpenStart = text.utf8.count
-                        text.append(MarkdownInline.openPad)
+                        text.append(open)
                         let codeStart = text.utf8.count
                         text.append(trimmedInner)
                         let codeEnd = text.utf8.count
-                        text.append(MarkdownInline.closePad)
+                        text.append(close)
                         let padCloseEnd = text.utf8.count
 
                         spans.append(MarkdownStyleSpan(start: padOpenStart, end: codeStart, style: .codePad))
@@ -3865,7 +3875,7 @@ public enum MarkdownParser {
                 if b == 0x21 && i + 1 < hi && bytes[i + 1] == 0x5B,
                    let linkMatch = matchBracketLink(bytes: bytes, openBracket: i + 1, limit: hi, definitions: definitions) {
                     let altStart = text.utf8.count
-                    parseRange(i + 2, linkMatch.closeBracket, linkDepth: linkDepth + 1, emDepth: emDepth + 1)
+                    parseRange(i + 2, linkMatch.closeBracket, linkDepth: linkDepth + 1, emDepth: emDepth + 1, inLink: inLink)
                     let altEnd = text.utf8.count
                     if altStart < altEnd {
                         excludedAutolinkRanges.append(altStart..<altEnd)
@@ -3882,7 +3892,7 @@ public enum MarkdownParser {
                 if b == 0x5B,
                    let linkMatch = matchBracketLink(bytes: bytes, openBracket: i, limit: hi, definitions: definitions) {
                     let lStart = text.utf8.count
-                    parseRange(i + 1, linkMatch.closeBracket, linkDepth: linkDepth + 1, emDepth: emDepth)
+                    parseRange(i + 1, linkMatch.closeBracket, linkDepth: linkDepth + 1, emDepth: emDepth, inLink: true)
                     let lEnd = text.utf8.count
                     if lStart < lEnd {
                         spans.append(MarkdownStyleSpan(start: lStart, end: lEnd, style: .link))
@@ -3913,7 +3923,7 @@ public enum MarkdownParser {
                 if b == 0x7E && i + 1 < hi && bytes[i + 1] == 0x7E,
                    let closeIdx = findClosingDouble(bytes, char: 0x7E, from: i + 2, limit: hi) {
                     let s0 = text.utf8.count
-                    parseRange(i + 2, closeIdx, linkDepth: linkDepth, emDepth: emDepth + 1)
+                    parseRange(i + 2, closeIdx, linkDepth: linkDepth, emDepth: emDepth + 1, inLink: inLink)
                     let s1 = text.utf8.count
                     if s0 < s1 {
                         spans.append(MarkdownStyleSpan(start: s0, end: s1, style: .strike))
@@ -3928,7 +3938,7 @@ public enum MarkdownParser {
                     while i + run < hi && bytes[i + run] == b { run += 1 }
                     if run >= 3, let closeIdx = findClosingTriple(bytes, char: b, from: i + 3, limit: hi) {
                         let s0 = text.utf8.count
-                        parseRange(i + 3, closeIdx, linkDepth: linkDepth, emDepth: emDepth + 1)
+                        parseRange(i + 3, closeIdx, linkDepth: linkDepth, emDepth: emDepth + 1, inLink: inLink)
                         let s1 = text.utf8.count
                         if s0 < s1 {
                             spans.append(MarkdownStyleSpan(start: s0, end: s1, style: .strong))
@@ -3938,7 +3948,7 @@ public enum MarkdownParser {
                         continue
                     } else if run >= 2, let closeIdx = findClosingDouble(bytes, char: b, from: i + 2, limit: hi) {
                         let s0 = text.utf8.count
-                        parseRange(i + 2, closeIdx, linkDepth: linkDepth, emDepth: emDepth + 1)
+                        parseRange(i + 2, closeIdx, linkDepth: linkDepth, emDepth: emDepth + 1, inLink: inLink)
                         let s1 = text.utf8.count
                         if s0 < s1 {
                             spans.append(MarkdownStyleSpan(start: s0, end: s1, style: .strong))
@@ -3948,7 +3958,7 @@ public enum MarkdownParser {
                     } else if run == 1, canOpenSingleEmphasis(bytes, at: i, limit: hi),
                               let closeIdx = findClosingSingle(bytes, char: b, from: i + 1, limit: hi) {
                         let s0 = text.utf8.count
-                        parseRange(i + 1, closeIdx, linkDepth: linkDepth, emDepth: emDepth + 1)
+                        parseRange(i + 1, closeIdx, linkDepth: linkDepth, emDepth: emDepth + 1, inLink: inLink)
                         let s1 = text.utf8.count
                         if s0 < s1 {
                             spans.append(MarkdownStyleSpan(start: s0, end: s1, style: .em))
@@ -3974,7 +3984,7 @@ public enum MarkdownParser {
             }
         }
 
-        parseRange(0, bytes.count, linkDepth: 0, emDepth: 0)
+        parseRange(0, bytes.count, linkDepth: 0, emDepth: 0, inLink: false)
 
         var inline = MarkdownInline(text: text, spans: spans, links: links)
         if trimTrailingCodePad {
@@ -4859,7 +4869,7 @@ public enum MarkdownParser {
             TextSpan(
                 tok.text,
                 color: tok.isLink || tok.isCode ? kit.c.textAccent : (tok.isStrikethrough ? kit.c.textMuted : fg),
-                background: tok.isCode ? kit.alpha(kit.c.textBase, 0.08) : nil,
+                background: tok.isCode && !tok.isLink ? kit.alpha(kit.c.textBase, 0.08) : nil,
                 weight: tok.isBold ? 670 : (tok.isLink ? 500 : nil),
                 italic: tok.isItalic,
                 monospace: tok.isCode,
@@ -7544,6 +7554,14 @@ private final class MarkdownRenderer<State> {
         return out
     }
 
+    private func codeLinkColor(start a: Int, end b: Int, in inl: MarkdownInline) -> Color? {
+        guard let matcher = view.config.codeLinkMatchFn else { return nil }
+        let isExactCode = inl.spans.contains { $0.style == .code && $0.start == a && $0.end == b }
+        let isExactLink = inl.links.contains { $0.start == a && $0.end == b }
+        guard isExactCode && isExactLink, let slice = utf8Slice(inl.text, range: a..<b) else { return nil }
+        return matcher(slice)?.color
+    }
+
     private func buildTextSpans(_ rawInl: MarkdownInline, font: TextStyle, baseColor: Color) -> [TextSpan] {
         let inl = withCodeLinks(rawInl)
         if inl.spans.isEmpty && inl.links.isEmpty { return [TextSpan(inl.text, color: baseColor)] }
@@ -7610,27 +7628,28 @@ private final class MarkdownRenderer<State> {
             var weight: Float? = isStrong ? s.strongWeight : nil
             var underline = false
 
-            if isCode {
-                if let matcher = view.config.codeLinkMatchFn, let codeMatch = matcher(seg) {
-                    fg = codeMatch.color
-                    weight = s.inlineCodeWeight
-                } else {
-                    weight = s.inlineCodeWeight
-                    if link == nil { bg = s.codeBg }
+            if let clColor = isCode ? codeLinkColor(start: a, end: b, in: inl) : nil {
+                fg = clColor
+                weight = s.inlineCodeWeight
+            } else {
+                if let link {
+                    if let custom = resolvedLinkStyle(link.url) {
+                        fg = custom.color ?? s.accent
+                        underline = custom.underline
+                        if !isStrong && !isCode, let w = custom.weight { weight = w }
+                        if let lbg = custom.bg { bg = lbg }
+                    } else {
+                        fg = s.accent
+                        underline = true
+                    }
                 }
-            } else if isCodePad {
-                if link == nil { bg = s.codeBg }
-            }
-
-            if let link {
-                if let custom = resolvedLinkStyle(link.url) {
-                    fg = custom.color ?? s.accent
-                    underline = custom.underline
-                    if !isStrong && !isCode, let w = custom.weight { weight = w }
-                    if !isCode, let lbg = custom.bg { bg = lbg }
-                } else if !isCode {
-                    fg = s.accent
-                    underline = true
+                if isCode {
+                    weight = s.inlineCodeWeight
+                    // Code inside a link reads as part of the link's label: it inherits the link's
+                    // colour, underline and hover with no code-pill background or padding.
+                    if link == nil { bg = s.codeBg }
+                } else if isCodePad {
+                    if link == nil { bg = s.codeBg }
                 }
             }
 

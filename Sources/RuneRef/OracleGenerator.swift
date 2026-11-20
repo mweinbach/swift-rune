@@ -59,7 +59,15 @@ public enum OracleGenerator {
             case 1:
                 p.radii = [p.radii[0], p.radii[0], p.radii[0], p.radii[0]]
             case 2:
+                // Atlas glyphs carry neither corner radii nor outline/LCD flags and read page 0.
+                p.radii = [0, 0, 0, 0]
+                // params[0] turns a glyph. At arbitrary angles a rotated edge can pass within
+                // the rasterizer's sub-pixel precision of a pixel centre, where it and the
+                // oracle's inside test may disagree by a whole pixel. Quarter turns have their
+                // own test.
                 p.params[0] = 0.0
+                p.params[2] = 0.0
+                // Guard texels keep all textureLoad taps defined on every backend.
                 p.uv = [1.0, 1.0, 0.0, 0.0]
                 p.rect[2] = 1.0 + Float(b[3] % 24)
                 p.rect[3] = 1.0 + Float(b[4] % 24)
@@ -126,15 +134,32 @@ public enum OracleGenerator {
                 satUInt32(p.radii[n % 4] * 8.0 + p.rect[n % 4] * 4.0)
             }
             var np = p
+            let bw = 0.5 + Float(b(0) % 8) * 0.25
             np.params = [
-                0.5 + Float(b(0) % 8) * 0.25,
+                bw,
                 10.0,
                 b(1) % 4 == 0 ? p.params[2] : 0.0,
                 1.0,
             ]
+            let dash = 1.0 + Float(b(2) % 24) * 0.5
+            var gap = 1.0 + Float(b(3) % 16) * 0.5
+            // Avoid exact half-integer `total / nominal`, where a 1-ULP GPU reciprocal division
+            // can flip `floor(total / nominal + 0.5)` by a whole dash period.
+            let h = bw * 0.5
+            let m = min(p.rect[2] * 0.5, p.rect[3] * 0.5)
+            let rc = p.radii.map { max(min(abs($0), m) - h, 0.0) }
+            let total = max(p.rect[2] - bw - rc[0] - rc[1], 0.0)
+                + max(p.rect[3] - bw - rc[1] - rc[2], 0.0)
+                + max(p.rect[2] - bw - rc[2] - rc[3], 0.0)
+                + max(p.rect[3] - bw - rc[3] - rc[0], 0.0)
+                + rc.reduce(0.0) { $0 + $1 * 1.5707964 }
+            let periods = total / (dash + gap)
+            if abs(periods - floorf(periods) - 0.5) < 1e-3 {
+                gap += 0.25
+            }
             np.uv = [
-                1.0 + Float(b(2) % 24) * 0.5,
-                1.0 + Float(b(3) % 16) * 0.5,
+                dash,
+                gap,
                 Float(b(1) % 32) * 0.75 - 6.0,
                 0.0,
             ]
@@ -198,6 +223,37 @@ public enum OracleGenerator {
                 scene.primitives[idx].clip[2] += x
                 scene.primitives[idx].clip[1] += y
                 scene.primitives[idx].clip[3] += y
+            }
+            if var origin = scene.primitives[idx].fadeOrigin, origin != oracleNoClip {
+                origin[0] += x
+                origin[2] += x
+                origin[1] += y
+                origin[3] += y
+                scene.primitives[idx].fadeOrigin = origin
+            }
+            if var turn = scene.primitives[idx].turn {
+                turn[1] += x
+                turn[2] += y
+                scene.primitives[idx].turn = turn
+            }
+            switch UInt32(scene.primitives[idx].params[1]) {
+            case 5:
+                scene.primitives[idx].radii[0] += x
+                scene.primitives[idx].radii[1] += y
+                scene.primitives[idx].radii[2] += x
+                scene.primitives[idx].radii[3] += y
+            case 6:
+                scene.primitives[idx].radii[0] += x
+                scene.primitives[idx].radii[1] += y
+                scene.primitives[idx].radii[2] += x
+                scene.primitives[idx].radii[3] += y
+                scene.primitives[idx].uv[0] += x
+                scene.primitives[idx].uv[1] += y
+            case 8 where scene.primitives[idx].params[3] == 0.0 && scene.primitives[idx].radii[3] > 0.0:
+                scene.primitives[idx].radii[0] += x
+                scene.primitives[idx].radii[1] += y
+            default:
+                break
             }
         }
     }

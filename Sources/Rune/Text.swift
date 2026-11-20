@@ -498,6 +498,26 @@ public struct SVGIcon: Sendable, Hashable {
         return body.contains("fill=\"#") || body.contains("stroke=\"#") || body.contains("stop-color=\"#") ||
             body.contains("fill='#") || body.contains("stroke='#") || body.contains("stop-color='#")
     }
+
+    /// True when this icon is a valid monochrome SMIL animated icon (multi-colour icons always stay static).
+    public var hasAnimation: Bool {
+        guard !isColorIcon, let body, SVGIconAnimParser.mayBeAnimated(body) else { return false }
+        if case .animated = SVGIconAnimParser.compile(body, viewBox: viewBox) {
+            return true
+        }
+        return false
+    }
+
+    /// Total animation duration in seconds for a monochrome SMIL animated icon:
+    /// `nil` for static or multi-colour icons, `.infinity` when any track repeats indefinitely,
+    /// or the finite total duration in seconds when all tracks terminate.
+    public var animDuration: Double? {
+        guard !isColorIcon, let body, SVGIconAnimParser.mayBeAnimated(body) else { return nil }
+        guard case .animated(let compiled) = SVGIconAnimParser.compile(body, viewBox: viewBox) else {
+            return nil
+        }
+        return compiled.finiteDuration ?? .infinity
+    }
 }
 
 /// Positioned glyph quad emitted by `TextSystem` in element-local logical points.
@@ -1035,15 +1055,53 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
     }
 
+    /// Reusable `(px + 2) × (px + 2)` bordered icon slot handle with monotonic page eviction generation
+    /// (`atlas.rs` `put_bordered` / `write_bordered`).
+    internal struct BorderedSlot: Hashable, Sendable {
+        var page: UInt16
+        /// Shelf allocation origin `(ax, ay)` of the outer `(px + 2) × (px + 2)` bordered tile.
+        var x: Int
+        var y: Int
+        /// Outer bordered side `px + 2`.
+        var side: Int
+        /// Monotonic page eviction generation at allocation time.
+        var pageGen: UInt64
+        var pageWidth: Int
+        var pageHeight: Int
+
+        func makeEntry(px: Int) -> Entry {
+            let innerX = x + 1
+            let innerY = y + 1
+            let invW = 1.0 / Float(max(1, pageWidth))
+            let invH = 1.0 / Float(max(1, pageHeight))
+            let uv = SIMD4<Float>(
+                Float(innerX) * invW,
+                Float(innerY) * invH,
+                Float(innerX + px) * invW,
+                Float(innerY + px) * invH
+            )
+            return Entry(
+                uv: uv,
+                pixelSize: SIMD2<Int>(px, px),
+                bearingPx: .zero,
+                page: page,
+                pixelOrigin: SIMD2<Int>(innerX, innerY)
+            )
+        }
+    }
+
     private struct AtlasPageState {
         var atlas: R8Atlas
         var dirty: (Int, Int)?
         var shelf: ShelfState
+        /// Monotonic eviction generation for this page, so reusable animated slots detect resets.
+        var epoch: UInt64
 
-        init(width: Int, height: Int, age: UInt64) {
+        init(width: Int, height: Int, age: UInt64, epoch: UInt64) {
             self.atlas = R8Atlas(width: width, height: height)
             self.dirty = nil
             self.shelf = ShelfState(width: width, height: height, age: age)
+            self.epoch = epoch
         }
     }
 
@@ -1187,6 +1245,14 @@ public final class GlyphAtlas: @unchecked Sendable {
     private var backingAllocated: Bool = false
     private var page0Shelf: ShelfState
     private var page0Dirty: (Int, Int)? = nil
+    private var page0Gen: UInt64 = 1
+    /// Monotonic atlas-wide page generation counter so popped and recreated overflow pages never
+    /// collide with stale reusable bordered slot handles.
+    private var nextPageGen: UInt64 = 2
+    /// Monotonic counter incremented each time the renderer consumes dirty atlas rows
+    /// (`rowsUploaded`), so double-buffered animated slots detect missed drawables per slot
+    /// without horizontal shelf aliasing.
+    private var uploadGen: UInt64 = 0
     private var overflowPages: [AtlasPageState] = []
     private var clock: UInt64 = 1
     private var resetsCount: UInt64 = 0
@@ -2295,17 +2361,11 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
 
         lock.lock()
-        guard let placed = allocateAndBlit(width: px, height: px, bitmap: bitmap) else {
+        guard let placed = putBorderedLocked(px: px, coverage: bitmap) else {
             lock.unlock()
             return nil
         }
-        let entry = Entry(
-            uv: placed.uv,
-            pixelSize: SIMD2<Int>(px, px),
-            bearingPx: .zero,
-            page: placed.page,
-            pixelOrigin: placed.origin
-        )
+        let entry = placed.makeEntry(px: px)
         accessCounter &+= 1
         iconCache[key] = (entry, accessCounter, frameSequence)
         evictLRUIfNeededLocked()
@@ -2332,6 +2392,155 @@ public final class GlyphAtlas: @unchecked Sendable {
                 overflowPages[idx].shelf.touch(texels: texels)
             }
         }
+    }
+
+    private func allocPageGenLocked() -> UInt64 {
+        let id = nextPageGen
+        nextPageGen = nextPageGen &+ 1
+        if nextPageGen == 0 { nextPageGen = 1 }
+        return id
+    }
+
+    private func pageGenLocked(_ page: UInt16) -> UInt64 {
+        if page == 0 {
+            return page0Gen
+        }
+        let idx = Int(page) - 1
+        return (idx >= 0 && idx < overflowPages.count) ? overflowPages[idx].epoch : 0
+    }
+
+    /// Monotonic eviction generation for `page` (`0` when `page` does not exist).
+    internal func pageGen(_ page: UInt16) -> UInt64 {
+        lock.withLock { pageGenLocked(page) }
+    }
+
+    /// Monotonic upload counter incremented each time dirty rows are uploaded (`rowsUploaded`).
+    internal var currentUploadGen: UInt64 {
+        lock.withLock { uploadGen }
+    }
+
+    /// Records that dirty rows on `page` were consumed/uploaded by the renderer (`atlas/fill.rs` `rows_uploaded`).
+    public func rowsUploaded(page: Int, rows: (Int, Int)) {
+        _ = (page, rows)
+        lock.lock()
+        uploadGen = uploadGen &+ 1
+        if uploadGen == 0 { uploadGen = 1 }
+        lock.unlock()
+    }
+
+    /// Maximum inner pixel side `px` that fits a `(px + 2) × (px + 2)` bordered icon tile plus shelf gutter.
+    internal var maxBorderedIconSize: Int {
+        max(0, min(targetWidth, targetHeight) - 4)
+    }
+
+    /// Restricted view of this atlas for `loopStep` in-place animated icon updates (`atlas.rs` `in_place`).
+    internal func inPlace() -> InPlaceGlyphAtlas {
+        InPlaceGlyphAtlas(self)
+    }
+
+    /// Allocates a `(px + 2) × (px + 2)` icon slot with a 1-texel transparent apron around `coverage`
+    /// (`px × px`), returning its placement and page eviction generation for later in-place reuse.
+    internal func putBordered(px: Int, coverage: [UInt8]) -> BorderedSlot? {
+        guard px > 0, coverage.count >= px * px else { return nil }
+        return lock.withLock { putBorderedLocked(px: px, coverage: coverage) }
+    }
+
+    private func putBorderedLocked(px: Int, coverage: [UInt8]) -> BorderedSlot? {
+        let side = px + 2
+        guard px > 0, coverage.count >= px * px,
+              let (page, ax, ay) = placeLocked(width: side, height: side) else {
+            return nil
+        }
+        let epoch = pageGenLocked(UInt16(page))
+        let pageW = page == 0 ? pageZero.width : overflowPages[page - 1].atlas.width
+        let pageH = page == 0 ? pageZero.height : overflowPages[page - 1].atlas.height
+        let slot = BorderedSlot(
+            page: UInt16(page),
+            x: ax,
+            y: ay,
+            side: side,
+            pageGen: epoch,
+            pageWidth: pageW,
+            pageHeight: pageH
+        )
+        writeBorderedPixelsLocked(slot: slot, px: px, coverage: coverage)
+        touchLocked(page: slot.page, texels: UInt32(side * side))
+        rasterizedCount &+= 1
+        return slot
+    }
+
+    /// Rewrites an existing `(px + 2) × (px + 2)` bordered icon slot in place if its page has not
+    /// been evicted since allocation. Marks only the slot's row band and patch rect dirty.
+    internal func writeBordered(slot: BorderedSlot, px: Int, coverage: [UInt8]) -> Bool {
+        guard px > 0, slot.side == px + 2, coverage.count >= px * px else { return false }
+        return lock.withLock {
+            guard pageGenLocked(slot.page) == slot.pageGen else { return false }
+            writeBorderedPixelsLocked(slot: slot, px: px, coverage: coverage)
+            touchLocked(page: slot.page, texels: UInt32(slot.side * slot.side))
+            return true
+        }
+    }
+
+    /// Strictly in-place rewrite used by `InPlaceGlyphAtlas`: never allocates, evicts, or inflates `liveTexels`.
+    fileprivate func writeBorderedInPlace(slot: BorderedSlot, px: Int, coverage: [UInt8]) -> Bool {
+        guard px > 0, slot.side == px + 2, coverage.count >= px * px else { return false }
+        return lock.withLock {
+            guard pageGenLocked(slot.page) == slot.pageGen else { return false }
+            writeBorderedPixelsLocked(slot: slot, px: px, coverage: coverage)
+            return true
+        }
+    }
+
+    private func writeBorderedPixelsLocked(slot: BorderedSlot, px: Int, coverage: [UInt8]) {
+        let page = Int(slot.page)
+        let ax = slot.x
+        let ay = slot.y
+        let side = px + 2
+        let x0 = ax - 1
+        let x1 = ax + side + 1
+
+        func blitBordered(into texels: inout [UInt8], pageW: Int) {
+            // Zero outer gutter rows and top/bottom 1px transparent apron rows.
+            for gy in [ay - 1, ay, ay + px + 1, ay + side] {
+                let rowStart = gy * pageW
+                for col in x0..<x1 {
+                    texels[rowStart + col] = 0
+                }
+            }
+            for row in 0..<px {
+                let srcStart = row * px
+                let line = (ay + 1 + row) * pageW
+                texels[line + x0] = 0
+                texels[line + ax] = 0
+                for col in 0..<px {
+                    texels[line + ax + 1 + col] = coverage[srcStart + col]
+                }
+                texels[line + ax + 1 + px] = 0
+                texels[line + ax + side] = 0
+            }
+        }
+
+        publishedPages = nil
+        savedMaskPlan = nil
+        savedPagePlans = nil
+        combinedSnapshot = nil
+        let d = (ay - 1, ay + side + 1)
+        if page == 0 {
+            blitBordered(into: &pageZero.texels, pageW: pageZero.width)
+            page0Dirty = page0Dirty.map { (min($0.0, d.0), max($0.1, d.1)) } ?? d
+        } else {
+            let idx = page - 1
+            let pageW = overflowPages[idx].atlas.width
+            blitBordered(into: &overflowPages[idx].atlas.texels, pageW: pageW)
+            overflowPages[idx].dirty = overflowPages[idx].dirty.map { (min($0.0, d.0), max($0.1, d.1)) } ?? d
+        }
+        generation &+= 1
+        baseGeneration = generation
+        pageChanges[page, default: PageChange()].write(
+            SIMD4(ax - 1, ay - 1, ax + side + 1, ay + side + 1),
+            generation: generation,
+            raw: true
+        )
     }
 
     private func evictPageLocked(_ page: Int) {
@@ -2361,12 +2570,15 @@ public final class GlyphAtlas: @unchecked Sendable {
         resetsCount &+= 1
         maskPageEpochs[page] = resetsCount
         let age = clock
+        let nextGen = allocPageGenLocked()
         if page == 0 {
             page0Dirty = nil
             page0Shelf.reset(age: age)
+            page0Gen = nextGen
         } else if page >= 1 && page <= overflowPages.count {
             overflowPages[page - 1].dirty = nil
             overflowPages[page - 1].shelf.reset(age: age)
+            overflowPages[page - 1].epoch = nextGen
         }
         generation &+= 1
         baseGeneration = generation
@@ -2499,7 +2711,8 @@ public final class GlyphAtlas: @unchecked Sendable {
         // 5. Grow overflow page up to MAX_OVERFLOW_PAGES.
         if total < Self.maxOverflowPages {
             clock &+= 1
-            var newPage = AtlasPageState(width: targetWidth, height: targetHeight, age: clock)
+            let epoch = allocPageGenLocked()
+            var newPage = AtlasPageState(width: targetWidth, height: targetHeight, age: clock, epoch: epoch)
             if let (x, y) = newPage.shelf.alloc(w: bw, h: bh) {
                 overflowPages.append(newPage)
                 return (overflowPages.count, x, y)
@@ -3089,6 +3302,33 @@ public final class GlyphAtlas: @unchecked Sendable {
 
 }
 
+/// Restricted view of `GlyphAtlas` for `loopStep` in-place animated icon updates (`atlas.rs` `InPlaceAtlas`).
+/// By construction, exposes no allocation, eviction, or `touch` methods so `loopStep` can never
+/// allocate in or evict from the glyph atlas or inflate `ShelfState.liveTexels`.
+internal struct InPlaceGlyphAtlas: @unchecked Sendable {
+    private let atlas: GlyphAtlas
+
+    init(_ atlas: GlyphAtlas) {
+        self.atlas = atlas
+    }
+
+    var maxBorderedIconSize: Int {
+        atlas.maxBorderedIconSize
+    }
+
+    func pageGen(_ page: UInt16) -> UInt64 {
+        atlas.pageGen(page)
+    }
+
+    var uploadGen: UInt64 {
+        atlas.currentUploadGen
+    }
+
+    func writeBordered(slot: GlyphAtlas.BorderedSlot, px: Int, coverage: [UInt8]) -> Bool {
+        atlas.writeBorderedInPlace(slot: slot, px: px, coverage: coverage)
+    }
+}
+
 /// Typography shaper, measurer, and glyph-quad emitter (`rune::TextSystem`).
 public final class TextSystem: @unchecked Sendable {
     private struct FontKey: Hashable {
@@ -3465,6 +3705,7 @@ public final class TextSystem: @unchecked Sendable {
     private var outlinePathsRevision: UInt64 = 0
     public let glyphCache = GlyphReplayCache()
     public let colorIcons = ColorIconRasterizer()
+    internal let animatedIcons = SVGAnimatedIcons()
     private var languageTagOverride: String?
     private var usesScopedFamilies = true
     #if os(Windows) || os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
@@ -3713,11 +3954,166 @@ public final class TextSystem: @unchecked Sendable {
         return typesetterCache.count
     }
 
+    /// Advances icon caches across a frame boundary (evicting unused colour/animated icon buffers over budget).
+    public func beginIconFrame() {
+        colorIcons.beginFrame()
+        animatedIcons.beginFrame()
+    }
+
+    /// Classifies `icon` (after applying any active icon swap) in a single cached lookup (`color.rs` `icon_kind`).
+    /// On first encounter of a monochrome animated icon, compiles and caches its bounded SMIL AST.
+    public func iconKind(_ icon: SVGIcon) -> SVGIconKind {
+        colorIcons.iconKind(icon, animated: animatedIcons)
+    }
+
+    /// Whether `icon` paints its own colours and draws as an image (`color.rs` `is_color_icon`).
+    public func isColorIcon(_ icon: SVGIcon) -> Bool {
+        iconKind(icon) == .color
+    }
+
+    /// Rasterizes a multi-colour icon (or its `oneColor` silhouette) via `ColorIconRasterizer`,
+    /// returning `nil` for monochrome icons (both static and animated).
+    public func colorIcon(
+        _ icon: SVGIcon,
+        pixelSize px: Int,
+        currentColor: Color = .white,
+        oneColor: Color? = nil,
+        mirrored: Bool = false
+    ) -> DecodedImage? {
+        colorIcons.rasterize(
+            icon,
+            pixelSize: px,
+            currentColor: currentColor,
+            oneColor: oneColor,
+            mirrored: mirrored,
+            animated: animatedIcons
+        )
+    }
+
+    /// Whether any monochrome animated icon has been classified in this `TextSystem` yet (`lib.rs` `has_animated_icons`).
+    /// Single boolean guard keeping static-only apps free of any animated-icon check in `El.cache`.
+    public var hasAnimatedIcons: Bool {
+        animatedIcons.hasAny
+    }
+
+    /// Whether `icon` is a finite-duration animated icon (so callers track mount-relative time
+    /// rather than sampling the global runtime clock, `lib.rs` `icon_anim_is_finite`).
+    public func iconAnimIsFinite(_ icon: SVGIcon) -> Bool {
+        guard iconKind(icon) == .animatedMono else { return false }
+        let (resolved, _) = IconSwapRegistry.resolvedIcon(for: icon)
+        return animatedIcons.isFinite(resolved)
+    }
+
+    /// Whether animated `icon` is still live (moving or waiting for a future segment) at runtime
+    /// time `t` (with `mountTime` used for finite-duration icons, `lib.rs` `icon_anim_live`).
+    public func iconAnimLive(_ icon: SVGIcon, at t: Double, mountTime mountT: Double = 0.0) -> Bool {
+        guard iconKind(icon) == .animatedMono else { return false }
+        let (resolved, _) = IconSwapRegistry.resolvedIcon(for: icon)
+        return animatedIcons.isLive(resolved, at: t, mountTime: mountT)
+    }
+
+    /// Whether both double-buffered atlas tiles for animated `icon` are already resident on
+    /// non-evicted pages, so a loop-only step can update it in place without allocating or
+    /// evicting a glyph page (`lib.rs` `icon_anim_slots_ready`).
+    public func iconAnimSlotsReady(
+        _ icon: SVGIcon,
+        pixelSize px: Int,
+        drawnSize: Float? = nil,
+        mirrored: Bool = false,
+        scopeID: UInt64 = 0
+    ) -> Bool {
+        let (resolved, _) = IconSwapRegistry.resolvedIcon(for: icon)
+        return animatedIcons.slotsReady(
+            in: glyphAtlas,
+            icon: resolved,
+            pixelSize: px,
+            drawnSize: drawnSize,
+            mirrored: mirrored,
+            scopeID: scopeID
+        )
+    }
+
+    /// Evaluates monochrome animated `icon` into a double-buffered glyph-atlas tile, flipping
+    /// between its two slots ONLY when quantized coverage bytes change (`lib.rs` `animated_icon_quad`).
+    public func animatedIconQuad(
+        _ icon: SVGIcon,
+        pixelSize px: Int,
+        drawnSize: Float? = nil,
+        origin: SIMD2<Float> = .zero,
+        mirrored: Bool = false,
+        at t: Double,
+        mountTime mountT: Double = 0.0,
+        scopeID: UInt64 = 0
+    ) -> AnimatedIconQuad? {
+        guard iconKind(icon) == .animatedMono else { return nil }
+        let (resolved, _) = IconSwapRegistry.resolvedIcon(for: icon)
+        return animatedIcons.frameQuad(
+            in: glyphAtlas,
+            icon: resolved,
+            pixelSize: px,
+            drawnSize: drawnSize,
+            origin: origin,
+            mirrored: mirrored,
+            at: t,
+            mountTime: mountT,
+            scopeID: scopeID
+        )
+    }
+
+    /// Loop-step variant of `animatedIconQuad` that updates only pre-allocated slots in place via
+    /// `InPlaceGlyphAtlas` and cannot allocate in or evict from the glyph atlas (`lib.rs` `animated_icon_quad_in_place`).
+    public func animatedIconQuadInPlace(
+        _ icon: SVGIcon,
+        pixelSize px: Int,
+        drawnSize: Float? = nil,
+        origin: SIMD2<Float> = .zero,
+        mirrored: Bool = false,
+        at t: Double,
+        mountTime mountT: Double = 0.0,
+        scopeID: UInt64 = 0
+    ) -> AnimatedIconQuad? {
+        let (resolved, _) = IconSwapRegistry.resolvedIcon(for: icon)
+        return animatedIcons.frameQuadInPlace(
+            in: glyphAtlas.inPlace(),
+            icon: resolved,
+            pixelSize: px,
+            drawnSize: drawnSize,
+            origin: origin,
+            mirrored: mirrored,
+            at: t,
+            mountTime: mountT,
+            scopeID: scopeID
+        )
+    }
+
     /// Rasterizes a standalone `SVGIcon` into the glyph atlas and returns a `PositionedGlyph` quad (`text/mod.rs` `icon_quad`).
     public func iconQuad(_ icon: SVGIcon, pixelSize: Float, origin: SIMD2<Float> = .zero) -> PositionedGlyph? {
         guard pixelSize.isFinite && pixelSize > 0 else { return nil }
         let px = max(1, Int(pixelSize.rounded()))
-        guard let entry = glyphAtlas.rasterizeIconIfPlaced(icon, pixelSize: px) else {
+        let (resolved, _) = IconSwapRegistry.resolvedIcon(for: icon)
+        guard let entry = glyphAtlas.rasterizeIconIfPlaced(resolved, pixelSize: px) else {
+            return nil
+        }
+        return PositionedGlyph(
+            rect: SIMD4<Float>(origin.x, origin.y, Float(entry.pixelSize.x), Float(entry.pixelSize.y)),
+            uv: entry.uv,
+            color: nil,
+            colorGlyphIndex: nil,
+            atlasPage: entry.page
+        )
+    }
+
+    /// Rasterizes a standalone `SVGIcon` at an exact subpixel drawn size on a `px × px` canvas (`lib.rs` `icon_quad_sized`).
+    public func iconQuadSized(
+        _ icon: SVGIcon,
+        pixelSize px: Int,
+        drawnSize: Float,
+        origin: SIMD2<Float> = .zero,
+        mirrored: Bool = false
+    ) -> PositionedGlyph? {
+        guard px > 0, drawnSize.isFinite, drawnSize > 0 else { return nil }
+        let (resolved, _) = IconSwapRegistry.resolvedIcon(for: icon)
+        guard let entry = glyphAtlas.rasterizeIconIfPlaced(resolved, pixelSize: px, drawnSize: drawnSize, mirrored: mirrored) else {
             return nil
         }
         return PositionedGlyph(

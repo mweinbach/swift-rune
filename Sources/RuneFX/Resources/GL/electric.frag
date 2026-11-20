@@ -157,6 +157,6 @@ vec4 shade_electric(
 void main() {
     Globals g = fxGlobals;
     BackdropEncoding enc = fxBackdrop;
-    vec2 pixel = runePixel;
+    vec2 pixel = recover_pixel(g);
     fragColor = fx_fs(shade_electric(pixel, g, enc), fxInstance, pixel, g, uTex0, enc);
 }

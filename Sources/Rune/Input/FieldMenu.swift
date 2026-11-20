@@ -16,7 +16,7 @@ extension Runtime {
         focusedPath = path
         focusedKey = nodeByPath[path].flatMap { flatNodes[$0].key }
         focusVisible = false
-        focusKeyboard = false
+        inputMachines.focusMachine.step(.set(path: path, keyboard: false))
         blurredFocusPath = nil
         focusHandoff = false
         clearTabStartFocusPath()
@@ -34,6 +34,25 @@ extension Runtime {
     ) -> Bool {
         guard let idx = nodeByPath[path], !flatNodes[idx].effectiveInert else { return false }
         let node = flatNodes[idx]
+        if let onPillSecondary = node.el.handlers.onPillSecondary,
+           let local = localTextPos,
+           let pillId = inputPillAt(idx, x: windowPos.x, y: windowPos.y) {
+            let rect = presentedRectByPath[path] ?? node.targetRect
+            let press = PointerPress(
+                window: windowPos,
+                local: local,
+                elementSize: Vec2(rect.width, rect.height),
+                button: .secondary,
+                mods: slice2State.currentMods,
+                clicks: 1
+            )
+            var tx = makeTx(at: now, button: .secondary)
+            let handled = onPillSecondary(&state, pillId, press, &tx)
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: handled)
+            if handled {
+                return true
+            }
+        }
         guard let editLens = node.el.handlers.editLens else { return false }
 
         let secure = node.el.isSecure || editLens.get(state).isSecure

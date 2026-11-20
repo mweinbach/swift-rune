@@ -1547,6 +1547,9 @@ public struct TabStrip<State> {
             .rounded(StripTabItem<State>.cornerRadius)
             .bg(bg)
             .clip(true)
+            // The keyboard ring goes on the pill, inside it: the strip scrolls and would clip a ring
+            // drawn outside, and a vertical slot reaches into the gaps (`tabs.css`, opencode#64909).
+            .focusRing(2.0, offset: -2.0, k.c.borderFocus)
 
         if !statusDesc.isEmpty {
             tab = tab.description(statusDesc)
@@ -1720,7 +1723,7 @@ public struct TabStrip<State> {
         if !isSelected {
             tab = tab.hover(k.c.surfaceHover)
         }
-        tab = tab.focusable().focusRing(k.c.borderFocus)
+        tab = tab.focusable()
 
         if let onSelectFn {
             let scroll = "\(keyId)-scroll"

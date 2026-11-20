@@ -500,16 +500,15 @@ public enum RuneFXShaders: Sendable {
     }
 
     inline float4 shade_glow(
-        VOut in,
+        Inst i,
+        float2 px,
         constant Globals& g,
-        const device Inst* insts,
         texture2d<float> backdrop,
         texture2d<float> source,
         sampler samp,
         constant BackdropEncoding& enc
     ) {
-        Inst i = insts[in.id];
-        Ctx c = make_ctx(i, in.px);
+        Ctx c = make_ctx(i, px);
         float radius = i.p0.x;
         float intensity = i.p0.y;
         float inner = i.p0.z;
@@ -546,7 +545,7 @@ public enum RuneFXShaders: Sendable {
             float hotc = core * hot * w_smoothstep(0.55, 1.0, heat);
             light = tint * gl + i.c1.rgb * hotc * intensity * 0.6;
             alpha = min(gl * occl, 1.0);
-            return finish(float4(light, alpha), in.px, g);
+            return finish(float4(light, alpha), px, g);
         }
 
         if (c.variant == 0) {
@@ -581,7 +580,7 @@ public enum RuneFXShaders: Sendable {
             light = col * lit + mix(col, float3(1.0), 0.6) * hair * intensity * hot;
             alpha = lit * occl;
         }
-        return finish(float4(light, alpha), in.px, g);
+        return finish(float4(light, alpha), px, g);
     }
 
     fragment float4 fx_glow_fragment(
@@ -593,7 +592,10 @@ public enum RuneFXShaders: Sendable {
         sampler samp [[sampler(0)]],
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
-        return fx_fs(shade_glow(in, g, insts, backdrop, source, samp, enc), insts[in.id], in.px, g, backdrop, samp, enc);
+        Inst i = insts[in.id];
+        float2 px = recover_pixel(in);
+        float4 shaded = shade_glow(i, px, g, backdrop, source, samp, enc);
+        return fx_fs(shaded, i, px, g, backdrop, samp, enc);
     }
     """
 
@@ -640,13 +642,12 @@ public enum RuneFXShaders: Sendable {
     }
 
     inline float4 shade_pulse(
-        VOut in,
-        const device Inst* insts,
+        Inst i,
+        float2 px,
         constant Globals& g,
         constant BackdropEncoding& enc
     ) {
-        Inst i = insts[in.id];
-        Ctx c = make_ctx(i, in.px);
+        Ctx c = make_ctx(i, px);
         int n = int(i.p0.x + 0.5);
         float period = max(i.p0.y, 0.05);
         float reach = i.p0.z;
@@ -738,7 +739,7 @@ public enum RuneFXShaders: Sendable {
             }
         }
         float3 col = i.c0.rgb * e + i.c1.rgb * hotv;
-        return finish(float4(col * inten, (e + hotv) * occl * inten), in.px, g);
+        return finish(float4(col * inten, (e + hotv) * occl * inten), px, g);
     }
 
     fragment float4 fx_pulse_fragment(
@@ -749,7 +750,10 @@ public enum RuneFXShaders: Sendable {
         sampler samp [[sampler(0)]],
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
-        return fx_fs(shade_pulse(in, insts, g, enc), insts[in.id], in.px, g, backdrop, samp, enc);
+        Inst i = insts[in.id];
+        float2 px = recover_pixel(in);
+        float4 shaded = shade_pulse(i, px, g, enc);
+        return fx_fs(shaded, i, px, g, backdrop, samp, enc);
     }
     """
 
@@ -775,14 +779,13 @@ public enum RuneFXShaders: Sendable {
     }
 
     inline float4 shade_electric(
-        VOut in,
+        Inst i,
+        float2 px,
         constant Globals& g,
-        const device Inst* insts,
         const device float4* data,
         constant BackdropEncoding& enc
     ) {
-        Inst i = insts[in.id];
-        Ctx c = make_ctx(i, in.px);
+        Ctx c = make_ctx(i, px);
         float w = max(i.p0.w, c.aa * 0.7);
         float inten = i.p1.x;
         float gr = max(i.p1.y, 1e-3);
@@ -909,7 +912,7 @@ public enum RuneFXShaders: Sendable {
         float occl = select(1.0, i.p2.w, effective_blend_mode(i, enc) == 0u);
         float3 rgb = (i.c1.rgb * core * 1.3 + i.c0.rgb * halo * 0.75 + fork_hot) * inten;
         float a = (core * 0.7 + halo * occl + lum(fork_hot) * 0.5) * inten;
-        return finish(float4(rgb, a), in.px, g);
+        return finish(float4(rgb, a), px, g);
     }
 
     fragment float4 fx_electric_fragment(
@@ -921,7 +924,10 @@ public enum RuneFXShaders: Sendable {
         sampler samp [[sampler(0)]],
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
-        return fx_fs(shade_electric(in, g, insts, data, enc), insts[in.id], in.px, g, backdrop, samp, enc);
+        Inst i = insts[in.id];
+        float2 px = recover_pixel(in);
+        float4 shaded = shade_electric(i, px, g, data, enc);
+        return fx_fs(shaded, i, px, g, backdrop, samp, enc);
     }
     """
 
@@ -1058,16 +1064,15 @@ public enum RuneFXShaders: Sendable {
     }
 
     inline float4 shade_fire(
-        VOut in,
+        Inst i,
+        float2 px,
         constant Globals& g,
-        const device Inst* insts,
         const device float4* data,
         texture2d<float> source,
         sampler samp,
         constant BackdropEncoding& enc
     ) {
-        Inst i = insts[in.id];
-        Ctx c = make_ctx(i, in.px);
+        Ctx c = make_ctx(i, px);
         float inten = i.p0.w;
         float4 o = float4(0.0);
         if (c.variant == 0) {
@@ -1092,7 +1097,7 @@ public enum RuneFXShaders: Sendable {
             emis += flame_light(0.45 + T * 0.75, 6.0) * (core * 1.4 + halo) * T;
             alpha += core * T * 0.5;
         }
-        return finish(float4(emis * inten, min(alpha, 1.0) * inten), in.px, g);
+        return finish(float4(emis * inten, min(alpha, 1.0) * inten), px, g);
     }
 
     fragment float4 fx_fire_fragment(
@@ -1105,7 +1110,10 @@ public enum RuneFXShaders: Sendable {
         sampler samp [[sampler(0)]],
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
-        return fx_fs(shade_fire(in, g, insts, data, source, samp, enc), insts[in.id], in.px, g, backdrop, samp, enc);
+        Inst i = insts[in.id];
+        float2 px = recover_pixel(in);
+        float4 shaded = shade_fire(i, px, g, data, source, samp, enc);
+        return fx_fs(shaded, i, px, g, backdrop, samp, enc);
     }
     """
 
@@ -1135,15 +1143,15 @@ public enum RuneFXShaders: Sendable {
     }
 
     inline float4 shade_distort(
-        VOut in,
         Inst i,
+        float2 px,
         constant Globals& g,
         texture2d<float> backdrop,
         sampler samp,
         texture2d<float> blurred,
         constant BackdropEncoding& enc
     ) {
-        Ctx c = make_ctx(i, in.px);
+        Ctx c = make_ctx(i, px);
         float s = c.scale;
 
         if (c.variant == 0) {
@@ -1231,7 +1239,7 @@ public enum RuneFXShaders: Sendable {
                 col = mix(col, blr, i.xf.y);
                 float k = presence * w_smoothstep(0.0, 0.6, frost);
                 col = frosted_glass(col, k);
-                uint2 ip = uint2(in.px);
+                uint2 ip = uint2(px);
                 float n = u01(ip.x + pcg(ip.y + 7u)) - u01(ip.x * 7919u + pcg(ip.y + 31u));
                 col = to_lin(max(to_srgb(col) + float3(n * 1.6 / 255.0 * k), float3(0.0)));
             } else {
@@ -1239,7 +1247,7 @@ public enum RuneFXShaders: Sendable {
                 float soften = min(pow(rim, 1.5) * 0.55, 1.0);
                 if (soften > 1e-3 || frost > 0.0) {
                     float rad = mix(1.2, 10.0, frost);
-                    float j = ign(in.px) * TAU;
+                    float j = ign(px) * TAU;
                     float3 acc = float3(0.0);
                     for (int k = 0; k < 8; k++) {
                         float a = j + float(k) * 2.39996;
@@ -1294,7 +1302,7 @@ public enum RuneFXShaders: Sendable {
             float per = max(i.p0.y, 3.0 * c.aa);
             float sl = 0.5 + 0.5 * cos(TAU * (c.p.y - i.rect.y) / per);
             col *= 1.0 - i.p0.z * (1.0 - sl);
-            uint col3 = uint(floor(in.px.x)) % 3u;
+            uint col3 = uint(floor(px.x)) % 3u;
             float3 grille = select(select(float3(0.94, 0.94, 1.0), float3(0.94, 1.0, 0.94), col3 == 1u), float3(1.0, 0.94, 0.94), col3 == 0u);
             col *= grille;
             float roll = c.reduced ? 0.0 : gauss(fract((c.p.y - i.rect.y) / i.rect.w - c.t * 0.12) - 0.5, 0.06) * i.p1.z;
@@ -1333,8 +1341,9 @@ public enum RuneFXShaders: Sendable {
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
         Inst i = insts[in.id];
-        float4 shaded = shade_distort(in, i, g, backdrop, samp, blurred, enc);
-        return fx_fs(shaded, i, in.px, g, backdrop, samp, enc);
+        float2 px = recover_pixel(in);
+        float4 shaded = shade_distort(i, px, g, backdrop, samp, blurred, enc);
+        return fx_fs(shaded, i, px, g, backdrop, samp, enc);
     }
     """
 
@@ -1361,7 +1370,8 @@ public enum RuneFXShaders: Sendable {
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
         Inst i = insts[in.id];
-        float2 p = in.px / i.shape.y;
+        float2 px = recover_pixel(in);
+        float2 p = px / i.shape.y;
         uint first = uint(i.xf.x);
         uint n = uint(i.xf.y);
         float4 acc = float4(0.0);
@@ -1385,7 +1395,7 @@ public enum RuneFXShaders: Sendable {
             acc /= max(wsum, 1e-4);
         }
 
-        return fx_fs(finish(acc, in.px, g), i, in.px, g, backdrop, samp, enc);
+        return fx_fs(finish(acc, px, g), i, px, g, backdrop, samp, enc);
     }
     """
 
@@ -1395,15 +1405,15 @@ public enum RuneFXShaders: Sendable {
     }
 
     inline float4 shade_extras(
-        VOut in,
         Inst i,
+        float2 px,
         constant Globals& g,
         const device float4* data,
         texture2d<float> source,
         sampler samp,
         constant BackdropEncoding& enc
     ) {
-        Ctx c = make_ctx(i, in.px);
+        Ctx c = make_ctx(i, px);
 
         if (c.variant == 0) {
             float m;
@@ -1427,7 +1437,7 @@ public enum RuneFXShaders: Sendable {
                 sheen = gauss(x - xc, i.p0.y) + 0.35 * gauss(x - xc, i.p0.y * 2.6);
             }
             float3 base = i.c1.rgb * i.c1.a;
-            return finish(float4(base * m + i.c0.rgb * sheen * i.p0.w * m, i.c1.a * m + sheen * i.p0.w * m * 0.2), in.px, g);
+            return finish(float4(base * m + i.c0.rgb * sheen * i.p0.w * m, i.c1.a * m + sheen * i.p0.w * m * 0.2), px, g);
         }
         if (c.variant == 1) {
             uint f0 = uint(i.xf.x);
@@ -1454,7 +1464,7 @@ public enum RuneFXShaders: Sendable {
             }
             float3 tint = i.c0.rgb;
             float3 col = mix(tint, float3(1.0), 0.3) * body + float3(1.0) * hot * 0.8 + tint * halo * 0.12;
-            return finish(float4(col * i.p0.w, min(body * 0.9 + halo * 0.05, 1.0) * i.p0.w), in.px, g);
+            return finish(float4(col * i.p0.w, min(body * 0.9 + halo * 0.05, 1.0) * i.p0.w), px, g);
         }
         if (c.variant == 2) {
             float m = extras_cover(c, max(i.p0.w, c.aa));
@@ -1482,12 +1492,12 @@ public enum RuneFXShaders: Sendable {
                 col += cols[k] * band * rays * hem;
             }
             float a = select(min(max(col.r, max(col.g, col.b)), 1.0), lum(col) * 0.4, effective_blend_mode(i, enc) == 0u);
-            return finish(float4(col * i.p0.z * m, a * i.p0.z * m), in.px, g);
+            return finish(float4(col * i.p0.z * m, a * i.p0.z * m), px, g);
         }
         float m = extras_cover(c, max(i.p0.z, c.aa));
         if (m <= 0.0) { return float4(0.0); }
         uint frame = (i.p0.y > 0.0 && !c.reduced) ? uint(floor(c.t * i.p0.y)) : 0u;
-        uint2 ip = uint2(in.px);
+        uint2 ip = uint2(px);
         float n = u01(ip.x + pcg(ip.y + pcg(frame + c.seed))) + u01(ip.y * 7919u + pcg(ip.x + 17u + frame)) - 1.0;
         float a = i.p0.x * m;
         if (n >= 0.0) { return float4(float3(n * a), n * a); }
@@ -1505,8 +1515,9 @@ public enum RuneFXShaders: Sendable {
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
         Inst i = insts[in.id];
-        float4 shaded = shade_extras(in, i, g, data, source, samp, enc);
-        return fx_fs(shaded, i, in.px, g, backdrop, samp, enc);
+        float2 px = recover_pixel(in);
+        float4 shaded = shade_extras(i, px, g, data, source, samp, enc);
+        return fx_fs(shaded, i, px, g, backdrop, samp, enc);
     }
     """
 

@@ -137,7 +137,6 @@ public enum RuneLightShaders: Sendable {
     public static let gbufferShader: String = commonPrelude + """
     struct GBufferVOut {
         float4 pos [[position]];
-        float2 p;
         uint idx [[flat]];
     };
 
@@ -157,7 +156,6 @@ public enum RuneLightShaders: Sendable {
         float2 p = pr.rect.xy - float2(1.0f) + corner * (pr.rect.zw + float2(2.0f));
         GBufferVOut o;
         o.pos = float4(p.x / F.sf.x * 2.0f - 1.0f, 1.0f - p.y / F.sf.y * 2.0f, 0.0f, 1.0f);
-        o.p = p;
         o.idx = ii;
         return o;
     }
@@ -168,7 +166,9 @@ public enum RuneLightShaders: Sendable {
     ) {
         Prim pr = prims[i.idx];
         float2 halfSize = pr.rect.zw * 0.5f;
-        float2 q = i.p - (pr.rect.xy + halfSize);
+        // Fragment position is the rasterizer's exact pixel centre; interpolated `p` drifts by
+        // subpixel ULPs on some backends, discarding outer-edge pixels that sit on the exact `d == 0.5` cut.
+        float2 q = i.pos.xy - (pr.rect.xy + halfSize);
         float d = sd_rrect(q, halfSize, pr.radii);
         if (d > 0.5f || (flags_of(pr) & F_HINT) != 0u) {
             discard_fragment();

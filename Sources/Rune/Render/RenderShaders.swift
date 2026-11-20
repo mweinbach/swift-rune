@@ -600,13 +600,16 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
 
         float kind = i.params.y;
         if (kind > 11.5) { discard_fragment(); }
+        // Fragment position is the rasterizer's exact pixel centre; interpolated `i.p` drifts by
+        // subpixel ULPs on D3D12, turning exact 1.0 edge coverage into 1.0 - eps (which drops to
+        // 1 - 1/2048 in Rgba16Float layer targets). Only rotated glyphs need interpolated `i.p`.
+        float2 screen = i.pos.xy + g.projection.xy;
         float2 halfSize = i.rect.zw * 0.5;
         float2 center = i.rect.xy + halfSize;
         float4 col = float4(0.0);
-        float2 clip_p = i.pos.xy + g.projection.xy;
 
         if (kind < 0.5) {
-            float d = sd_rounded(i.p - center, halfSize, i.radii);
+            float d = sd_rounded(screen - center, halfSize, i.radii);
             float soft = max(i.params.z, 0.5);
             float bw = i.params.x;
             if (bw > 0.0) {
@@ -617,7 +620,7 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
                     float2 ih = max(halfSize - float2(w.y + w.w, w.x + w.z) * 0.5, float2(0.0));
                     float2 ic = center + float2(w.w - w.y, w.x - w.z) * 0.5;
                     float4 cut = float4(max(w.x, w.w), max(w.x, w.y), max(w.z, w.y), max(w.z, w.w));
-                    inner_d = sd_rounded(i.p - ic, ih, sign(i.radii) * max(abs(i.radii) - cut, float4(0.0)));
+                    inner_d = sd_rounded(screen - ic, ih, sign(i.radii) * max(abs(i.radii) - cut, float4(0.0)));
                 }
                 col = border_over(i.fill, i.border, d, inner_d, soft, bw, i.params.w, !sides && any(i.radii != float4(0.0)));
             } else {
@@ -626,13 +629,13 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         } else if (kind < 1.5) {
             float sigma = max(i.params.z, 0.01);
             float corner = min(abs(i.radii.x), min(halfSize.x, halfSize.y));
-            col = i.fill * shadow_fn(i.p - center, halfSize, sigma, corner);
+            col = i.fill * shadow_fn(screen - center, halfSize, sigma, corner);
             if (i.uv.z > 0.0) {
                 float2 hole = i.uv.zw * 0.5;
-                col = col * clamp(0.5 + sd_rounded(i.p - (i.rect.xy + i.uv.xy + hole), hole, float4(i.radii.w)), 0.0, 1.0);
+                col = col * clamp(0.5 + sd_rounded(screen - (i.rect.xy + i.uv.xy + hole), hole, float4(i.radii.w)), 0.0, 1.0);
             }
         } else if (kind > 6.5) {
-            float d = sd_rounded(i.p - center, halfSize, i.radii);
+            float d = sd_rounded(screen - center, halfSize, i.radii);
             if (kind > 10.5) {
                 float soft = max(i.params.z, 0.5);
                 float cov = clamp(0.5 - d / (soft * 2.0), 0.0, 1.0);
@@ -644,9 +647,9 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
                 float t1 = select(t1_raw, t1_raw - 2.0, upper_open);
                 float t;
                 if (i.uv.z > 0.0) {
-                    t = length((i.p - i.rect.xy - i.uv.xy) / i.uv.zw);
+                    t = length((screen - i.rect.xy - i.uv.xy) / i.uv.zw);
                 } else {
-                    t = 0.5 + dot(i.p - center, i.uv.xy);
+                    t = 0.5 + dot(screen - center, i.uv.xy);
                 }
                 if ((lower_open && t < t0) || (upper_open && t >= t1)) {
                     col = float4(0.0);
@@ -658,8 +661,8 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
                 float soft = max(i.params.z, 0.5);
                 float bw = i.params.x;
                 float ring = clamp(0.5 - d / (soft * 2.0), 0.0, 1.0) - clamp(0.5 - (d + bw) / (soft * 2.0), 0.0, 1.0);
-                float t = clamp((i.p.y - i.rect.y) / max(i.rect.w, 1.0), 0.0, 1.0);
-                float2 arc = ring_arc(i.pos.xy + g.projection.xy - i.rect.xy, i.rect.zw, i.radii, bw);
+                float t = clamp((screen.y - i.rect.y) / max(i.rect.w, 1.0), 0.0, 1.0);
+                float2 arc = ring_arc(screen - i.rect.xy, i.rect.zw, i.radii, bw);
                 col = mix(i.fill, i.border, t) * (ring * dash_cov(arc.x, arc.y, i.uv.xyz));
             } else {
                 float2 size = float2(images.get_width(), images.get_height());
@@ -670,7 +673,7 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
                 float2 upper = clamp(hasBounds ? i.border.zw : max(i.uv.xy, end), float2(0), size);
                 float2 lo = min(floor(lower + lower * 1.1920929e-7), size - 1.0);
                 float2 hi = clamp(ceil(upper - upper * 1.1920929e-7) - 1.0, lo, size - 1.0);
-                float2 coords = (i.p - i.rect.xy) / i.rect.zw;
+                float2 coords = (screen - i.rect.xy) / i.rect.zw;
                 float2 pixel = clamp(i.uv.xy + coords * i.uv.zw - 0.5, lo, hi);
                 int2 t0 = int2(floor(pixel));
                 int2 t1 = min(t0 + int2(1), int2(hi));
@@ -684,24 +687,24 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
                 col = c * (i.fill.a * clamp(0.5 - d, 0.0, 1.0));
             }
         } else if (kind > 4.5 && kind < 5.5) {
-            col = i.fill * segment_fn(i.pos.xy + g.projection.xy, i.radii.xy, i.radii.zw, i.params.x, i.params.z > 0.5);
+            col = i.fill * segment_fn(screen, i.radii.xy, i.radii.zw, i.params.x, i.params.z > 0.5);
         } else if (kind > 5.5 && kind < 6.5) {
-            col = i.fill * triangle_fn(i.pos.xy + g.projection.xy, i.radii.xy, i.radii.zw, i.uv.xy, uint(i.params.x + 0.5));
+            col = i.fill * triangle_fn(screen, i.radii.xy, i.radii.zw, i.uv.xy, uint(i.params.x + 0.5));
         } else if (kind > 2.5) {
             if (kind < 3.5) {
                 float spread = i.params.x;
                 float2 ih = max(halfSize - float2(spread), float2(0.0));
-                float2 q = i.p - center - i.uv.xy;
+                float2 q = screen - center - i.uv.xy;
                 float lit;
                 if (i.params.z < 0.3) {
                     lit = box_cov(q, ih, sign(i.radii) * max(abs(i.radii) - float4(spread), float4(0.0)));
                 } else {
                     lit = shadow_fn(q, ih, i.params.z, max(min(abs(i.radii.x) - spread, min(ih.x, ih.y)), 0.0));
                 }
-                col = i.fill * box_cov(i.p - center, halfSize, i.radii) * (1.0 - clamp(lit, 0.0, 1.0));
+                col = i.fill * box_cov(screen - center, halfSize, i.radii) * (1.0 - clamp(lit, 0.0, 1.0));
             } else {
-                float d = sd_rounded(i.p - center, halfSize, i.radii);
-                float t = clamp((i.p.y - i.rect.y) / max(i.rect.w, 1.0), 0.0, 1.0);
+                float d = sd_rounded(screen - center, halfSize, i.radii);
+                float t = clamp((screen.y - i.rect.y) / max(i.rect.w, 1.0), 0.0, 1.0);
                 float soft = max(i.params.z, 0.5);
                 float bw = i.params.x;
                 if (bw > 0.0) {
@@ -711,7 +714,6 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
                 }
             }
         } else {
-            float2 screen = clip_p;
             bool rotated = i.params.x != 0.0;
             int2 atlasDims = int2(atlas.get_width(), atlas.get_height());
             int2 maxCoord = max(atlasDims - int2(1), int2(0));
@@ -744,7 +746,7 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
                 col = i.fill * pow(cov, i.params.w);
             }
         }
-        float4 source = col * clip_alpha(clip_p, i.clip, i.fade);
+        float4 source = col * clip_alpha(screen, i.clip, i.fade);
         bool flatFill = kind == 0.0 && i.params.x == 0.0 && i.fill.a > 0.0 && i.fill.a < 1.0;
         bool grayMask = kind == 2.0 && i.radii.w == 0.0 && i.radii.x == 0.0
             && i.params.x == 0.0 && i.uv.z == 0.0 && i.params.w >= 0.0;
@@ -903,7 +905,7 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
 
     struct BCompOut {
         float4 pos [[position]];
-        float2 p;
+        float2 origin [[flat]];
         float4 rect [[flat]];
         float4 radii [[flat]];
         float alpha [[flat]];
@@ -924,7 +926,7 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         float2 local = p - g.projection.xy;
         BCompOut o;
         o.pos = float4(local.x / size_px.x * 2.0 - 1.0, 1.0 - local.y / size_px.y * 2.0, 0.0, 1.0);
-        o.p = p;
+        o.origin = g.projection.xy;
         o.rect = i.rect;
         o.radii = i.radii;
         o.alpha = i.fill.a;
@@ -939,10 +941,14 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         sampler smp [[sampler(0)]],
         constant BlurLevel &u [[buffer(0)]]
     ) {
+        // Fragment position is the rasterizer's exact pixel centre; interpolated quad coordinates
+        // drift by subpixel ULPs on D3D12, leaving top/left edge coverage below 1.0 in Rgba16Float
+        // layers and shifting blur pyramid sample UVs.
+        float2 screen = i.pos.xy + i.origin;
         float2 halfSize = i.rect.zw * 0.5;
-        float d = sd_rounded(i.p - (i.rect.xy + halfSize), halfSize, i.radii);
-        float cov = clamp(0.5 - d, 0.0, 1.0) * clip_alpha(i.p, i.clip, i.fade) * i.alpha;
-        float4 col = blurred.sample(smp, (i.p - u.place.xy) / u.place.zw, level(0.0));
+        float d = sd_rounded(screen - (i.rect.xy + halfSize), halfSize, i.radii);
+        float cov = clamp(0.5 - d, 0.0, 1.0) * clip_alpha(screen, i.clip, i.fade) * i.alpha;
+        float4 col = blurred.sample(smp, (screen - u.place.xy) / u.place.zw, level(0.0));
         return col * cov;
     }
     """

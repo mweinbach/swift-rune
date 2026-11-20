@@ -143,6 +143,6 @@ vec4 shade_pulse(
 void main() {
     Globals g = fxGlobals;
     BackdropEncoding enc = fxBackdrop;
-    vec2 pixel = runePixel;
+    vec2 pixel = recover_pixel(g);
     fragColor = fx_fs(shade_pulse(pixel, g, enc), fxInstance, pixel, g, uTex0, enc);
 }

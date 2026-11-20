@@ -23,6 +23,7 @@ final class RuneWindowsOverlayHost<State>: Win32Callback, DesktopOverlayHost {
     private let popups: WindowsPopup<State>
     private let accessibility: WindowsAccessibilityHost
     private let dragSource = Win32DragSource()
+    private var keyboard = Win32Keyboard()
     private var appliedCursor: Cursor?
     private var cursorDPI: UInt32 = 0
     private let observer: PointerObserver
@@ -38,7 +39,7 @@ final class RuneWindowsOverlayHost<State>: Win32Callback, DesktopOverlayHost {
     private var last = Vec2.zero
     private var currentMonitor: Int?
     private var refollowAway: Int?
-    private var capabilities = OverlayCapabilities(nonactivatingKeys: .unsupported, globalPointer: .supported)
+    private var capabilities: OverlayCapabilities
     private var visible = false
     private var fade: (start: Double, end: Double, from: Double, to: Double)?
     private var alpha = 1.0
@@ -49,6 +50,10 @@ final class RuneWindowsOverlayHost<State>: Win32Callback, DesktopOverlayHost {
         let configuration = handle.desktopConfiguration()
         layout = configuration.placement
         options = configuration.options
+        capabilities = OverlayCapabilities(
+            nonactivatingKeys: OverlayKeys.keysSupport(options.keyPolicy, focuser: true),
+            globalPointer: .supported
+        )
         var error = [CChar](repeating: 0, count: 512)
         guard let window = (Array(handle.name.utf16) + [0]).withUnsafeBufferPointer({
             rune_win_create($0.baseAddress, 1, 1, 1, 1, 0, &error, 512)
@@ -58,7 +63,9 @@ final class RuneWindowsOverlayHost<State>: Win32Callback, DesktopOverlayHost {
             var style = RuneWinOptions()
             style.borderless = 1
             rune_win_configure(window, style)
-            guard rune_win_overlay_setup(window) != 0 else { throw DesktopWindowError("Could not compose the Windows RGBA overlay") }
+            guard rune_win_overlay_setup(window, OverlayKeys.canTakeKeys(options.keyPolicy) ? 1 : 0) != 0 else {
+                throw DesktopWindowError("Could not compose the Windows RGBA overlay")
+            }
             renderer = try PortableGLRenderer(resolve: rune_win_gl_proc, isGLES: false)
         } catch { rune_win_destroy(window); throw error }
         popups = handle.windowsPopups(window: window)
@@ -102,6 +109,10 @@ final class RuneWindowsOverlayHost<State>: Win32Callback, DesktopOverlayHost {
         }
         if let target, monitors.indices.contains(target) { place(on: target) }
         else if let fallback = monitors.firstIndex(where: \.primary) ?? monitors.indices.first { place(on: fallback) }
+        if previous.keyPolicy != options.keyPolicy {
+            _ = rune_win_overlay_set_keys(window, OverlayKeys.canTakeKeys(options.keyPolicy) ? 1 : 0)
+        }
+        capabilities.nonactivatingKeys = OverlayKeys.keysSupport(options.keyPolicy, focuser: true)
         if previous.excludeFromCapture != options.excludeFromCapture || options.excludeFromCapture && capabilities.captureExclusion == .unknown {
             let applied = rune_win_overlay_exclude(window, options.excludeFromCapture ? 1 : 0) != 0
             capabilities.captureExclusion = options.excludeFromCapture ? (applied ? .requested : .failed) : .unknown
@@ -206,7 +217,10 @@ final class RuneWindowsOverlayHost<State>: Win32Callback, DesktopOverlayHost {
         case .refollow:
             let away = cursor().flatMap { point in bounds.firstIndex { $0.contains(point) } }.flatMap { $0 == currentMonitor ? nil : $0 }
             if let away, away == refollowAway { refollowAway = nil; place(on: away) } else { refollowAway = away }
-        case .focus: break // Windows has no nonactivating overlay key acquisition.
+        case .focus:
+            if visible && OverlayKeys.canTakeKeys(options.keyPolicy) {
+                _ = rune_win_overlay_request_keys(window)
+            }
         case .wake:
             if visible { rune_win_wake(window) }
             else { handle?.withLockedRuntime { if $0.hasPopup { popups.cancel() } } }
@@ -343,9 +357,38 @@ final class RuneWindowsOverlayHost<State>: Win32Callback, DesktopOverlayHost {
                 let delta = event.ticks * step
                 runtime.desktopWheel(dx: horizontal ? delta : 0, dy: horizontal ? 0 : delta, at: position, mods: mods, now: now)
             }
+        case RUNE_WIN_KEY_DOWN, RUNE_WIN_KEY_UP:
+            guard acceptsInput, OverlayKeys.canTakeKeys(options.keyPolicy) else { return 0 }
+            let down = event.kind == RUNE_WIN_KEY_DOWN
+            let altGr = mods.ctrl && (event.mods & 16) != 0
+            let layout = UnicodeScalar(event.layout_char)
+            let shortcut = UnicodeScalar(event.shortcut_char)
+            return handle.withLockedRuntime { runtime in
+                self.keyboard.key(vk: event.value, scan: event.scan, down: down,
+                                  repeated: event.repeated != 0, mods: mods, altGr: altGr,
+                                  layoutCharacter: layout, shortcutCharacter: shortcut, to: runtime, at: now)
+            } ? 1 : 0
+        case RUNE_WIN_CHAR:
+            guard acceptsInput, OverlayKeys.canTakeKeys(options.keyPolicy) else { return 0 }
+            let altGr = mods.ctrl && (event.mods & 16) != 0
+            return handle.withLockedRuntime { runtime in
+                self.keyboard.character(UInt16(truncatingIfNeeded: event.value), scan: event.scan, mods: mods,
+                                        altGr: altGr, repeated: event.repeated != 0, to: runtime, at: now)
+            } ? 1 : 0
+        case RUNE_WIN_IME_PREEDIT, RUNE_WIN_IME_COMMIT:
+            guard acceptsInput, OverlayKeys.canTakeKeys(options.keyPolicy) else { return 0 }
+            return handle.withLockedRuntime { runtime in
+                guard runtime.hasImeTarget, !runtime.hasSecureFocus else { return false }
+                let string = String(decoding: UnsafeBufferPointer(start: event.text, count: Int(event.length)), as: UTF16.self)
+                let offset = ImeUTF16Bridge.utf8Offset(in: string, fromUTF16Offset: Int(event.x))
+                let ime: ImeEvent = event.kind == RUNE_WIN_IME_COMMIT
+                    ? .commit(string) : .preedit(string, cursorUTF8: offset..<offset, clauses: [])
+                return runtime.hostInput(.keyPress) { runtime.dispatchImeEvent(ime, at: now) }
+            } ? 1 : 0
         case RUNE_WIN_CLOSE: handle.hide()
         case RUNE_WIN_FOCUS:
             let focused = event.value != 0
+            if !focused { keyboard = Win32Keyboard() }
             let changed = handle.withLockedRuntime { runtime in
                 guard runtime.windowFocused != focused else { return false }
                 runtime.dispatchFocus(focused, at: now)
@@ -370,5 +413,21 @@ final class RuneWindowsOverlayHost<State>: Win32Callback, DesktopOverlayHost {
         rune_win_destroy(window)
         handle?.desktopClosed()
     }
+}
+
+/// Bridges Windows atomic replace (`MoveFileExW` + `MOVEFILE_REPLACE_EXISTING`) and yield/sleep
+/// for `Prefs` without adding `CRuneWin32` imports to `DesktopIntegration.swift` (`#1284`).
+internal func runeWindowsReplaceFile(from source: URL, to destination: URL) -> UInt32 {
+    let src = Array(source.path.utf16) + [0]
+    let dst = Array(destination.path.utf16) + [0]
+    return src.withUnsafeBufferPointer { s in
+        dst.withUnsafeBufferPointer { d in
+            rune_win_replace_file(s.baseAddress, d.baseAddress)
+        }
+    }
+}
+
+internal func runeWindowsYieldOrSleep(ms: UInt32) {
+    rune_win_yield_or_sleep_ms(ms)
 }
 #endif

@@ -40,4 +40,17 @@ RuneWinPreferences rune_win_preferences(void) {
     }
     return p;
 }
+
+uint32_t rune_win_replace_file(const uint16_t *source, const uint16_t *destination) {
+    if (!source || !destination) return ERROR_INVALID_PARAMETER;
+    return MoveFileExW((LPCWSTR)source, (LPCWSTR)destination, MOVEFILE_REPLACE_EXISTING) ? 0u : (uint32_t)GetLastError();
+}
+
+void rune_win_yield_or_sleep_ms(uint32_t ms) {
+    if (ms == 0) {
+        SwitchToThread();
+    } else {
+        Sleep(ms);
+    }
+}
 #endif

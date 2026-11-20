@@ -167,6 +167,7 @@ public struct OraclePrimitive: Codable, Sendable, Equatable {
             uvOut = .zero
         case 2:
             // OraclePrimitive glyph: uv = [u0, v0, uw, vh] in texels, params[0] = turn, params[3] = gamma
+            radiiOut = .zero
             let uw = uv[2] > 0 ? uv[2] : rect[2]
             let vh = uv[3] > 0 ? uv[3] : rect[3]
             let aw = max(atlasWidth, 1.0)
@@ -326,7 +327,7 @@ public struct OraclePrimitive: Codable, Sendable, Equatable {
             | (continuous ? 0x8000_0000 : 0)
             | (coarse ? 0x1000_0000 : 0)
         for idx in 0..<4 {
-            let q = min(127, UInt32((abs(clamped[idx]) * invStep).rounded()))
+            let q = UInt32(min(max(roundf(abs(clamped[idx]) * invStep), 0.0), 127.0))
             bits |= q << UInt32(idx * 7)
         }
         return bits
@@ -446,18 +447,25 @@ public struct OracleScene: Codable, Sendable, Equatable {
 
             let allScalars = p.rect + p.radii + p.fill + p.border + p.params + p.uv + p.clip + p.fade + (p.fadeOrigin ?? p.clip)
             let anyOutOfRange = allScalars.contains { !$0.isFinite || abs($0) > 1e6 }
-            // Kinds 5 (segment), 6 (triangle), 7 (image) and 13 (backdrop blur) are not
-            // implemented in the scalar oracle and stay rejected.
-            let validKind = [0, 1, 2, 3, 4, 8, 9, 10, 11, 12].contains(where: { p.params[1] == Float($0) })
-            let badEmptySize = !(p.params[1] == 9.0 || p.params[1] == 12.0) && (p.rect[2] <= 0.0 || p.rect[3] <= 0.0)
+            // Kinds 7 (image) and 13 (backdrop blur) are not implemented in the scalar oracle
+            // and stay rejected.
+            let validKind = [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12].contains(where: { p.params[1] == Float($0) })
+            // Triangles (kind 6), layers (kind 8, expanded by children), layer ends (kind 9)
+            // and effect slots (kind 12) may have an empty rect.
+            let allowsEmptyRect = p.params[1] == 6.0 || p.params[1] == 8.0 || p.params[1] == 9.0 || p.params[1] == 12.0
+            let badEmptySize = !allowsEmptyRect && (p.rect[2] <= 0.0 || p.rect[3] <= 0.0)
             let badNegativeSize = p.rect[2] < 0.0 || p.rect[3] < 0.0
             // A negative fade width is a linear ramp.
             // Negative corner radii select Apple continuous corners (`sdContinuous`).
             // A layer's `radii` are its hole, whose centre may lie anywhere.
             let badRadii = p.params[1] == 8.0 && p.params[3] == 0.0 && (p.radii[2] < 0.0 || p.radii[3] < p.radii[2])
-            let badParams = (p.params[0] < 0.0 && p.params[1] != 2.0) || p.params[2] < 0.0
+            // A glyph's params[0] is a signed turn; an inset shadow's params[0] is a signed spread.
+            let badParams = (p.params[0] < 0.0 && p.params[1] != 2.0 && p.params[1] != 3.0) || p.params[2] < 0.0
             let badBorder: Bool = if p.params[1] == 8.0 {
                 p.border.contains { $0 < 0.0 } && p.border.contains { $0 > 0.0 }
+            } else if p.params[1] == 12.0 {
+                // Effect slots carry their 32-bit mark as two 16-bit floats in `border[0..2]`.
+                false
             } else {
                 !isValidColor(p.border)
             }
@@ -471,6 +479,7 @@ public struct OracleScene: Codable, Sendable, Equatable {
                     || t[0] == 0.0
                     || t.contains { !$0.isFinite || abs($0) > 1e6 }
             } ?? false
+            let badKind1 = p.params[1] == 1.0 && p.uv[2] > 0.0 && p.uv[3] <= 0.0
             let badKind4 = p.params[1] == 4.0 && !isValidColor(p.uv)
             let badKind10 = p.params[1] == 10.0 && (p.uv[0] <= 0.0 || p.uv[1] <= 0.0)
             let badKind11 = p.params[1] == 11.0 && (p.uv[2] < 0.0 || p.uv[3] < 0.0 || ((p.uv[2] > 0.0) != (p.uv[3] > 0.0)))
@@ -478,7 +487,7 @@ public struct OracleScene: Codable, Sendable, Equatable {
 
             if anyOutOfRange || badEmptySize || badNegativeSize || badRadii || !validKind
                 || badParams || !isValidColor(p.fill) || badBorder || badClipRadii || badTurn
-                || badKind4 || badKind10 || badKind11 || badKind2 {
+                || badKind1 || badKind4 || badKind10 || badKind11 || badKind2 {
                 throw OracleValidationError.message("invalid primitive \(p.node) (\(p.source))")
             }
         }
@@ -540,20 +549,36 @@ public struct OracleFrame: Sendable, Equatable {
         }
         rgba.withUnsafeMutableBufferPointer { buf in
             Self.renderRange(
-                width: width,
-                height: height,
-                target: .srgb(buf),
+                target: Target(
+                    origin: (0, 0),
+                    size: (width, height),
+                    scissor: (0, 0, width, height),
+                    pixels: .srgb(buf)
+                ),
                 owners: &owners,
                 scene: scene,
                 range: 0..<scene.primitives.count,
+                ctx: OracleLayer.LayerCtx.root((width, height)),
                 additive: false
             )
         }
     }
 
-    private enum Target {
+    private enum TargetPixels {
         case srgb(UnsafeMutableBufferPointer<UInt8>)
         case linear(UnsafeMutableBufferPointer<(Float, Float, Float, Float)>)
+    }
+
+    private struct Target {
+        var origin: (Int32, Int32)
+        var size: (UInt32, UInt32)
+        var scissor: (UInt32, UInt32, UInt32, UInt32)
+        var pixels: TargetPixels
+
+        @inline(__always)
+        func reborrow(scissor: (UInt32, UInt32, UInt32, UInt32)) -> Target {
+            Target(origin: origin, size: size, scissor: scissor, pixels: pixels)
+        }
 
         @inline(__always)
         func blend(at: Int, col: (Float, Float, Float, Float), additive: Bool) {
@@ -571,7 +596,7 @@ public struct OracleFrame: Sendable, Equatable {
                     )
                 }
             }
-            switch self {
+            switch pixels {
             case .srgb(let rgba):
                 let idx = at * 4
                 let dst = OracleFrame.decode4(rgba[idx], rgba[idx + 1], rgba[idx + 2], rgba[idx + 3])
@@ -588,141 +613,199 @@ public struct OracleFrame: Sendable, Equatable {
     }
 
     private static func renderRange(
-        width: UInt32,
-        height: UInt32,
         target: Target,
         owners: inout [Int?]?,
         scene: OracleScene,
         range: Range<Int>,
+        ctx: OracleLayer.LayerCtx,
         additive: Bool
     ) {
         var cursor = range.lowerBound
         let end = range.upperBound
+        let (ox, oy) = target.origin
+        let (tw, th) = target.size
+        let scissor = target.scissor
+
+        @inline(__always)
+        func clampEdge(_ v: Float, _ o: Int32, _ maxVal: UInt32) -> UInt32 {
+            UInt32(min(max(v - Float(o), 0.0), Float(maxVal)))
+        }
+
         while cursor < end {
             let p = scene.primitives[cursor]
             if p.params[1] == 8.0 {
-                var depth = 1
-                var close = cursor + 1
-                while close < end && depth > 0 {
-                    if scene.primitives[close].params[1] == 8.0 {
-                        depth += 1
-                    } else if scene.primitives[close].params[1] == 9.0 {
-                        depth -= 1
-                    }
-                    if depth > 0 {
-                        close += 1
-                    }
-                }
+                let close = OracleLayer.findLayerClose(scene.primitives, start: cursor, end: end)
                 let clipRadii = p.clipRadii ?? p.border
-                if !additive && p.params[3] == 0.0 && p.fill[3] == 1.0 && p.params[0] == 0.0 && p.params[2] == 0.0
-                    && p.clip == oracleNoClip && clipRadii == [0, 0, 0, 0] && p.radii[3] == 0.0 && p.turn == nil
-                {
-                    renderRange(
-                        width: width,
-                        height: height,
-                        target: target,
-                        owners: &owners,
-                        scene: scene,
-                        range: (cursor + 1)..<close,
-                        additive: false
-                    )
-                } else if p.fill[3] > 0.0 {
-                    // Isolated layers accumulate in linear float (matching GPU Rgba16Float);
-                    // PlusLighter blends children additively inside and saturates before compositing.
-                    let layerAdditive = p.params[0] == 1.0
-                    var layerBuf = [(Float, Float, Float, Float)](repeating: (0, 0, 0, 0), count: Int(width) * Int(height))
-                    var layerOwners: [Int?]? = owners != nil ? [Int?](repeating: nil, count: Int(width) * Int(height)) : nil
-                    layerBuf.withUnsafeMutableBufferPointer { lbuf in
-                        renderRange(
-                            width: width,
-                            height: height,
-                            target: .linear(lbuf),
-                            owners: &layerOwners,
-                            scene: scene,
-                            range: (cursor + 1)..<close,
-                            additive: layerAdditive
+                let inline = !additive
+                    && p.params[3] == 0.0
+                    && p.fill[3] == 1.0
+                    && p.params[0] == 0.0
+                    && p.params[2] == 0.0
+                    && OracleShader.packClipRadii(p.clip, clipRadii) == 0
+                    && OracleLayer.isScissorClip(p.clip, p.fade)
+                    && p.radii[3] == 0.0
+                    && p.turn == nil
+                if inline {
+                    let subScissor: (UInt32, UInt32, UInt32, UInt32)
+                    if p.clip == oracleNoClip {
+                        subScissor = scissor
+                    } else {
+                        subScissor = (
+                            max(clampEdge(floorf(p.clip[0]), ox, tw), scissor.0),
+                            max(clampEdge(floorf(p.clip[1]), oy, th), scissor.1),
+                            min(clampEdge(ceilf(p.clip[2]), ox, tw), scissor.2),
+                            min(clampEdge(ceilf(p.clip[3]), oy, th), scissor.3)
                         )
                     }
+                    if subScissor.2 > subScissor.0 && subScissor.3 > subScissor.1 {
+                        renderRange(
+                            target: target.reborrow(scissor: subScissor),
+                            owners: &owners,
+                            scene: scene,
+                            range: (cursor + 1)..<close,
+                            ctx: ctx.inlineChild(p.clip),
+                            additive: false
+                        )
+                    }
+                } else if p.fill[3] > 0.0 {
+                    let scope = OracleLayer.planScope(scene.primitives, start: cursor, close: close, parent: ctx)
+                    if scope.visible {
+                        let (lx, ly, rx, ry) = scope.target
+                        let lw = UInt32(rx - lx)
+                        let lh = UInt32(ry - ly)
+                        // Isolated layers accumulate in linear float (matching GPU Rgba16Float);
+                        // PlusLighter blends children additively inside and saturates before compositing.
+                        let layerAdditive = p.params[0] == 1.0
+                        var layerBuf = [(Float, Float, Float, Float)](repeating: (0, 0, 0, 0), count: Int(lw) * Int(lh))
+                        var layerOwners: [Int?]? = owners != nil ? [Int?](repeating: nil, count: Int(lw) * Int(lh)) : nil
+                        layerBuf.withUnsafeMutableBufferPointer { lbuf in
+                            renderRange(
+                                target: Target(
+                                    origin: (lx, ly),
+                                    size: (lw, lh),
+                                    scissor: (0, 0, lw, lh),
+                                    pixels: .linear(lbuf)
+                                ),
+                                owners: &layerOwners,
+                                scene: scene,
+                                range: (cursor + 1)..<close,
+                                ctx: scope.childCtx,
+                                additive: layerAdditive
+                            )
+                        }
 
-                    let activeTurn: (Float, Float, [Float])? = p.turn.flatMap { t in
-                        t[0] != 0.0 ? (sinf(t[0]), cosf(t[0]), [t[1], t[2]]) : nil
-                    }
-                    // A turned layer can reach anywhere; its contents fill the frame-sized buffer.
-                    let x0: UInt32
-                    let y0: UInt32
-                    let x1: UInt32
-                    let y1: UInt32
-                    if activeTurn != nil {
-                        x0 = 0; y0 = 0; x1 = width; y1 = height
-                    } else {
-                        x0 = min(width, UInt32(max(0.0, floorf(p.rect[0]))))
-                        y0 = min(height, UInt32(max(0.0, floorf(p.rect[1]))))
-                        x1 = min(width, UInt32(max(0.0, ceilf(p.rect[0] + p.rect[2]))))
-                        y1 = min(height, UInt32(max(0.0, ceilf(p.rect[1] + p.rect[3]))))
-                    }
-                    let alpha = min(max(p.fill[3], 0.0), 1.0)
-                    if x0 < x1 && y0 < y1 {
-                        for y in y0..<y1 {
-                            for x in x0..<x1 {
-                                let cov = alpha * OracleShader.layerClipCoverage(p, screen: (Float(x) + 0.5, Float(y) + 0.5))
-                                if cov <= 0.0 { continue }
-                                let at = Int(y * width + x)
-                                let src: (Float, Float, Float, Float)
-                                if let (sn, cs, pivot) = activeTurn {
-                                    let qx = Float(x) + 0.5 - pivot[0]
-                                    let qy = Float(y) + 0.5 - pivot[1]
-                                    let ux = pivot[0] + cs * qx + sn * qy - 0.5
-                                    let uy = pivot[1] + cs * qy - sn * qx - 0.5
-                                    let bx = floorf(ux)
-                                    let by = floorf(uy)
-                                    let fx = ux - bx
-                                    let fy = uy - by
-                                    @inline(__always)
-                                    func texel(_ tx: Float, _ ty: Float) -> (Float, Float, Float, Float) {
-                                        if tx < 0.0 || ty < 0.0 || tx >= Float(width) || ty >= Float(height) {
-                                            return (0, 0, 0, 0)
+                        let activeTurn: (Float, Float, Float, (Float, Float))? = p.turn.flatMap { t in
+                            t[0] != 0.0 ? (t[0], sinf(t[0]), cosf(t[0]), (t[1], t[2])) : nil
+                        }
+                        let x0: UInt32
+                        let y0: UInt32
+                        let x1: UInt32
+                        let y1: UInt32
+                        if let (angle, _, _, pivot) = activeTurn {
+                            let quad = OracleLayer.turnedBounds(
+                                [Float(lx) - 1.0, Float(ly) - 1.0, Float(rx) + 1.0, Float(ry) + 1.0],
+                                angle: angle,
+                                pivot: pivot
+                            )
+                            x0 = max(clampEdge(floorf(quad[0]), ox, tw), scissor.0)
+                            y0 = max(clampEdge(floorf(quad[1]), oy, th), scissor.1)
+                            x1 = min(clampEdge(ceilf(quad[2]), ox, tw), scissor.2)
+                            y1 = min(clampEdge(ceilf(quad[3]), oy, th), scissor.3)
+                        } else {
+                            x0 = max(UInt32(max(lx - ox, 0)), scissor.0)
+                            y0 = max(UInt32(max(ly - oy, 0)), scissor.1)
+                            x1 = min(UInt32(max(rx - ox, 0)), scissor.2)
+                            y1 = min(UInt32(max(ry - oy, 0)), scissor.3)
+                        }
+                        let alpha = min(max(p.fill[3], 0.0), 1.0)
+                        if x0 < x1 && y0 < y1 {
+                            for y in y0..<y1 {
+                                let sy = Float(oy + Int32(y)) + 0.5
+                                for x in x0..<x1 {
+                                    let sx = Float(ox + Int32(x)) + 0.5
+                                    let cov = alpha * OracleShader.layerClipCoverage(p, screen: (sx, sy))
+                                    if cov <= 0.0 { continue }
+                                    let at = Int(y * tw + x)
+                                    let src: (Float, Float, Float, Float)
+                                    let srcOwner: Int?
+                                    if let (_, sn, cs, pivot) = activeTurn {
+                                        let qx = sx - pivot.0
+                                        let qy = sy - pivot.1
+                                        let ux = pivot.0 + cs * qx + sn * qy - Float(lx) - 0.5
+                                        let uy = pivot.1 + cs * qy - sn * qx - Float(ly) - 0.5
+                                        let bx = floorf(ux)
+                                        let by = floorf(uy)
+                                        let fx = ux - bx
+                                        let fy = uy - by
+                                        @inline(__always)
+                                        func texel(_ tx: Int32, _ ty: Int32) -> (Float, Float, Float, Float) {
+                                            if tx < 0 || ty < 0 || tx >= Int32(lw) || ty >= Int32(lh) {
+                                                return (0, 0, 0, 0)
+                                            }
+                                            let c = layerBuf[Int(UInt32(ty) * lw + UInt32(tx))]
+                                            if layerAdditive {
+                                                return (
+                                                    min(max(c.0, 0.0), 1.0),
+                                                    min(max(c.1, 0.0), 1.0),
+                                                    min(max(c.2, 0.0), 1.0),
+                                                    min(max(c.3, 0.0), 1.0)
+                                                )
+                                            }
+                                            return c
                                         }
-                                        let c = layerBuf[Int(UInt32(ty) * width + UInt32(tx))]
+                                        let ix = Int32(bx)
+                                        let iy = Int32(by)
+                                        let a = texel(ix, iy)
+                                        let b = texel(ix + 1, iy)
+                                        let c = texel(ix, iy + 1)
+                                        let d = texel(ix + 1, iy + 1)
+                                        let omfx = 1.0 - fx
+                                        let omfy = 1.0 - fy
+                                        src = (
+                                            (a.0 * omfx + b.0 * fx) * omfy + (c.0 * omfx + d.0 * fx) * fy,
+                                            (a.1 * omfx + b.1 * fx) * omfy + (c.1 * omfx + d.1 * fx) * fy,
+                                            (a.2 * omfx + b.2 * fx) * omfy + (c.2 * omfx + d.2 * fx) * fy,
+                                            (a.3 * omfx + b.3 * fx) * omfy + (c.3 * omfx + d.3 * fx) * fy
+                                        )
+                                        if let lIds = layerOwners {
+                                            @inline(__always)
+                                            func pick(_ tx: Int32, _ ty: Int32) -> Int? {
+                                                if tx < 0 || ty < 0 || tx >= Int32(lw) || ty >= Int32(lh) {
+                                                    return nil
+                                                }
+                                                return lIds[Int(UInt32(ty) * lw + UInt32(tx))]
+                                            }
+                                            let nx = Int32(roundf(ux))
+                                            let ny = Int32(roundf(uy))
+                                            srcOwner = pick(nx, ny)
+                                                ?? pick(ix, iy)
+                                                ?? pick(ix + 1, iy)
+                                                ?? pick(ix, iy + 1)
+                                                ?? pick(ix + 1, iy + 1)
+                                        } else {
+                                            srcOwner = nil
+                                        }
+                                    } else {
+                                        let lAt = Int(UInt32(oy + Int32(y) - ly) * lw + UInt32(ox + Int32(x) - lx))
+                                        let c = layerBuf[lAt]
                                         if layerAdditive {
-                                            return (
+                                            src = (
                                                 min(max(c.0, 0.0), 1.0),
                                                 min(max(c.1, 0.0), 1.0),
                                                 min(max(c.2, 0.0), 1.0),
                                                 min(max(c.3, 0.0), 1.0)
                                             )
+                                        } else {
+                                            src = c
                                         }
-                                        return c
+                                        srcOwner = layerOwners?[lAt]
                                     }
-                                    let a = texel(bx, by)
-                                    let b = texel(bx + 1.0, by)
-                                    let c = texel(bx, by + 1.0)
-                                    let d = texel(bx + 1.0, by + 1.0)
-                                    let omfx = 1.0 - fx
-                                    let omfy = 1.0 - fy
-                                    src = (
-                                        (a.0 * omfx + b.0 * fx) * omfy + (c.0 * omfx + d.0 * fx) * fy,
-                                        (a.1 * omfx + b.1 * fx) * omfy + (c.1 * omfx + d.1 * fx) * fy,
-                                        (a.2 * omfx + b.2 * fx) * omfy + (c.2 * omfx + d.2 * fx) * fy,
-                                        (a.3 * omfx + b.3 * fx) * omfy + (c.3 * omfx + d.3 * fx) * fy
-                                    )
-                                } else {
-                                    let c = layerBuf[at]
-                                    if layerAdditive {
-                                        src = (
-                                            min(max(c.0, 0.0), 1.0),
-                                            min(max(c.1, 0.0), 1.0),
-                                            min(max(c.2, 0.0), 1.0),
-                                            min(max(c.3, 0.0), 1.0)
-                                        )
-                                    } else {
-                                        src = c
+                                    let col = (src.0 * cov, src.1 * cov, src.2 * cov, src.3 * cov)
+                                    if col.3 <= 0.0 { continue }
+                                    target.blend(at: at, col: col, additive: additive)
+                                    if owners != nil {
+                                        owners![at] = srcOwner ?? cursor
                                     }
-                                }
-                                let col = (src.0 * cov, src.1 * cov, src.2 * cov, src.3 * cov)
-                                if col.3 <= 0.0 { continue }
-                                target.blend(at: at, col: col, additive: additive)
-                                if owners != nil, let lOwners = layerOwners {
-                                    owners![at] = lOwners[at] ?? cursor
                                 }
                             }
                         }
@@ -735,15 +818,18 @@ public struct OracleFrame: Sendable, Equatable {
                 cursor += 1
                 continue
             }
-            for y in 0..<height {
-                let fy = Float(y) + 0.5
-                for x in 0..<width {
-                    let col = OracleShader.fragment(p, atlas: scene.atlas, screen: (Float(x) + 0.5, fy))
-                    if col.3 <= 0.0 { continue }
-                    let at = Int(y * width + x)
-                    target.blend(at: at, col: col, additive: additive)
-                    if owners != nil {
-                        owners![at] = cursor
+            if scissor.0 < scissor.2 && scissor.1 < scissor.3 {
+                for y in scissor.1..<scissor.3 {
+                    let sy = Float(oy + Int32(y)) + 0.5
+                    for x in scissor.0..<scissor.2 {
+                        let sx = Float(ox + Int32(x)) + 0.5
+                        let col = OracleShader.fragment(p, atlas: scene.atlas, screen: (sx, sy))
+                        if col.3 <= 0.0 { continue }
+                        let at = Int(y * tw + x)
+                        target.blend(at: at, col: col, additive: additive)
+                        if owners != nil {
+                            owners![at] = cursor
+                        }
                     }
                 }
             }

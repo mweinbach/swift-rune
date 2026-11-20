@@ -1,4 +1,4 @@
-import { documentTag, installDocumentSelectionStyle, applyDocumentNode, finishDocumentNode }
+import { documentTag, installDocumentSelectionStyle, applyDocumentNode, finishDocumentNode, applyScrollX }
     from './rune-web-document-nodes.mjs';
 
 // The canvas owns pointer input. Its transparent sibling exposes Rune's controls in their
@@ -475,6 +475,14 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
                 ctrl: event.ctrlKey, cmd: event.metaKey})) event.preventDefault();
         }
     }
+    function syncScrollX(updates) {
+        if (!Array.isArray(updates)) return;
+        for (const item of updates) {
+            const record = slots.get(item.path);
+            if (record) applyScrollX(record, item.x, item.rtl);
+        }
+    }
+
     for (const type of ['focusin', 'click', 'keydown', 'input']) root.addEventListener(type, handle, { signal: listeners.signal });
-    return { sync, place, attachEditor, dispose() { listeners.abort(); slots.clear(); recordsByKey.clear(); relations.clear(); relatedTargets.clear(); root.remove(); } };
+    return { sync, syncScrollX, place, attachEditor, dispose() { listeners.abort(); slots.clear(); recordsByKey.clear(); relations.clear(); relatedTargets.clear(); root.remove(); } };
 }

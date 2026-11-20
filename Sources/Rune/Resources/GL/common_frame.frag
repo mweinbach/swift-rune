@@ -24,7 +24,7 @@ void main() {
     bool byteBlend;
     if (vParams.y == 0.0) {
         vec2 h = vRect.zw * 0.5;
-        vec2 p = vPoint - (vRect.xy + h);
+        vec2 p = screen - (vRect.xy + h);
         float r = p.x > 0.0 ? (p.y > 0.0 ? vRadii.z : vRadii.y) : (p.y > 0.0 ? vRadii.w : vRadii.x);
         r = min(r, min(h.x, h.y));
         vec2 q = abs(p) - h + vec2(r);

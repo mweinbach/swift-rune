@@ -249,10 +249,21 @@ internal enum GaneshConvex {
         out: inout [UInt8],
         shade: ((Int, Int, Int), (Double, Double, Double)) -> Float
     ) {
+        guard px > 0 else { return }
         var acc = [Float](repeating: 0, count: px * px)
-        @inline(__always) func snap(_ i: Int) -> (Int64, Int64) {
-            (Int64(((pts[i].0 - origin.0) * 256.0).rounded()), Int64(((pts[i].1 - origin.1) * 256.0).rounded()))
+        // Fixed point, 8 bits of subpixel; guard extreme coordinates before integer conversion so
+        // hostile geometry can never overflow fixed-point edge math.
+        let maxDevCoord: Float = 32_768.0
+        @inline(__always) func snap(_ i: Int) -> (Int64, Int64)? {
+            let x = pts[i].0 - origin.0
+            let y = pts[i].1 - origin.1
+            if !(x.isFinite && y.isFinite) || abs(x) > maxDevCoord || abs(y) > maxDevCoord {
+                return nil
+            }
+            return (Int64((x * 256.0).rounded()), Int64((y * 256.0).rounded()))
         }
+        // Coordinates are bounded to +/-32768 * 256 (+/-2^23), so edge deltas are <= 2^24 and
+        // signed 64-bit cross products stay < 2^50 (well within Int64 without overflow).
         @inline(__always) func edge(_ a: (Int64, Int64), _ b: (Int64, Int64), _ p: (Int64, Int64)) -> Int64 {
             (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)
         }
@@ -263,7 +274,7 @@ internal enum GaneshConvex {
         let triEnd = indices.count - (indices.count % 3)
         for ti in stride(from: 0, to: triEnd, by: 3) {
             var i0 = indices[ti], i1 = indices[ti + 1], i2 = indices[ti + 2]
-            var a = snap(i0), b = snap(i1), c = snap(i2)
+            guard var a = snap(i0), var b = snap(i1), let c = snap(i2) else { continue }
             var area = edge(a, b, c)
             if area == 0 { continue }
             if area < 0 {

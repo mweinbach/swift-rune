@@ -549,9 +549,8 @@ vec4 shade_fill(
 void main() {
     Globals g = fxGlobals;
     BackdropEncoding enc = fxBackdrop;
-    vec2 pixel = runePixel;
+    vec2 px = recover_pixel(g);
     Inst i = fxInstance;
-    vec2 px = pixel;
     vec4 shaded = shade_fill(i, px, g, uTex0, uTex1, uTex2, enc);
     fragColor = fx_fs(shaded, i, px, g, uTex0, enc);
 }

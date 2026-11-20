@@ -584,6 +584,18 @@ extension TextSystem {
     /// glyphs round it (`roundedBaselines`, #935); a glide (`glideOffPx`, device px from where the
     /// text lays out to where it is) moves them after. An underline's edges always come from
     /// `underline_edges` (`decorations.rs:134`, #963).
+    /// Returns `true` when any pill or bare inline icon in `pills` is a live monochrome SMIL animation
+    /// at `(t, mountTime(icon))`, used by `El.cache` liveness checks (`cache_layer.rs`).
+    internal func hasLiveAnimatedIcon(in pills: [PillChip], at t: Double, mountTime: (SVGIcon) -> Double) -> Bool {
+        guard hasAnimatedIcons else { return false }
+        for pill in pills {
+            if let svg = pill.icon?.svg, iconAnimLive(svg, at: t, mountTime: mountTime(svg)) {
+                return true
+            }
+        }
+        return false
+    }
+
     internal func emitTextDecorationsAndPills(
         shaped: ShapedText,
         textOriginX: Float,
@@ -600,6 +612,7 @@ extension TextSystem {
         glideOffPx: SIMD2<Float> = .zero,
         insertImage: (RGBA8Atlas) -> ImageAtlasRegion,
         glyphPage: (Int, UInt16) -> Void = { _, _ in },
+        emitInlineIcon: ((SVGIcon, Int, SIMD4<Float>, Color, inout [Primitive]) -> Bool)? = nil,
         into primitives: inout [Primitive]
     ) {
         let place = TextDecorationPlacement(
@@ -639,17 +652,21 @@ extension TextSystem {
             ))
             if let svg = chip.icon, let ir = chip.iconRect {
                 let pxSize = max(4, Int((min(ir.z, ir.w) * pxScale).rounded()))
-                let entry = glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
-                let tint = (chip.iconColor ?? defaultTextColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                glyphPage(primitives.count, entry.page)
-                primitives.append(.glyph(
-                    rect: place.origin(ir),
-                    uv: entry.uv,
-                    color: tint,
-                    gamma: 1.0,
-                    clip: devClip,
-                    turn: rot
-                ))
+                let iconColor = chip.iconColor ?? defaultTextColor
+                let devIconRect = place.origin(ir)
+                if emitInlineIcon?(svg, pxSize, devIconRect, iconColor, &primitives) != true {
+                    let entry = glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
+                    let tint = iconColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                    glyphPage(primitives.count, entry.page)
+                    primitives.append(.glyph(
+                        rect: devIconRect,
+                        uv: entry.uv,
+                        color: tint,
+                        gamma: 1.0,
+                        clip: devClip,
+                        turn: rot
+                    ))
+                }
             }
         }
 
@@ -669,17 +686,20 @@ extension TextSystem {
                 ))
             } else if let svg = inline.icon {
                 let pxSize = max(4, Int((min(inline.rect.z, inline.rect.w) * pxScale).rounded()))
-                let entry = glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
-                let tint = (inline.color ?? defaultTextColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                glyphPage(primitives.count, entry.page)
-                primitives.append(.glyph(
-                    rect: devRect,
-                    uv: entry.uv,
-                    color: tint,
-                    gamma: 1.0,
-                    clip: devClip,
-                    turn: rot
-                ))
+                let iconColor = inline.color ?? defaultTextColor
+                if emitInlineIcon?(svg, pxSize, devRect, iconColor, &primitives) != true {
+                    let entry = glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
+                    let tint = iconColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                    glyphPage(primitives.count, entry.page)
+                    primitives.append(.glyph(
+                        rect: devRect,
+                        uv: entry.uv,
+                        color: tint,
+                        gamma: 1.0,
+                        clip: devClip,
+                        turn: rot
+                    ))
+                }
             }
         }
 

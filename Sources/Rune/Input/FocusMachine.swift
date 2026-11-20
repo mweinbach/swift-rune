@@ -79,6 +79,23 @@ public struct PendingPhysicalFocusCheck: Sendable {
     }
 }
 
+/// How focus came to the element that has it (`focus_machine.rs::Entry`, #1297): by the keys
+/// (Tab, an arrow in a group, `Tx.focus` with a ring), or otherwise (a press, a hand-over
+/// without a ring, nothing focused). A field's keyboard-entry ring follows it, not modality.
+public enum FocusEntry: Equatable, Sendable {
+    case other
+    case keys
+}
+
+/// Focus entry state-machine events (`focus_machine.rs::FocusEvent`, #1297).
+public enum FocusEvent: Equatable, Sendable {
+    /// Focus moves to `path` (or nowhere) and shows as `keyboard` says.
+    case set(path: String?, keyboard: Bool)
+    /// The window came to the front again with focus where it was: that isn't the keys moving
+    /// focus there.
+    case windowReturned
+}
+
 /// Coordinated keyboard highlight, type-select, and modal focus metadata (`focus_machine.rs`, `modal_focus.rs`).
 public struct FocusMachine: Sendable {
     public var highlightHidden: Bool = false
@@ -92,6 +109,10 @@ public struct FocusMachine: Sendable {
     public var blurredFocusPath: String? = nil
     /// Whether the keyboard drove focus last (`Modality::Keyboard`); it outlives a blur.
     public var focusKeyboard: Bool = false
+    /// How focus arrived at the currently focused element (`focus_machine.rs::Entry`, #1297).
+    public var entry: FocusEntry = .other
+    /// Whether the keys put focus where it is (`FocusState::entered_by_keys`, #1297).
+    public var enteredByKeys: Bool { entry == .keys }
     /// Whether focus the element lost may go to a neighbour once it leaves the tree
     /// (`Focus::None { handoff }`): Escape hands on, `Tx::blur` doesn't.
     public var focusHandoff: Bool = false
@@ -102,6 +123,16 @@ public struct FocusMachine: Sendable {
     public var lastFocusSelectedByGroup: [String: String] = [:]
 
     public init() {}
+
+    public mutating func step(_ event: FocusEvent) {
+        switch event {
+        case .set(let path, let keyboard):
+            focusKeyboard = keyboard
+            entry = (keyboard && path != nil) ? .keys : .other
+        case .windowReturned:
+            entry = .other
+        }
+    }
 
     public mutating func resetForModalClose() {
         highlightHidden = false
@@ -212,6 +243,7 @@ extension Runtime {
             focusedPath = rowPath
             focusedKey = rowKey
             focusVisible = false
+            inputMachines.focusMachine.entry = .other
             inputMachines.focusMachine.highlightHidden = false
             inputMachines.focusMachine.highlightedPath = rowPath
             inputMachines.focusMachine.hoveredHighlight = true
@@ -508,7 +540,7 @@ extension Runtime {
         inputMachines.focusMachine.highlightHidden = false
         inputMachines.focusMachine.highlightedPath = nextNode.path
         inputMachines.focusMachine.hoveredHighlight = false
-        inputMachines.focusMachine.focusKeyboard = true
+        inputMachines.focusMachine.step(.set(path: nextNode.path, keyboard: true))
         inputMachines.focusMachine.blurredFocusPath = nil
         inputMachines.focusMachine.focusHandoff = false
         clearTabStartFocusPath()

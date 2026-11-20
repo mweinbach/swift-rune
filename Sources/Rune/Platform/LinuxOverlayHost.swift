@@ -89,13 +89,17 @@ private func wakeLinuxOverlayLoop(_ context: UnsafeMutableRawPointer?) {
         let name = backend == RuneOverlayLayer ? "Wayland layer-shell" : backend == RuneOverlayXWayland ? "XWayland" : "X11"
         handle.desktopCreated(windowNumber: xid == 0 ? nil : xid, capabilities: OverlayCapabilities(
             captureExclusion: .unsupported,
-            nonactivatingKeys: backend == RuneOverlayLayer && rune_overlay_has_keys(window) != 0 && options.keyPolicy != .none ? .supported : .unsupported,
+            nonactivatingKeys: OverlayKeys.keysSupport(options.keyPolicy, focuser: rune_overlay_has_keys(window) != 0),
             globalPointer: backend == RuneOverlayX11 ? .supported : .unsupported
         ), description: "\(name) OpenGL overlay" + (renderer.map { " (\($0.adapter.device))" } ?? ""))
     }
 
     private func allowsXWayland(_ options: OverlayOptions) -> Bool {
-        options.keyPolicy == .none && (options.xwaylandInput || options.input.resolved(interactive: options.interactive) == .none)
+        OverlayKeys.xwaylandAllowed(
+            input: options.input.resolved(interactive: options.interactive),
+            keyPolicy: options.keyPolicy,
+            optIn: options.xwaylandInput
+        )
     }
 
     private func makeRenderer() throws {
@@ -148,14 +152,18 @@ private func wakeLinuxOverlayLoop(_ context: UnsafeMutableRawPointer?) {
             configure()
             rune_overlay_redraw(window)
         case .focus:
-            if handle.desktopConfiguration().options.keyPolicy != .none { rune_overlay_focus(window) }
+            if handle.desktopPresence().isShown && OverlayKeys.canTakeKeys(handle.desktopConfiguration().options.keyPolicy) {
+                rune_overlay_focus(window)
+            }
         case .wake:
             if let accessibility {
                 var focus = false
                 handle.withLockedRuntime { rt in
                     _ = accessibility.pump(runtime: rt, at: now) { focus = true }
                 }
-                if focus && handle.desktopConfiguration().options.keyPolicy != .none { rune_overlay_focus(window) }
+                if focus && handle.desktopPresence().isShown && OverlayKeys.canTakeKeys(handle.desktopConfiguration().options.keyPolicy) {
+                    rune_overlay_focus(window)
+                }
             }
             rune_overlay_redraw(window)
         case .release: close()
@@ -192,6 +200,11 @@ private func wakeLinuxOverlayLoop(_ context: UnsafeMutableRawPointer?) {
         rune_overlay_level(window, Int32(options.level.rawValue))
         rune_overlay_place(window, rect, target == .fullDisplay ? 1 : 0, underPointer && options.followPointer ? 1 : 0)
         applyInput(options)
+        handle.desktopCapabilities(OverlayCapabilities(
+            captureExclusion: .unsupported,
+            nonactivatingKeys: OverlayKeys.keysSupport(options.keyPolicy, focuser: rune_overlay_has_keys(window) != 0),
+            globalPointer: backend == RuneOverlayX11 ? .supported : .unsupported
+        ))
     }
 
     private func syncOrigin() {
@@ -322,7 +335,14 @@ private func wakeLinuxOverlayLoop(_ context: UnsafeMutableRawPointer?) {
                 default: return false
                 }
                 lastPoint = windowPoint
-                if event.active != 0 { runtime.pointerDown(at: point, button: button, mods: mods, at: time) }
+                if event.active != 0 {
+                    // A click gives an X11 override-redirect overlay that may take keys the focus,
+                    // as it does the macOS panel; the window manager gives an override-redirect window none (#1240).
+                    if backend == RuneOverlayX11 && OverlayKeys.canTakeKeys(handle.desktopConfiguration().options.keyPolicy) {
+                        rune_overlay_focus(window)
+                    }
+                    runtime.pointerDown(at: point, button: button, mods: mods, at: time)
+                }
                 else { runtime.pointerUp(at: point, button: button, mods: mods, at: time) }
             case RuneOverlayKey:
                 if mods != modifiers { runtime.dispatchModifiers(mods, at: time); modifiers = mods }

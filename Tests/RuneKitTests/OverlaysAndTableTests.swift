@@ -119,6 +119,14 @@ struct OverlaysAndTableTests {
         #expect(word[1] >= trigger[1] + trigger[3] + 4.0)
     }
 
+    @Test("TooltipStyle.helpLook uses 600 ms delay and opens on keyboard focus (#1300)")
+    func tooltipHelpLookTimingsAndFocus() {
+        let look = TooltipStyle.neutral(dark: true).helpLook()
+        #expect(look.delaySeconds == 0.6)
+        #expect(look.skipSeconds == 0.3)
+        #expect(look.onFocus == true)
+    }
+
     // MARK: - Table & TableState (table.rs)
 
     private struct TableFile {
@@ -1921,8 +1929,9 @@ struct OverlaysAndTableTests {
         let k = Kit.neutral(dark: true)
         let look = TooltipStyle.fromKit(k, .standard).helpLook()
         #expect(look.maxW == 320.0)
-        #expect(look.delaySeconds == 0.4)
+        #expect(look.delaySeconds == 0.6)
         #expect(look.skipSeconds == 0.3)
+        #expect(look.onFocus == true)
         #expect(abs(look.fadeEnter - 0.12) < 1e-6)
         #expect(abs(look.fadeExit - 0.08) < 1e-6)
         #expect(abs(look.fadeScale - 0.96) < 1e-6)

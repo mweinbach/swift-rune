@@ -469,6 +469,141 @@ struct RuneStagingTests {
             expectedSub.append(contentsOf: src[rowStart..<(rowStart + 4 * 4)])
         }
         #expect(subPixels == expectedSub)
+
+        // An uncommitted command buffer fails Health.poll cleanly and makes tryRead return nil.
+        let uncommitted = try #require(queue.makeCommandBuffer())
+        #expect(sub.tryRead(commandBuffer: uncommitted) == nil)
+    }
+
+    @Test("Health.removed, Health.poll, and Metal error classification")
+    func metalHealthPollAndErrorClassification() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else { return }
+
+        #expect(!Health.removed(device))
+
+        // Uncommitted buffer is reported as unknownSubmissionIndex without hanging.
+        let uncommitted = try #require(queue.makeCommandBuffer())
+        #expect(Health.poll(commandBuffer: uncommitted, mode: .waitIndefinitely) == .failure(.wait(.unknownSubmissionIndex)))
+        #expect(Health.poll(commandBuffer: uncommitted, mode: .wait(timeoutSeconds: 1.0)) == .failure(.wait(.unknownSubmissionIndex)))
+        #expect(Health.poll(commandBuffer: uncommitted, mode: .poll) == .success(.poll))
+
+        // Committed empty command buffer completes cleanly under indefinite, bounded, and non-blocking polls.
+        let cb1 = try #require(queue.makeCommandBuffer())
+        cb1.commit()
+        #expect(Health.poll(commandBuffer: cb1, mode: .waitIndefinitely) == .success(.waitSucceeded))
+        #expect(Health.poll(commandBuffer: cb1, mode: .poll) == .success(.queueEmpty))
+
+        let cb2 = try #require(queue.makeCommandBuffer())
+        cb2.commit()
+        #expect(Health.poll(commandBuffer: cb2, mode: .wait(timeoutSeconds: 5.0)) == .success(.waitSucceeded))
+
+        // Metal NSError classification.
+        let removedErr = NSError(domain: MTLCommandBufferErrorDomain, code: 11, userInfo: nil)
+        #expect(Health.classifyMetalError(removedErr) == .lost)
+
+        let revokedErr = NSError(domain: MTLCommandBufferErrorDomain, code: Int(MTLCommandBufferError.accessRevoked.rawValue), userInfo: nil)
+        #expect(Health.classifyMetalError(revokedErr) == .lost)
+
+        let timeoutErr = NSError(domain: MTLCommandBufferErrorDomain, code: Int(MTLCommandBufferError.timeout.rawValue), userInfo: nil)
+        #expect(Health.classifyMetalError(timeoutErr) == .wait(.timeout))
+
+        #expect(Health.classifyMetalError(nil) == .lost)
+
+        let otherErr = NSError(domain: MTLCommandBufferErrorDomain, code: Int(MTLCommandBufferError.invalidResource.rawValue), userInfo: [NSLocalizedDescriptionKey: "invalid resource"])
+        #expect(Health.classifyMetalError(otherErr) == .wait(.failed("invalid resource")))
     }
     #endif
+
+    @Test("Portable Health.poll, Health.removed, and PollFailed descriptions")
+    func portableHealthPollAndRemoved() {
+        struct MockError: Error, CustomStringConvertible {
+            let description: String
+        }
+        final class MockDevice: GPUHealthDevice, @unchecked Sendable {
+            private let lock = NSLock()
+            private var _removed: Bool
+            private var _pollCalls = 0
+            private let handler: @Sendable (MockDevice, PollMode) throws -> PollStatus
+
+            init(removed: Bool = false, handler: @escaping @Sendable (MockDevice, PollMode) throws -> PollStatus) {
+                self._removed = removed
+                self.handler = handler
+            }
+
+            var isDeviceRemoved: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return _removed
+            }
+
+            var pollCalls: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return _pollCalls
+            }
+
+            func markRemoved() {
+                lock.lock()
+                _removed = true
+                lock.unlock()
+            }
+
+            func pollDevice(_ mode: PollMode) throws -> PollStatus {
+                lock.lock()
+                _pollCalls += 1
+                lock.unlock()
+                return try handler(self, mode)
+            }
+        }
+
+        // PollFailed Display strings match upstream health.rs.
+        #expect(PollFailed.lost.description == "the GPU device was lost")
+        #expect(PollFailed.wait(.timeout).description == "poll timed out")
+        #expect(PollFailed.wait(.unknownSubmissionIndex).description == "unknown submission index")
+        #expect(PollFailed.wait(.failed("driver busy")).description == "driver busy")
+
+        // 1. Healthy device returns poll status.
+        let healthy = MockDevice { _, mode in
+            switch mode {
+            case .poll: return .queueEmpty
+            case .waitIndefinitely, .wait: return .waitSucceeded
+            }
+        }
+        #expect(!Health.removed(healthy))
+        #expect(Health.poll(healthy, mode: .poll) == .success(.queueEmpty))
+        #expect(Health.poll(healthy, mode: .waitIndefinitely) == .success(.waitSucceeded))
+        #expect(healthy.pollCalls == 2)
+
+        // 2. Removed device returns .lost immediately without invoking pollDevice.
+        let alreadyRemoved = MockDevice(removed: true) { _, _ in .waitSucceeded }
+        #expect(Health.removed(alreadyRemoved))
+        #expect(Health.poll(alreadyRemoved, mode: .waitIndefinitely) == .failure(.lost))
+        #expect(alreadyRemoved.pollCalls == 0)
+
+        // 3. Device removed mid-poll upgrades wait error to .lost.
+        let lostMidPoll = MockDevice { dev, _ in
+            dev.markRemoved()
+            throw PollWaitError.timeout
+        }
+        #expect(Health.poll(lostMidPoll, mode: .wait(timeoutSeconds: 0.1)) == .failure(.lost))
+
+        // 4. Non-removed timeout stays .wait(.timeout).
+        let timedOut = MockDevice { _, _ in
+            throw PollWaitError.timeout
+        }
+        #expect(Health.poll(timedOut, mode: .wait(timeoutSeconds: 0.1)) == .failure(.wait(.timeout)))
+
+        // 5. wgpu-style "Error in Device::poll: Parent device is lost" error maps to .lost.
+        let pollPanicEquivalent = MockDevice { _, _ in
+            throw MockError(description: "Error in Device::poll: Parent device is lost")
+        }
+        #expect(Health.poll(pollPanicEquivalent, mode: .waitIndefinitely) == .failure(.lost))
+
+        // 6. Other backend error stays .wait(.failed(...)).
+        let otherFailure = MockDevice { _, _ in
+            throw MockError(description: "transient submission error")
+        }
+        #expect(Health.poll(otherFailure, mode: .poll) == .failure(.wait(.failed("transient submission error"))))
+    }
 }

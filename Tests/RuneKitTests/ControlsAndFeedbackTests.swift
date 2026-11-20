@@ -35,7 +35,9 @@ struct ControlsAndFeedbackTests {
         #expect(ghost.expanded(true).build(k).children.last?.textColor == k.c.textBase)
         let focus = base.disabled().state(.focus).build(k)
         #expect(focus.focusable)
-        #expect(focus.focusRingOffset == 2.5)
+        #expect(focus.focusRingWidth == 2.0)
+        #expect(focus.focusRingOffset == 2.0)
+        #expect(focus.elOutline == Outline(width: 2.0, offset: 2.0, color: k.c.borderFocus))
         #expect(focus.hoverBg == nil)
         let disabled = base.state(.disabled).disabled(false).build(k).key("off")
         let loading = base.variant(.loading).build(k).key("busy")
@@ -445,5 +447,121 @@ struct ControlsAndFeedbackTests {
             #expect(abs(rect[2] - w) < 0.01)
             #expect(abs(rect[3] - h) < 0.01)
         }
+    }
+
+    @Test("#1296: unified keyboard focus rings across buttons, toggles, radios, segments, inputs, select, collapsible and tab strip")
+    func unifiedKeyboardFocusRings() throws {
+        struct S {
+            var edit = TextEdit("hello")
+        }
+        let k = Kit.neutral(dark: true)
+        let focusOutlineOut = Outline(width: 2.0, offset: 2.0, color: k.c.borderFocus)
+        let focusOutlineIn = Outline(width: 2.0, offset: -2.0, color: k.c.borderFocus)
+
+        func findKey<T>(_ root: El<T>, _ key: String) -> El<T>? {
+            if root.keyId == key { return root }
+            for child in root.children {
+                if let hit = findKey(child, key) { return hit }
+            }
+            return nil
+        }
+
+        // 1. Button & IconButton: 2pt ring, 2pt out.
+        let btn = Button<S>(key: "btn", "Save").state(.focus).build(k)
+        #expect(btn.focusRingWidth == 2.0 && btn.focusRingOffset == 2.0 && btn.focusRingColor == k.c.borderFocus)
+        #expect(btn.elOutline == focusOutlineOut)
+
+        let iconBtn = IconButton<S>(key: "ibtn", svg: k.glyph.copy).label("Copy").state(.focus).build(k)
+        #expect(iconBtn.focusRingWidth == 2.0 && iconBtn.focusRingOffset == 2.0 && iconBtn.focusRingColor == k.c.borderFocus)
+        #expect(iconBtn.elOutline == focusOutlineOut)
+
+        // 2. Collapsible trigger: radius 4, 2pt ring 2pt out.
+        let collapsible = Collapsible<S>("Details").build(k)
+        let colTrigger = try #require(findKey(collapsible, "trigger"))
+        #expect(colTrigger.corners == .all(4.0))
+        #expect(colTrigger.focusRingWidth == 2.0 && colTrigger.focusRingOffset == 2.0 && colTrigger.focusRingColor == k.c.borderFocus)
+
+        // 3. Checkbox: no focus border override; control carries 2pt ring 2pt out; root leaves focusRingColor nil.
+        let cbRest = Checkbox<S>(checked: false).label("Check").build(k, key: "cb")
+        let cbFocus = Checkbox<S>(checked: false).label("Check").state(.focus).build(k, key: "cb")
+        let cbCheckedFocus = Checkbox<S>(checked: true).label("Check").state(.focus).build(k, key: "cb")
+        let cbRestCtrl = try #require(findKey(cbRest, "cb-control"))
+        let cbFocusCtrl = try #require(findKey(cbFocus, "cb-control"))
+        let cbCheckedCtrl = try #require(findKey(cbCheckedFocus, "cb-control"))
+        #expect(cbRest.focusRingColor == nil && cbFocus.focusRingColor == nil)
+        #expect(cbFocusCtrl.borderColor == cbRestCtrl.borderColor)
+        #expect(cbFocusCtrl.borderColor == k.c.borderWeak)
+        #expect(cbCheckedCtrl.borderColor == k.c.stdBorder)
+        #expect(cbRestCtrl.focusRingWidth == 2.0 && cbRestCtrl.focusRingOffset == 2.0 && cbRestCtrl.focusRingColor == k.c.borderFocus)
+        #expect(cbRestCtrl.elOutline == nil)
+        #expect(cbFocusCtrl.elOutline == focusOutlineOut)
+
+        // 4. RadioItem: control carries 2pt ring 2pt out; root leaves focusRingColor nil.
+        let radio = RadioItem<S>(label: "Option", checked: false).state(.focus).build(k, key: "rd")
+        let radioCtrl = try #require(findKey(radio, "rd-control"))
+        #expect(radio.focusRingColor == nil)
+        #expect(radioCtrl.focusRingWidth == 2.0 && radioCtrl.focusRingOffset == 2.0 && radioCtrl.focusRingColor == k.c.borderFocus)
+        #expect(radioCtrl.elOutline == focusOutlineOut)
+
+        // 5. Switch (compact, web, AND standard): control carries 2pt ring 2pt out; root leaves focusRingColor nil.
+        for sw in [
+            Switch<S>(checked: false).label("Compact").state(.focus).build(k, key: "sw"),
+            Switch<S>(checked: false).label("Web").web().state(.focus).build(k, key: "sw"),
+            Switch<S>(checked: true).label("Standard").standard().state(.focus).build(k, key: "sw"),
+        ] {
+            let swCtrl = try #require(findKey(sw, "sw-control"))
+            #expect(sw.focusRingColor == nil)
+            #expect(swCtrl.focusRingWidth == 2.0 && swCtrl.focusRingOffset == 2.0 && swCtrl.focusRingColor == k.c.borderFocus)
+            #expect(swCtrl.elOutline == focusOutlineOut)
+        }
+
+        // 6. SegmentedControl: segments ring 2pt inside (-2.0).
+        let seg = SegmentedControl<S>(labels: ["A", "B"], selected: 0).segmentState(1, .focus).build(k, key: "seg")
+        let seg0 = try #require(findKey(seg, "seg-segment0"))
+        let seg1 = try #require(findKey(seg, "seg-segment1"))
+        #expect(seg0.focusRingWidth == 2.0 && seg0.focusRingOffset == -2.0 && seg0.focusRingColor == k.c.borderFocus)
+        #expect(seg0.elOutline == nil)
+        #expect(seg1.focusRingWidth == 2.0 && seg1.focusRingOffset == -2.0 && seg1.focusRingColor == k.c.borderFocus)
+        #expect(seg1.elOutline == focusOutlineIn)
+
+        // 7. TextInput copy and clear buttons: ring 2pt inside (-2.0).
+        let tiCopy = TextInput<S>(key: "ti", \.edit).copyButton().build(k)
+        let copyAction = try #require(findKey(tiCopy, "ti-action"))
+        #expect(copyAction.focusRingWidth == 2.0 && copyAction.focusRingOffset == -2.0 && copyAction.focusRingColor == k.c.borderFocus)
+        let tiClear = TextInput<S>(key: "tic", \.edit).clearButton().build(k)
+        let clearAction = try #require(findKey(tiClear, "tic-action"))
+        #expect(clearAction.focusRingWidth == 2.0 && clearAction.focusRingOffset == -2.0 && clearAction.focusRingColor == k.c.borderFocus)
+
+        // 8. Select inline trigger: closed rings 2pt out, open suppresses focus ring.
+        var layerClosed: [El<S>] = []
+        let selClosed = Select<S>("sel", options: ["One"])
+            .appearance(.inline)
+            .state(.focus)
+            .open(false)
+            .build(kit: k, layer: &layerClosed)
+        #expect(!selClosed.noFocusRing)
+        #expect(selClosed.focusRingWidth == 2.0 && selClosed.focusRingOffset == 2.0 && selClosed.focusRingColor == k.c.borderFocus)
+        #expect(selClosed.elOutline == focusOutlineOut)
+
+        var layerOpen: [El<S>] = []
+        let selOpen = Select<S>("sel", options: ["One"])
+            .appearance(.inline)
+            .state(.focus)
+            .open(true)
+            .build(kit: k, layer: &layerOpen)
+        #expect(selOpen.noFocusRing)
+        #expect(selOpen.elOutline == nil)
+
+        // 9. TabStrip tab pill: rings 2pt inside (-2.0).
+        let strip = TabStrip<S>(
+            key: "tabs",
+            tabs: [
+                StripTabItem(id: "a", title: "Alpha"),
+                StripTabItem(id: "b", title: "Beta"),
+            ],
+            selected: "a"
+        ).build(S(), kit: k)
+        let pillA = try #require(findKey(strip, "tabs-tab-a"))
+        #expect(pillA.focusRingWidth == 2.0 && pillA.focusRingOffset == -2.0 && pillA.focusRingColor == k.c.borderFocus)
     }
 }

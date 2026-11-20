@@ -189,11 +189,14 @@ public extension Runtime {
     /// `NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`): reduced motion, the
     /// contrast theme and Increase Contrast are read again at once. `forceReducedMotion`: the
     /// launch's `--reduced-motion` flag, which the system can't turn off.
-    func readSystemAccessibilitySettings(forceReducedMotion: Bool = false) {
+    @discardableResult
+    func readSystemAccessibilitySettings(forceReducedMotion: Bool = false) -> Bool {
+        let wasDirty = needsCommit
         let prefs = SystemPreferences.current()
         setSystemReducedMotion(forceReducedMotion || prefs.reducedMotion)
         setSystemContrast(prefs.contrast)
         setSystemIncreasedContrast(SystemPreferences.increasedContrast())
+        return !wasDirty && needsCommit
     }
 }
 

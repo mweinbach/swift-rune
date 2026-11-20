@@ -456,18 +456,22 @@ public struct Collapsible<State> {
             .child(arrow)
             .a11yHidden()
 
-        var trigger: El<State> = row()
-            .key("trigger")
-            .role(.button)
-            .label(titleText)
-            .expanded(isOpen)
-            .focusable(enabled)
-            .focusRing(2.0, offset: 0.0, c.borderFocus)
-            .disabled(!enabled)
-            .wFull()
-            .h(32)
-            .centerY()
-            .child(labelRow)
+        var trigger: El<State> = k.focusRing(
+            row()
+                .key("trigger")
+                .role(.button)
+                .label(titleText)
+                .expanded(isOpen)
+                .focusable(enabled)
+                .disabled(!enabled)
+                .wFull()
+                .h(32)
+                .rounded(4.0)
+                .centerY()
+                .child(labelRow),
+            2.0,
+            2.0
+        )
 
         if enabled, let onToggleHandler {
             trigger = trigger.onClick(onToggleHandler)
@@ -1057,6 +1061,8 @@ public struct TextInput<State> {
                 .alignSelf(.center)
                 .center()
                 .rounded(rad)
+                // Inside, clear of the field's edge it sits on (`text-input.css`, opencode#64909).
+                .focusRing(2.0, offset: -2.0, c.borderFocus)
                 .child(icon(glyph, size: 16.0).color(c.iconMuted))
             if hasClearButton {
                 btn = btn.mr(-8.0)

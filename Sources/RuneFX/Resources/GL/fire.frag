@@ -167,6 +167,6 @@ vec4 shade_fire(
 void main() {
     Globals g = fxGlobals;
     BackdropEncoding enc = fxBackdrop;
-    vec2 pixel = runePixel;
+    vec2 pixel = recover_pixel(g);
     fragColor = fx_fs(shade_fire(pixel, g, uTex1, enc), fxInstance, pixel, g, uTex0, enc);
 }

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <wchar.h>
 #include "RuneWinPopup.h"
+#include "RuneWinOverlay.h"
 #include "WindowKeyboard.h"
 
 typedef struct Popup {
@@ -154,6 +155,13 @@ static LONG selected_offset(Popup *s, UINT dpi) {
     return -1;
 }
 
+// Whether the menu's owner gives the foreground back to previous once the menu closes:
+// an overlay, whatever its KeyPolicy, that took the foreground only for the menu and still
+// has it. One that had the foreground before (an OnDemand overlay the user clicked) keeps it.
+static int hands_back(int is_overlay, HWND previous, HWND owner, HWND foreground) {
+    return is_overlay && previous != NULL && previous != owner && foreground == owner;
+}
+
 static uint32_t track(Popup *s) {
     HWND hwnd = s->hwnd;
     if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || !IsWindowEnabled(hwnd)) return 0;
@@ -175,6 +183,11 @@ static uint32_t track(Popup *s) {
     LONG selected = selected_offset(s, dpi);
     if (selected >= 0) y = (LONG)max((int64_t)y - selected, INT32_MIN);
     else if (s->rect_anchor) y = right.y;
+    // A menu closes on a click elsewhere, and gets the keyboard, only while its owner is
+    // the foreground window. An overlay takes the foreground for its menu, and hands it back
+    // after (`hands_back`, #1240).
+    HWND previous = GetForegroundWindow();
+    if (previous != hwnd) SetForegroundWindow(hwnd);
     UINT flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_VERTICAL | TPM_WORKAREA |
                  (rtl ? TPM_RIGHTALIGN | TPM_LAYOUTRTL : TPM_LEFTALIGN);
     HHOOK hook = s->key ? SetWindowsHookExW(WH_MSGFILTER, menu_filter, NULL, GetCurrentThreadId()) : NULL;
@@ -183,6 +196,13 @@ static uint32_t track(Popup *s) {
                                                   s->rect_anchor && selected < 0 ? &params : NULL);
     s->inside_menu = 0;
     if (hook) UnhookWindowsHookEx(hook);
+    if (IsWindow(hwnd)) {
+        // The menu's loop lets go of the foreground state once the owner gets a message.
+        PostMessageW(hwnd, WM_NULL, 0, 0);
+        if (hands_back(rune_win_is_overlay_hwnd(hwnd), previous, hwnd, GetForegroundWindow())) {
+            SetForegroundWindow(previous);
+        }
+    }
     return s->shortcut_pick ? s->shortcut_pick : command;
 }
 
