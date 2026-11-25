@@ -252,6 +252,7 @@ For UI-only builds (`--disable-default-traits`), `libgstreamer-plugins-base1.0-d
 - [State, Events & Architecture](state-and-architecture.md) — `AppSpec` vs `App`, `AppHandle`, `Cx`/`Tx`, `Live<T>`, async tasks, input, accessibility, and desktop services.
 - [Motion & Animation Guide](motion-and-animation.md) — Analytic springs, 4-edge layout morphing, enter/exit transitions, and choreography.
 - [RuneKit Component Guide](runekit-components.md) — Themed controls, overlays, app shells, tables, trees, Markdown, Mermaid, and code diffs.
+- [Rebuilding Apple UIs in Rune](rebuilding-apple-uis.md) — SwiftUI/AppKit/UIKit cheat sheet and blueprints for System Settings, frosted tab bars, Liquid Glass, Spotlight launchers, and custom macOS titlebars.
 - [Visual Effects, Lighting & Custom GPU](effects-lighting-and-gpu.md) — `Compositor` GPU hooks, `RuneFX`, `RuneLight`, and `RuneKnobs`.
 - [Testing, Profiling & Deployment](testing-and-deployment.md) — Headless snapshots, `--script` flows, unit tests, profiling, and shipping on every platform.
 - [Products & Modules](products-and-modules.md) — Complete list of SwiftPM library products and package traits.
