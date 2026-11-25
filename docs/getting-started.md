@@ -248,7 +248,11 @@ For UI-only builds (`--disable-default-traits`), `libgstreamer-plugins-base1.0-d
 
 ## Next Steps
 
-- Read the [UI Programming Guide](ui-guide.md) to learn layout, styling, input, animations, and custom GPU passes.
-- Browse the [RuneKit Component Guide](runekit-components.md) for buttons, inputs, dialogs, menus, tables, trees, markdown, and app shells.
-- Check [Products & Modules](products-and-modules.md) for all available SwiftPM libraries.
-- Explore the standalone multi-panel example in [`examples/SparkStudio`](../examples/SparkStudio).
+- [Core UI, Layout & Styling Guide](ui-guide.md) — Flexbox, CSS Grid, colors/tokens, vector shapes, images, and scrolling.
+- [State, Events & Architecture](state-and-architecture.md) — `AppSpec` vs `App`, `AppHandle`, `Cx`/`Tx`, `Live<T>`, async tasks, input, accessibility, and desktop services.
+- [Motion & Animation Guide](motion-and-animation.md) — Analytic springs, 4-edge layout morphing, enter/exit transitions, and choreography.
+- [RuneKit Component Guide](runekit-components.md) — Themed controls, overlays, app shells, tables, trees, Markdown, Mermaid, and code diffs.
+- [Visual Effects, Lighting & Custom GPU](effects-lighting-and-gpu.md) — `Compositor` GPU hooks, `RuneFX`, `RuneLight`, and `RuneKnobs`.
+- [Testing, Profiling & Deployment](testing-and-deployment.md) — Headless snapshots, `--script` flows, unit tests, profiling, and shipping on every platform.
+- [Products & Modules](products-and-modules.md) — Complete list of SwiftPM library products and package traits.
+- [Standalone App Example](../examples/SparkStudio) — Real-world multi-panel SwiftPM desktop app consuming `Rune`, `RuneKit`, and `RuneMotion`.

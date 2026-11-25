@@ -11,9 +11,13 @@ Every `RuneApp` supports headless execution (`--snap`, `--tree`, `--script`, `--
 ## Documentation
 
 - [**Getting Started**](docs/getting-started.md) — Add `swift-rune` via SwiftPM, build your first cross-platform UI app, and configure platform prerequisites.
-- [**UI Programming Guide**](docs/ui-guide.md) — Declarative `El<State>` trees, Flexbox/Grid layout, design tokens, text editing, accessibility, springs & layout morphing, custom GPU `Compositor` passes, and headless testing.
-- [**RuneKit Component Guide**](docs/runekit-components.md) — Theming with `Kit.fromPalette`, buttons, form controls, dialogs, menus, popovers, app shells, virtualized tables/trees, Markdown, syntax highlighting, Mermaid diagrams, and diff views.
-- [**Products & Modules**](docs/products-and-modules.md) — Full guide to all SwiftPM library products, package traits (`DesktopMedia`), and platform backends.
+- [**Core UI, Layout & Styling Guide**](docs/ui-guide.md) — Declarative `El<State>` trees, Flexbox & CSS Grid, absolute/sticky positioning, OKLCH colors & tokens, vector `Shape`/`Path`, `ImageCache`, and virtualized scrolling.
+- [**State, Events & Architecture**](docs/state-and-architecture.md) — `AppSpec` vs `App`, `AppHandle`, `Cx`/`Tx`, zero-rebuild `Live<T>` bindings, async `Attempt`/`Seq`/`Waker`, keyboard/drag/text input, accessibility, and desktop services (`RuneNotify`, `RuneMac`, `RuneI18n`).
+- [**Motion & Animation Guide**](docs/motion-and-animation.md) — Analytic `Spring` physics, OKLab color transitions, 4-edge layout morphing (`.animateLayout`), enter/exit `.transition`, `CubicBezier`, staggers, `Choreography`, and reduced-motion support.
+- [**RuneKit Component Guide**](docs/runekit-components.md) — Theming with `Kit.fromPalette`, buttons, form controls, overlays/dialogs/menus/toasts, desktop app shells, virtualized tables & trees, streaming Markdown, syntax highlighting, Mermaid diagrams, and diff views.
+- [**Visual Effects, Lighting & Custom GPU**](docs/effects-lighting-and-gpu.md) — Custom native Metal/OpenGL/WebGPU `Compositor` passes, `RuneFX` shader layers & procedural fills, `RuneLight` 2D/2.5D lighting & refractive glass, and `RuneKnobs` live tuning.
+- [**Testing, Profiling & Deployment**](docs/testing-and-deployment.md) — Headless CLI snapshots (`--snap`, `--tree`, `--script`), XCTest/Swift Testing with `HeadlessRunner` & `RuneRef.diff`, frame-phase profiling, and deployment checklists for macOS, iOS, Windows, Linux, Android, and WebAssembly.
+- [**Products & Modules**](docs/products-and-modules.md) — Full reference for all 18 SwiftPM library products, package traits (`DesktopMedia`), and platform backends.
 - [**Standalone App Example**](examples/SparkStudio) — Complete multi-panel SwiftPM desktop app consuming `Rune`, `RuneKit`, and `RuneMotion`.
 
 ## Installation (SwiftPM)
