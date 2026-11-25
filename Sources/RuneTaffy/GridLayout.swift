@@ -70,12 +70,12 @@ private struct GridOccupancy {
     }
 }
 
-internal func computeGridLayout(
-    tree: any LayoutTree,
+internal func computeGridLayout<Tree: LayoutTree>(
+    tree: Tree,
     node: NodeId,
+    style: TaffyStyle,
     input: LayoutInput
-) -> LayoutOutput {
-    let style = tree.style(node)
+) -> (LayoutOutput, Bool) {
     let parentSize = input.parentSize
     let padding = style.resolvedPadding(parentWidth: parentSize.width)
     let border = style.resolvedBorder(parentWidth: parentSize.width)
@@ -116,7 +116,7 @@ internal func computeGridLayout(
             width: maybeClamp(Swift.max(w, pbSum.width + scrollbarSize.width), min: minSize.width, max: maxSize.width),
             height: maybeClamp(Swift.max(h, pbSum.height + scrollbarSize.height), min: minSize.height, max: maxSize.height)
         )
-        return LayoutOutput.fromOuterSize(clamped)
+        return (LayoutOutput.fromOuterSize(clamped), false)
     }
 
     let innerAvailW = input.availableSpace.width.maybeSet(known.width).maybeSub(innerPB.width).mapDefiniteValue { Swift.max(0, $0) }
@@ -167,6 +167,7 @@ internal func computeGridLayout(
     var items: [GridItem] = []
     items.reserveCapacity(childCount)
     var orderCounter: UInt32 = 0
+    var hasOutOfFlow = false
 
     for i in 0..<childCount {
         let child = tree.childId(node, at: i)
@@ -176,6 +177,7 @@ internal func computeGridLayout(
             continue
         }
         if cStyle.isOutOfFlow {
+            hasOutOfFlow = true
             orderCounter += 1
             continue
         }
@@ -537,7 +539,7 @@ internal func computeGridLayout(
         }
     }
 
-    return LayoutOutput(
+    return (LayoutOutput(
         size: Size(width: outerWidth, height: outerHeight),
         contentSize: Size(
             width: Swift.max(outerWidth, contentMaxX + contentBoxInset.right),
@@ -545,7 +547,7 @@ internal func computeGridLayout(
         ),
         firstBaselines: Point(x: nil, y: firstBaselineY),
         scrollOverflowOrigin: Point(x: contentMinX, y: contentMinY)
-    )
+    ), hasOutOfFlow)
 }
 
 // MARK: - Grid Helpers
@@ -717,7 +719,7 @@ private func buildTrackVector(
     return result
 }
 
-private func sizeTracks(
+private func sizeTracks<Tree: LayoutTree>(
     tracks: inout [GridTrack],
     otherTracks: [GridTrack],
     items: [GridItem],
@@ -729,7 +731,7 @@ private func sizeTracks(
     otherGap: Float,
     parentInnerSize: Size<Float?>,
     alignContent: AlignContent,
-    tree: any LayoutTree
+    tree: Tree
 ) {
     // 1. Initialize base sizes & growth limits
     for i in tracks.indices {
@@ -796,10 +798,23 @@ private func sizeTracks(
     let axis: AbsoluteAxis = isColumn ? .horizontal : .vertical
 
     // 2. Resolve intrinsic track sizes
-    let sortedItems = items.sorted { a, b in
-        let spanA = isColumn ? (a.colEnd - a.colStart) : (a.rowEnd - a.rowStart)
-        let spanB = isColumn ? (b.colEnd - b.colStart) : (b.rowEnd - b.rowStart)
-        return spanA < spanB
+    var hasMultiSpan = false
+    for item in items {
+        let span = isColumn ? (item.colEnd - item.colStart) : (item.rowEnd - item.rowStart)
+        if span > 1 {
+            hasMultiSpan = true
+            break
+        }
+    }
+    let sortedItems: [GridItem]
+    if hasMultiSpan {
+        sortedItems = items.sorted { a, b in
+            let spanA = isColumn ? (a.colEnd - a.colStart) : (a.rowEnd - a.rowStart)
+            let spanB = isColumn ? (b.colEnd - b.colStart) : (b.rowEnd - b.rowStart)
+            return spanA < spanB
+        }
+    } else {
+        sortedItems = items
     }
 
     for item in sortedItems {
@@ -994,8 +1009,12 @@ private func sizeTracks(
 }
 
 private func sumTrackSizes(_ tracks: [GridTrack], gap: Float) -> Float {
-    let activeCount = tracks.filter { !$0.isCollapsed }.count
-    let sum = tracks.reduce(Float(0)) { $0 + $1.baseSize }
+    var activeCount = 0
+    var sum: Float = 0
+    for track in tracks {
+        if !track.isCollapsed { activeCount += 1 }
+        sum += track.baseSize
+    }
     return sum + gap * Float(Swift.max(0, activeCount - 1))
 }
 
@@ -1010,7 +1029,8 @@ private func alignTracks(
     let used = sumTrackSizes(tracks, gap: gap)
     let rawFree = containerInnerSize - used
     let free = Swift.max(0, rawFree)
-    let activeCount = tracks.filter { !$0.isCollapsed }.count
+    var activeCount = 0
+    for track in tracks where !track.isCollapsed { activeCount += 1 }
 
     var cur = startOffset
     var extraGap: Float = 0

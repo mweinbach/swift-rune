@@ -191,17 +191,11 @@ private func shouldGrowContainerStack(depth: Int) -> Bool {
     if depth >= maxInlineContainerDepth {
         return true
     }
-    #if os(Linux)
-    // `pthread_getattr_np` can inspect `/proc/self/maps` on the main thread; sample every
-    // 8 levels (~32 KiB max stride, well inside the 128 KiB red zone) to keep shallow layouts free.
+    // Sample remaining stack every 8 levels (~32 KiB max stride, well inside the 128 KiB red zone)
+    // to keep shallow layouts free of OS stack-limit queries on Linux, Darwin, and Windows.
     if (depth & 7) == 0, let rem = remainingStackBytes(), rem < stackRedZoneBytes {
         return true
     }
-    #else
-    if let rem = remainingStackBytes(), rem < stackRedZoneBytes {
-        return true
-    }
-    #endif
     return false
 }
 

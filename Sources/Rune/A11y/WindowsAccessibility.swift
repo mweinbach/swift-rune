@@ -4,10 +4,29 @@ import Foundation
 
 /// UI Automation reads copies of the semantic tree. Only the window thread acts on the runtime.
 internal final class WindowsAccessibilityHost {
+    private struct UpdateFingerprint: Equatable {
+        var runtime: ObjectIdentifier
+        var commitCount: UInt64
+        var layoutCommitGen: UInt64
+        var liveRevision: UInt64
+        var focusedPath: String?
+        var focusedLinkIndex: Int?
+        var announcementCount: UInt32
+        var windowTitle: String?
+        var viewport: Vec2
+        var pixelScale: Float
+        var flatNodeCount: Int
+        var scrollOffsets: [String: Vec2]
+        var focusedEditAnchor: Int?
+        var focusedEditCursor: Int?
+        var focusedEditText: String?
+    }
+
     private var host: OpaquePointer?
     private var identifiers: [AccessibilityIdentity: Int32] = [:]
     private var targets: [Int32: String] = [:]
     private var nextID: Int32 = 1
+    private var lastFingerprint: UpdateFingerprint?
     private let publishOnDemand: (WindowsAccessibilityHost) -> Void
 
     init(window: UnsafeMutableRawPointer?, publishOnDemand: @escaping (WindowsAccessibilityHost) -> Void) {
@@ -33,6 +52,7 @@ internal final class WindowsAccessibilityHost {
         host = nil
         identifiers.removeAll()
         targets.removeAll()
+        lastFingerprint = nil
     }
 
     deinit {
@@ -96,14 +116,52 @@ internal final class WindowsAccessibilityHost {
     func update<State>(_ runtime: Runtime<State>) {
         // The HWND answers discovery synchronously at rest. An active reader continues to
         // receive fresh geometry on scroll and animation frames between authored commits.
-        guard let host, rune_uia_active(host) != 0, runtime.commitCount != 0 else { return }
+        guard let host else { return }
+        guard rune_uia_active(host) != 0 else {
+            lastFingerprint = nil
+            return
+        }
+        guard runtime.commitCount != 0 else { return }
         let announcement = runtime.a11yAnnouncement
+        var editAnchor: Int?
+        var editCursor: Int?
+        var editText: String?
+        if let focusedPath = runtime.focusedPath,
+           let index = runtime.nodeByPath[focusedPath],
+           let lens = runtime.flatNodes[index].el.handlers.editLens {
+            let edit = lens.get(runtime.state)
+            if !edit.isSecure {
+                editAnchor = edit.anchor
+                editCursor = edit.cursor
+                editText = edit.text
+            }
+        }
+        let fingerprint = UpdateFingerprint(
+            runtime: ObjectIdentifier(runtime),
+            commitCount: runtime.commitCount,
+            layoutCommitGen: runtime.layoutCommitGen,
+            liveRevision: runtime.accessibilityLiveRevision,
+            focusedPath: runtime.focusedPath,
+            focusedLinkIndex: runtime.focusedLinkIndex,
+            announcementCount: announcement.count,
+            windowTitle: runtime.windowTitle,
+            viewport: runtime.viewport,
+            pixelScale: runtime.pixelScale,
+            flatNodeCount: runtime.flatNodes.count,
+            scrollOffsets: runtime.scrollOffsets,
+            focusedEditAnchor: editAnchor,
+            focusedEditCursor: editCursor,
+            focusedEditText: editText
+        )
+        if lastFingerprint == fingerprint { return }
         var tree = runtime.nativeAccessibilitySnapshot()
         tree.children.append(AccessibilityTreeState.announcerNode(announcement, holdWords: false))
         let scale = Double(runtime.pixelScale)
         let viewport = MotionRect.fromXYWH(0, 0, runtime.viewport.x, runtime.viewport.y)
         var updatedIDs: [AccessibilityIdentity: Int32] = [:]
+        updatedIDs.reserveCapacity(identifiers.count)
         var updatedTargets: [Int32: String] = [:]
+        updatedTargets.reserveCapacity(targets.count)
         rune_uia_begin(host, runtime.windowTitle ?? "")
 
         func oneBased(_ index: Int?) -> Int32 {
@@ -211,6 +269,7 @@ internal final class WindowsAccessibilityHost {
         publish(tree, id: rootID, under: 0, clippedTo: viewport)
         identifiers = updatedIDs
         targets = updatedTargets
+        lastFingerprint = fingerprint
         rune_uia_commit(host)
     }
 

@@ -1,12 +1,12 @@
 // MARK: - Out-of-Flow (Absolute / Fixed) Positioning
 
 /// Positions all `position: .absolute` / `.fixed` children of `node` relative to `node`'s padding box.
-internal func computeOutOfFlowLayout(
-    tree: any LayoutTree,
+internal func computeOutOfFlowLayout<Tree: LayoutTree>(
+    tree: Tree,
     node: NodeId,
+    parentStyle: TaffyStyle,
     containerOutput: inout LayoutOutput
 ) {
-    let parentStyle = tree.style(node)
     let containerSize = containerOutput.size
     let parentBorder = parentStyle.resolvedBorder(parentWidth: containerSize.width)
     let parentPadding = parentStyle.resolvedPadding(parentWidth: containerSize.width)

@@ -1400,24 +1400,27 @@ public struct Scene: Sendable {
     }
 
     private func ancestorMoving(_ i: Int) -> Bool {
-        let watched: [Int] = [
-            Int(Props.FRAME.id.rawValue),
-            Int(Props.TRAVEL.id.rawValue),
-            Int(Props.OFFSET.id.rawValue),
-            Int(Props.PRESENCE.id.rawValue),
-            Int(Props.UNIFORM_SCALE.id.rawValue),
-            Int(Props.OPACITY.id.rawValue),
-            Int(Props.BLUR_SCALAR.id.rawValue),
-        ]
         var p = nodes[i].parent
         while p != Self.noneIdx {
-            let pn = nodes[Int(p)]
-            for pid in watched {
-                if let tid = pn.tracks[pid], store.isActive(tid) {
+            let entries = nodes[Int(p)].tracks.entries
+            if !entries.isEmpty {
+                @inline(__always)
+                func isPropActive(_ prop: PropId) -> Bool {
+                    let idx = Int(prop.rawValue)
+                    guard idx < entries.count, let tid = entries[idx] else { return false }
+                    return store.isActive(tid)
+                }
+                if isPropActive(Props.FRAME.id)
+                    || isPropActive(Props.TRAVEL.id)
+                    || isPropActive(Props.OFFSET.id)
+                    || isPropActive(Props.PRESENCE.id)
+                    || isPropActive(Props.UNIFORM_SCALE.id)
+                    || isPropActive(Props.OPACITY.id)
+                    || isPropActive(Props.BLUR_SCALAR.id) {
                     return true
                 }
             }
-            p = pn.parent
+            p = nodes[Int(p)].parent
         }
         return false
     }
@@ -1497,6 +1500,58 @@ public struct Scene: Sendable {
     ) -> Presented {
         let parent = nodes[i].parent
         let parentOrigin = (parent == Self.noneIdx) ? Vec2.zero : nodes[Int(parent)].origin
+        let hasTracks = !nodes[i].tracks.entries.isEmpty
+
+        if !hasTracks && nodes[i].path == nil && nodes[i].presence.isResting
+            && !nodes[i].rideTrailing && nodes[i].reveal == nil {
+            let at1 = nodes[i].presence.pair.1
+            if at1.0 == 1.0 && at1.1 == 1.0 && at1.2 == 0.0 && at1.3 == 0.0
+                && at1.4 == 0.0 && at1.5 == 0.0 && at1.6 == 0.0 && at1.7 == 0.0 && at1.8 == 1.0 {
+                let world = nodes[i].frame.translated(parentOrigin)
+                let shown = world.translated(nodes[i].baseOffset)
+                let sx = max(0, nodes[i].baseScale2D.x)
+                let sy = max(0, nodes[i].baseScale2D.y)
+                let blur = nodes[i].baseBlur < 1.0 / 64.0 ? 0.0 : max(0, nodes[i].baseBlur)
+                let anchor = Vec2(shown.left + nodes[i].anchor.x * shown.width, shown.top + nodes[i].anchor.y * shown.height)
+                var fl: UInt32 = 0
+                if ownDirty && !parentDirty { fl |= TraceFlags.animated }
+                if parentDirty {
+                    fl |= TraceFlags.ancestorAnimated
+                    let pb = nodes[Int(parent)].last.map { ($0.flags >> 8) & 0xff | ($0.flags >> 16) & 0xff } ?? 0
+                    fl |= pb << 16
+                }
+                if blur > 0 { fl |= TraceFlags.filtered }
+                let snapped = snapRect(shown, pixelScale: scale)
+                let outPresented = Presented(
+                    id: nodes[i].id,
+                    parent: (parent != Self.noneIdx) ? nodes[Int(parent)].id : nil,
+                    rect: snapped,
+                    targetRect: nodes[i].frame.translated(targetOrigin),
+                    revealClip: nil,
+                    opacity: nodes[i].opacity.clamped(to: 0...1),
+                    transform: Transform2D(tx: 0, ty: 0, sx: sx, sy: sy, rot: nodes[i].baseRotate),
+                    anchor: anchor,
+                    blur: blur,
+                    corners: nodes[i].radius,
+                    fill: nodes[i].hasFill ? nodes[i].fill : nil,
+                    border: nodes[i].hasBorder ? nodes[i].border : nil,
+                    mask: Mask(inset: .zeroValue, feather: .zeroValue),
+                    phase: nodes[i].presence.public(nodes[i].generation),
+                    inFlow: !nodes[i].presence.isExiting || !nodes[i].transition.popLayout,
+                    flags: fl,
+                    draw: 1.0,
+                    presence: 1.0,
+                    isMoving: false
+                )
+                let parentStill = parent == Self.noneIdx || rests[Int(parent)].origin == nodes[Int(parent)].origin
+                let restRect = parentStill ? shown : restOf(i, reduced: reduced, targetOrigin: targetOrigin)
+                nodes[i].world = world
+                nodes[i].origin = Vec2(shown.left, shown.top)
+                rests[i] = SceneRest(rect: restRect, origin: Vec2(restRect.left, restRect.top), moving: restRect != shown)
+                return outPresented
+            }
+        }
+
         let n = nodes[i]
 
         let world: MotionRect
@@ -1686,9 +1741,19 @@ public struct Scene: Sendable {
         )
 
         let parentStill = parent == Self.noneIdx || rests[Int(parent)].origin == nodes[Int(parent)].origin
-        let ownStill = [Props.TRAVEL.id, Props.FRAME.id, Props.PRESENCE.id, Props.OFFSET.id].allSatisfy { pid in
-            guard let tid = nodes[i].tracks[Int(pid.rawValue)] else { return true }
-            return store.isSettled(tid)
+        let ownStill: Bool
+        if !hasTracks {
+            ownStill = true
+        } else {
+            @inline(__always)
+            func isPropSettled(_ pid: PropId) -> Bool {
+                guard let tid = nodes[i].tracks[Int(pid.rawValue)] else { return true }
+                return store.isSettled(tid)
+            }
+            ownStill = isPropSettled(Props.TRAVEL.id)
+                && isPropSettled(Props.FRAME.id)
+                && isPropSettled(Props.PRESENCE.id)
+                && isPropSettled(Props.OFFSET.id)
         }
         let restRect = (!nodes[i].rideTrailing && parentStill && ownStill) ? shown : restOf(i, reduced: reduced, targetOrigin: targetOrigin)
         nodes[i].world = world

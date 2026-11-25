@@ -173,11 +173,17 @@ int rune_win_plane_copy_gl(void *opaque, uint32_t yTexture, uint32_t uvTexture) 
         saved.height = image.height;
     }
     if (copy->interop && saved.tryInterop) {
-        if (SUCCEEDED(saved.split.run(image)) &&
-            rune_win_blit_d3d_texture(image.device.Get(), saved.split.planes[0].Get(), image.width, image.height, yTexture) &&
-            rune_win_blit_d3d_texture(image.device.Get(), saved.split.planes[1].Get(), image.width / 2, image.height / 2, uvTexture)) {
-            copy->transferred_on_gpu = 1;
-            return 1;
+        RuneWinD3DBlit blits[2] = {
+            {saved.split.planes[0].Get(), image.width, image.height, yTexture},
+            {saved.split.planes[1].Get(), image.width / 2, image.height / 2, uvTexture},
+        };
+        if (SUCCEEDED(saved.split.run(image))) {
+            blits[0].texture = saved.split.planes[0].Get();
+            blits[1].texture = saved.split.planes[1].Get();
+            if (rune_win_blit_d3d_textures(image.device.Get(), blits, 2)) {
+                copy->transferred_on_gpu = 1;
+                return 1;
+            }
         }
         saved.tryInterop = false;
         saved.split = {};

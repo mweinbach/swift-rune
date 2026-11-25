@@ -13,6 +13,8 @@ RuneDXGIPresenter *rune_dxgi_open_cpu(HWND window, UINT wake);
 void rune_dxgi_close(RuneDXGIPresenter *presenter, int current);
 // 1 has a frame target, 0 is waiting for room, -1 returns the host to WGL.
 int rune_dxgi_prepare(RuneDXGIPresenter *presenter);
+// Arms the frame-latency wait for the next motion frame; returns 1 if already ready, 0 if wait is armed.
+int rune_dxgi_arm_next(RuneDXGIPresenter *presenter);
 int rune_dxgi_ready(RuneDXGIPresenter *presenter, ULONG_PTR token);
 int rune_dxgi_present(RuneDXGIPresenter *presenter, int width, int height, const int32_t *rects, int count);
 void rune_dxgi_report(const char *path, const char *detail, HRESULT result);

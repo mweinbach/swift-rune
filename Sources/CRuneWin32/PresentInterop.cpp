@@ -182,7 +182,11 @@ bool copyPixels(const Functions &gl, const FrameTarget &t, GLuint destination, c
         gl.blit(r.left, bottom, r.right, top, r.left, flip ? r.bottom : bottom,
                 r.right, flip ? r.top : top, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     }
-    bool copied = rune_lazy_glGetError() == GL_NO_ERROR;
+    static const bool checkErrors = [] {
+        wchar_t enabled[2];
+        return GetEnvironmentVariableW(L"RUNE_GL_CHECK_ERRORS", enabled, 2) == 1 && enabled[0] == L'1';
+    }();
+    bool copied = !checkErrors || rune_lazy_glGetError() == GL_NO_ERROR;
     rune_lazy_glReadBuffer(static_cast<GLenum>(readBuffer));
     rune_lazy_glDrawBuffer(static_cast<GLenum>(drawBuffer));
     gl.bindFB(readFramebuffer, static_cast<GLuint>(previousRead));

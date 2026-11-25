@@ -598,12 +598,6 @@ extension Runtime {
             return restoreSavedAndFallback()
         }
 
-        var keptMemoIds = cached.viewOnlyMemoIds
-        for rowMap in pass.virtualExpansion.builtVirtualRows.values {
-            for entry in rowMap.values {
-                keptMemoIds.formUnion(entry.memoIds)
-            }
-        }
         var evictMemoIds: Set<String> = []
         for (listPath, oldMap) in cached.virtualRowCache {
             let newMap = pass.virtualExpansion.builtVirtualRows[listPath] ?? [:]
@@ -611,8 +605,16 @@ extension Runtime {
                 evictMemoIds.formUnion(oldEntry.memoIds)
             }
         }
-        evictMemoIds.subtract(keptMemoIds)
-        self.memo.removeEntries(ids: evictMemoIds)
+        if !evictMemoIds.isEmpty {
+            var keptMemoIds = cached.viewOnlyMemoIds
+            for rowMap in pass.virtualExpansion.builtVirtualRows.values {
+                for entry in rowMap.values {
+                    keptMemoIds.formUnion(entry.memoIds)
+                }
+            }
+            evictMemoIds.subtract(keptMemoIds)
+            self.memo.removeEntries(ids: evictMemoIds)
+        }
 
         cached.expandedRootEl = pass.expandedRootEl
         cached.virtualExpansion = pass.virtualExpansion

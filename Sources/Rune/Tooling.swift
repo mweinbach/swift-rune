@@ -221,25 +221,14 @@ public struct ToolingArgs: Sendable, Equatable {
     public init() {}
 
     public var isHeadlessRequested: Bool {
-        snapPath != nil
-            || cpuBootDirectory != nil || cropKey != nil || parseError != nil
-            || treePath != nil
-            || htmlPath != nil
-            || (!isNative && (
-                scriptArg != nil
-                    || tracePath != nil
-                    || frameCount != nil
-                    || durationOverride != nil
-                    || durationAuto
-                    || outDir != nil
-                    || framesDir != nil
-            ))
-            || videoPath != nil
-            || stripPath != nil
-            || listScenes
-            || firstPixels
-            || listWindows
-            || desktopPath != nil
+        if snapPath != nil || cpuBootDirectory != nil || cropKey != nil || parseError != nil { return true }
+        if treePath != nil || htmlPath != nil || videoPath != nil || stripPath != nil || desktopPath != nil { return true }
+        if listScenes || firstPixels || listWindows { return true }
+        if !isNative {
+            if scriptArg != nil || tracePath != nil || frameCount != nil || durationOverride != nil { return true }
+            if durationAuto || outDir != nil || framesDir != nil { return true }
+        }
+        return false
     }
 
     public static func parseMarkTime(_ raw: String) -> ToolingMarkOffset? {

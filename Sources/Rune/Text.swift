@@ -1282,6 +1282,16 @@ public final class GlyphAtlas: @unchecked Sendable {
     private var portableGlyphCache: [PortableGlyphKey: (entry: Entry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
     private var iconCache: [IconKey: (entry: Entry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
     private var frameSequence: UInt64 = 0
+    #if os(Windows)
+    private struct LastWindowsMask {
+        let sourcePage: UInt16
+        let tile: SIMD4<Int32>
+        let bucket: UInt8
+        let lcd: Bool
+        let entry: Entry
+    }
+    private var lastWindowsMask: LastWindowsMask?
+    #endif
     #if os(WASI) && canImport(CRuneDesktopText)
     private var lastBrowserMask: (source: BrowserGlyphMask, rgb: UInt32, entry: Entry)?
     private var lastBrowserGeometry: (source: BrowserGlyphMask, white: [UInt8])?
@@ -1632,6 +1642,9 @@ public final class GlyphAtlas: @unchecked Sendable {
             baseGeneration = generation
         }
         frameSequence &+= 1
+        #if os(Windows)
+        lastWindowsMask = nil
+        #endif
         #if os(WASI) && canImport(CRuneDesktopText)
         lastBrowserMask = nil
         lastBrowserGeometry = nil
@@ -1687,21 +1700,32 @@ public final class GlyphAtlas: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         evictionCandidates.removeAll(keepingCapacity: true)
-        let f = frameSequence
-        portableGlyphCache = portableGlyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
-        iconCache = iconCache.filter { (f &- $0.value.lastFrame) <= 1 }
-        #if canImport(CoreText) && canImport(CoreGraphics)
-        glyphCache = glyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
+        #if os(Windows)
+        lastWindowsMask = nil
         #endif
-        colorGlyphCache = colorGlyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
-        var liveIndices = Set<UInt32>()
-        var totalBytes = 0
-        for v in colorGlyphCache.values {
-            liveIndices.insert(v.entry.index)
-            totalBytes += v.entry.rgba.count
+        let f = frameSequence
+        if !portableGlyphCache.isEmpty && portableGlyphCache.values.contains(where: { (f &- $0.lastFrame) > 1 }) {
+            portableGlyphCache = portableGlyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
         }
-        colorGlyphByIndex = colorGlyphByIndex.filter { liveIndices.contains($0.key) }
-        colorGlyphBytes = totalBytes
+        if !iconCache.isEmpty && iconCache.values.contains(where: { (f &- $0.lastFrame) > 1 }) {
+            iconCache = iconCache.filter { (f &- $0.value.lastFrame) <= 1 }
+        }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        if !glyphCache.isEmpty && glyphCache.values.contains(where: { (f &- $0.lastFrame) > 1 }) {
+            glyphCache = glyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
+        }
+        #endif
+        if !colorGlyphCache.isEmpty && colorGlyphCache.values.contains(where: { (f &- $0.lastFrame) > 1 }) {
+            colorGlyphCache = colorGlyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
+            var liveIndices = Set<UInt32>(minimumCapacity: colorGlyphCache.count)
+            var totalBytes = 0
+            for v in colorGlyphCache.values {
+                liveIndices.insert(v.entry.index)
+                totalBytes += v.entry.rgba.count
+            }
+            colorGlyphByIndex = colorGlyphByIndex.filter { liveIndices.contains($0.key) }
+            colorGlyphBytes = totalBytes
+        }
     }
 
     /// Current CPU bytes held by cached RGBA color glyphs (`#807`).
@@ -1844,13 +1868,85 @@ public final class GlyphAtlas: @unchecked Sendable {
         return Self.coveredRows(rows, columns: x..<(x + columns.count), stride: source.width, startY: y, pixels: source.texels)
     }
 
-    private static func coveredRows(_ rows: Range<Int>, columns: Range<Int>, stride: Int, startY: Int, pixels: [UInt8]) -> Range<Int>? {
-        func hasCoverage(_ row: Int) -> Bool {
-            let start = (startY + row) * stride + columns.lowerBound
-            return pixels[start..<(start + columns.count)].contains { $0 != 0 }
+    /// Precomputes per-column covered row bounds for a desktop tile under one lock so
+    /// adjacent graphemes sharing a 256px tile avoid repeated atlas locks and pixel scans.
+    internal func desktopTileColumnBounds(of entry: Entry, minRows: inout [UInt16], maxRows: inout [UInt16]) -> Bool {
+        guard entry.desktopTile == nil else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        let page = Int(entry.page)
+        guard page <= overflowPages.count else { return false }
+        let source = page == 0 ? pageZero : overflowPages[page - 1].atlas
+        let w = entry.pixelSize.x
+        let h = entry.pixelSize.y
+        let x0 = entry.pixelOrigin.x
+        let y0 = entry.pixelOrigin.y
+        guard w > 0, h > 0, h < Int(UInt16.max), x0 >= 0, y0 >= 0, x0 + w <= source.width,
+              (y0 + h - 1) * source.width + x0 + w <= source.texels.count else {
+            return false
         }
-        guard let first = rows.first(where: hasCoverage), let last = rows.last(where: hasCoverage) else { return nil }
-        return first..<(last + 1)
+        if minRows.count < w {
+            minRows = [UInt16](repeating: .max, count: w)
+            maxRows = [UInt16](repeating: 0, count: w)
+        } else {
+            minRows.withUnsafeMutableBufferPointer { dst in
+                for i in 0..<w { dst[i] = .max }
+            }
+            maxRows.withUnsafeMutableBufferPointer { dst in
+                for i in 0..<w { dst[i] = 0 }
+            }
+        }
+        let stride = source.width
+        source.texels.withUnsafeBufferPointer { srcBuf in
+            let base = srcBuf.baseAddress!
+            minRows.withUnsafeMutableBufferPointer { minBuf in
+                maxRows.withUnsafeMutableBufferPointer { maxBuf in
+                    let minPtr = minBuf.baseAddress!
+                    let maxPtr = maxBuf.baseAddress!
+                    for row in 0..<h {
+                        let rowPtr = base + (y0 + row) * stride + x0
+                        let r16 = UInt16(row)
+                        for col in 0..<w {
+                            if rowPtr[col] != 0 {
+                                if minPtr[col] == .max { minPtr[col] = r16 }
+                                maxPtr[col] = r16
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    private static func coveredRows(_ rows: Range<Int>, columns: Range<Int>, stride: Int, startY: Int, pixels: [UInt8]) -> Range<Int>? {
+        let colStart = columns.lowerBound
+        let colCount = columns.count
+        guard colCount > 0, !rows.isEmpty else { return nil }
+        return pixels.withUnsafeBufferPointer { buf -> Range<Int>? in
+            let base = buf.baseAddress!
+            var first: Int = -1
+            for row in rows {
+                let p = base + (startY + row) * stride + colStart
+                for c in 0..<colCount {
+                    if p[c] != 0 { first = row; break }
+                }
+                if first >= 0 { break }
+            }
+            guard first >= 0 else { return nil }
+            var last = first
+            var row = rows.upperBound - 1
+            while row > first {
+                let p = base + (startY + row) * stride + colStart
+                var hit = false
+                for c in 0..<colCount {
+                    if p[c] != 0 { hit = true; break }
+                }
+                if hit { last = row; break }
+                row -= 1
+            }
+            return first..<(last + 1)
+        }
     }
 
     #if os(WASI)
@@ -2011,14 +2107,14 @@ public final class GlyphAtlas: @unchecked Sendable {
             smoothing: smoothing
         )
         lock.lock()
-        if var cached = portableGlyphCache[key] {
+        if let index = portableGlyphCache.index(forKey: key) {
             accessCounter &+= 1
-            cached.lastUsed = accessCounter
-            cached.lastFrame = frameSequence
-            portableGlyphCache[key] = cached
-            touchLocked(page: cached.entry.page, texels: UInt32(cached.entry.pixelSize.x * cached.entry.pixelSize.y))
+            portableGlyphCache.values[index].lastUsed = accessCounter
+            portableGlyphCache.values[index].lastFrame = frameSequence
+            let entry = portableGlyphCache.values[index].entry
+            touchLocked(page: entry.page, texels: UInt32(entry.pixelSize.x * entry.pixelSize.y))
             lock.unlock()
-            return cached.entry
+            return entry
         }
         lock.unlock()
 
@@ -2334,14 +2430,14 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
         let key = IconKey(icon: icon, pixelSize: px, drawnSixtyFourths: q, mirrored: mirrored)
         lock.lock()
-        if var cached = iconCache[key] {
+        if let index = iconCache.index(forKey: key) {
             accessCounter &+= 1
-            cached.lastUsed = accessCounter
-            cached.lastFrame = frameSequence
-            iconCache[key] = cached
-            touchLocked(page: cached.entry.page, texels: UInt32(cached.entry.pixelSize.x * cached.entry.pixelSize.y))
+            iconCache.values[index].lastUsed = accessCounter
+            iconCache.values[index].lastFrame = frameSequence
+            let entry = iconCache.values[index].entry
+            touchLocked(page: entry.page, texels: UInt32(entry.pixelSize.x * entry.pixelSize.y))
             lock.unlock()
-            return cached.entry
+            return entry
         }
         lock.unlock()
 
@@ -2500,23 +2596,25 @@ public final class GlyphAtlas: @unchecked Sendable {
         let x1 = ax + side + 1
 
         func blitBordered(into texels: inout [UInt8], pageW: Int) {
-            // Zero outer gutter rows and top/bottom 1px transparent apron rows.
-            for gy in [ay - 1, ay, ay + px + 1, ay + side] {
-                let rowStart = gy * pageW
-                for col in x0..<x1 {
-                    texels[rowStart + col] = 0
+            let span = x1 - x0
+            texels.withUnsafeMutableBufferPointer { dstBuf in
+                coverage.withUnsafeBufferPointer { srcBuf in
+                    let dst = dstBuf.baseAddress!
+                    let src = srcBuf.baseAddress!
+                    // Zero outer gutter rows and top/bottom 1px transparent apron rows.
+                    (dst + (ay - 1) * pageW + x0).initialize(repeating: 0, count: span)
+                    (dst + ay * pageW + x0).initialize(repeating: 0, count: span)
+                    (dst + (ay + px + 1) * pageW + x0).initialize(repeating: 0, count: span)
+                    (dst + (ay + side) * pageW + x0).initialize(repeating: 0, count: span)
+                    for row in 0..<px {
+                        let line = (ay + 1 + row) * pageW
+                        dst[line + x0] = 0
+                        dst[line + ax] = 0
+                        (dst + line + ax + 1).update(from: src + row * px, count: px)
+                        dst[line + ax + 1 + px] = 0
+                        dst[line + ax + side] = 0
+                    }
                 }
-            }
-            for row in 0..<px {
-                let srcStart = row * px
-                let line = (ay + 1 + row) * pageW
-                texels[line + x0] = 0
-                texels[line + ax] = 0
-                for col in 0..<px {
-                    texels[line + ax + 1 + col] = coverage[srcStart + col]
-                }
-                texels[line + ax + 1 + px] = 0
-                texels[line + ax + side] = 0
             }
         }
 
@@ -2550,6 +2648,9 @@ public final class GlyphAtlas: @unchecked Sendable {
             savedMaskPlan = nil
         }
         let p16 = UInt16(page)
+        #if os(Windows)
+        lastWindowsMask = nil
+        #endif
         #if os(WASI) && canImport(CRuneDesktopText)
         if lastBrowserMask?.entry.page == p16 { lastBrowserMask = nil }
         browserWhiteRows.removeAll(keepingCapacity: true)
@@ -2603,35 +2704,58 @@ public final class GlyphAtlas: @unchecked Sendable {
     fileprivate func windowsMask(_ tile: SIMD4<Int32>, sourcePage: UInt16, bucket: UInt8, lcd: WindowsGlyphMask? = nil) -> Entry? {
         lock.lock()
         defer { lock.unlock() }
-        let key = PortableGlyphKey.windowsMask(sourcePage: sourcePage, tile: tile, bucket: bucket, lcd: lcd != nil)
-        if var cached = portableGlyphCache[key] {
+        let isLCD = lcd != nil
+        if let last = lastWindowsMask,
+           last.sourcePage == sourcePage && last.tile == tile && last.bucket == bucket && last.lcd == isLCD {
+            touchLocked(page: last.entry.page, texels: 0)
+            return last.entry
+        }
+        let key = PortableGlyphKey.windowsMask(sourcePage: sourcePage, tile: tile, bucket: bucket, lcd: isLCD)
+        if let index = portableGlyphCache.index(forKey: key) {
             accessCounter &+= 1
-            cached.lastUsed = accessCounter
-            cached.lastFrame = frameSequence
-            portableGlyphCache[key] = cached
-            touchLocked(page: cached.entry.page, texels: 0)
-            return cached.entry
+            portableGlyphCache.values[index].lastUsed = accessCounter
+            portableGlyphCache.values[index].lastFrame = frameSequence
+            let entry = portableGlyphCache.values[index].entry
+            touchLocked(page: entry.page, texels: 0)
+            lastWindowsMask = LastWindowsMask(sourcePage: sourcePage, tile: tile, bucket: bucket, lcd: isLCD, entry: entry)
+            return entry
         }
         let page = Int(sourcePage)
         guard page <= overflowPages.count else { return nil }
         let x = Int(tile.x), y = Int(tile.y), w = Int(tile.z), h = Int(tile.w)
         let table = WindowsTextGamma.tables[Int(bucket)]
-        let packedWidth = w * (lcd == nil ? 1 : 3)
+        let packedWidth = w * (isLCD ? 3 : 1)
         guard packedWidth + 2 <= targetWidth else { return nil }
-        var pixels: [UInt8]
+        let pixels: [UInt8]
         if let lcd {
             guard var rgb = lcd.rgb?(), rgb.count == packedWidth * h else { return nil }
-            for i in rgb.indices { rgb[i] = table[Int(rgb[i])] }
+            table.withUnsafeBufferPointer { lut in
+                rgb.withUnsafeMutableBufferPointer { buf in
+                    let lutPtr = lut.baseAddress!
+                    let p = buf.baseAddress!
+                    for i in 0..<buf.count { p[i] = lutPtr[Int(p[i])] }
+                }
+            }
             pixels = rgb
         } else {
-            pixels = []
-            pixels.reserveCapacity(w * h)
             let source = page == 0 ? pageZero : overflowPages[page - 1].atlas
             guard x >= 0, y >= 0, w > 0, h > 0, x + w <= source.width,
                   (y + h - 1) * source.width + x + w <= source.texels.count else { return nil }
-            for row in y..<(y + h) {
-                let start = row * source.width + x
-                for c in source.texels[start..<(start + w)] { pixels.append(table[Int(c)]) }
+            let srcWidth = source.width
+            pixels = [UInt8](unsafeUninitializedCapacity: w * h) { dstBuf, outCount in
+                source.texels.withUnsafeBufferPointer { srcBuf in
+                    table.withUnsafeBufferPointer { lut in
+                        let srcBase = srcBuf.baseAddress!
+                        let dstBase = dstBuf.baseAddress!
+                        let lutPtr = lut.baseAddress!
+                        for row in 0..<h {
+                            let s = srcBase + (y + row) * srcWidth + x
+                            let d = dstBase + row * w
+                            for col in 0..<w { d[col] = lutPtr[Int(s[col])] }
+                        }
+                    }
+                }
+                outCount = w * h
             }
         }
         touchLocked(page: sourcePage, texels: 0)
@@ -2640,6 +2764,7 @@ public final class GlyphAtlas: @unchecked Sendable {
                           page: placed.page, pixelOrigin: placed.origin)
         accessCounter &+= 1
         portableGlyphCache[key] = (entry, accessCounter, frameSequence)
+        lastWindowsMask = LastWindowsMask(sourcePage: sourcePage, tile: tile, bucket: bucket, lcd: isLCD, entry: entry)
         evictLRUIfNeededLocked()
         return entry
     }
@@ -2867,23 +2992,20 @@ public final class GlyphAtlas: @unchecked Sendable {
         bitmap: [UInt8]
     ) {
         let x0 = dstX - 1
-        let x1 = dstX + bw + 1
-        let topRow = (dstY - 1) * pageWidth
-        for c in x0..<x1 {
-            texels[topRow + c] = 0
-        }
-        for row in 0..<bh {
-            let srcStart = row * bw
-            let line = (dstY + row) * pageWidth
-            texels[line + x0] = 0
-            for col in 0..<bw {
-                texels[line + dstX + col] = bitmap[srcStart + col]
+        let span = bw + 2
+        texels.withUnsafeMutableBufferPointer { dstBuf in
+            bitmap.withUnsafeBufferPointer { srcBuf in
+                let dst = dstBuf.baseAddress!
+                let src = srcBuf.baseAddress!
+                (dst + (dstY - 1) * pageWidth + x0).initialize(repeating: 0, count: span)
+                for row in 0..<bh {
+                    let line = (dstY + row) * pageWidth
+                    dst[line + x0] = 0
+                    (dst + line + dstX).update(from: src + row * bw, count: bw)
+                    dst[line + dstX + bw] = 0
+                }
+                (dst + (dstY + bh) * pageWidth + x0).initialize(repeating: 0, count: span)
             }
-            texels[line + dstX + bw] = 0
-        }
-        let botRow = (dstY + bh) * pageWidth
-        for c in x0..<x1 {
-            texels[botRow + c] = 0
         }
     }
 
@@ -2893,6 +3015,9 @@ public final class GlyphAtlas: @unchecked Sendable {
         total += glyphCache.count
         #endif
         guard total > maxCachedEntries else { return }
+        #if os(Windows)
+        lastWindowsMask = nil
+        #endif
         if accessCounter < lastEvictionScan { evictionCandidates.removeAll(keepingCapacity: true) }
         while total > maxCachedEntries {
             if evictionCandidates.isEmpty { collectOldestGlyphsLocked(total: total) }
@@ -2954,12 +3079,11 @@ public final class GlyphAtlas: @unchecked Sendable {
     }
 
     private func cachedColorGlyphLocked(_ key: ColorGlyphKey) -> ColorGlyphEntry? {
-        guard var cached = colorGlyphCache[key] else { return nil }
+        guard let index = colorGlyphCache.index(forKey: key) else { return nil }
         accessCounter &+= 1
-        cached.lastUsed = accessCounter
-        cached.lastFrame = frameSequence
-        colorGlyphCache[key] = cached
-        return cached.entry
+        colorGlyphCache.values[index].lastUsed = accessCounter
+        colorGlyphCache.values[index].lastFrame = frameSequence
+        return colorGlyphCache.values[index].entry
     }
 
     private func storeColorGlyph(key: ColorGlyphKey?, size: SIMD2<Int>, bearing: SIMD2<Float>,
@@ -4438,7 +4562,9 @@ public final class TextSystem: @unchecked Sendable {
     public func pruneUnusedElisions() {
         lock.lock()
         let cur = elisionEpoch
-        elisionCache = elisionCache.filter { $0.value.epoch == cur }
+        if !elisionCache.isEmpty && elisionCache.values.contains(where: { $0.epoch != cur }) {
+            elisionCache = elisionCache.filter { $0.value.epoch == cur }
+        }
         lock.unlock()
     }
 
@@ -5021,8 +5147,9 @@ public final class TextSystem: @unchecked Sendable {
         )
         if !bypassCache {
             lock.lock()
-            if let cached = measureCache[key] {
-                measureCache[key] = (cached.size, layoutCommitSeq)
+            if let idx = measureCache.index(forKey: key) {
+                measureCache.values[idx].usedGeneration = layoutCommitSeq
+                let size = measureCache.values[idx].size
                 if effectiveStyle.wrap == .ellipsis || effectiveStyle.maxLines > 0, maxWidth != nil {
                     let eKey = ElisionKey(
                         text: key.text,
@@ -5034,13 +5161,12 @@ public final class TextSystem: @unchecked Sendable {
                         fontEpoch: key.fontEpoch,
                         langEpoch: TextLanguageRegistry.currentEpoch()
                     )
-                    if var entry = elisionCache[eKey] {
-                        entry.epoch = elisionEpoch
-                        elisionCache[eKey] = entry
+                    if let eIdx = elisionCache.index(forKey: eKey) {
+                        elisionCache.values[eIdx].epoch = elisionEpoch
                     }
                 }
                 lock.unlock()
-                return cached.size
+                return size
             }
             lock.unlock()
         }
@@ -5555,11 +5681,11 @@ public final class TextSystem: @unchecked Sendable {
 
         if let sKey {
             lock.lock()
-            if var cached = shapeCache[sKey],
-               cached.pages.isEmpty || glyphAtlas.retainPages(cached.pages, since: cached.atlasResets) {
-                cached.usedGeneration = layoutCommitSeq
-                shapeCache[sKey] = cached
-                if cached.shaped.elided != nil {
+            if let idx = shapeCache.index(forKey: sKey),
+               shapeCache.values[idx].pages.isEmpty || glyphAtlas.retainPages(shapeCache.values[idx].pages, since: shapeCache.values[idx].atlasResets) {
+                shapeCache.values[idx].usedGeneration = layoutCommitSeq
+                let shaped = shapeCache.values[idx].shaped
+                if shaped.elided != nil {
                     let eKey = ElisionKey(
                         text: sKey.text,
                         spans: spans,
@@ -5570,13 +5696,12 @@ public final class TextSystem: @unchecked Sendable {
                         fontEpoch: fEpoch,
                         langEpoch: lEpoch
                     )
-                    if var entry = elisionCache[eKey] {
-                        entry.epoch = elisionEpoch
-                        elisionCache[eKey] = entry
+                    if let eIdx = elisionCache.index(forKey: eKey) {
+                        elisionCache.values[eIdx].epoch = elisionEpoch
                     }
                 }
                 lock.unlock()
-                return painted(cached.shaped)
+                return painted(shaped)
             }
             lock.unlock()
         }
@@ -5688,10 +5813,9 @@ public final class TextSystem: @unchecked Sendable {
         }
 
         if let eKey, let cached = lock.withLock({ () -> CachedElision? in
-            guard var entry = elisionCache[eKey] else { return nil }
-            entry.epoch = elisionEpoch
-            elisionCache[eKey] = entry
-            return entry
+            guard let idx = elisionCache.index(forKey: eKey) else { return nil }
+            elisionCache.values[idx].epoch = elisionEpoch
+            return elisionCache.values[idx]
         }) {
             return emitGlyphs ? cutShape(cached.elision, glyphs: true) : cached.withoutGlyphs
         }
@@ -7422,16 +7546,21 @@ public final class TextSystem: @unchecked Sendable {
                 }
             }
             var storageKey = shapeKey
+            var upgradeExistingWidth = false
             if keep == .cached, glidePx == .zero, !authText.isEmpty {
                 let cached = lock.withLock { () -> TextLayoutBox? in
                     storageKey = layoutStorageKey(for: shapeKey, width: effectiveMaxW)
-                    guard let box = layoutCache[storageKey], Self.widthsMatch(box.maxWidth, effectiveMaxW),
-                          !emitGlyphs || box.hasGlyphs else { return nil }
+                    guard let box = layoutCache[storageKey], Self.widthsMatch(box.maxWidth, effectiveMaxW) else { return nil }
                     box.lastUsedCommit = layoutCommitSeq
-                    return box
+                    if !emitGlyphs || box.hasGlyphs { return box }
+                    upgradeExistingWidth = true
+                    return nil
                 }
-                if let cached, !emitGlyphs || glyphAtlas.retainPages(cached.desktopPages, since: cached.desktopAtlasResets) {
-                    return cached
+                if let cached {
+                    if !emitGlyphs || glyphAtlas.retainPages(cached.desktopPages, since: cached.desktopAtlasResets) {
+                        return cached
+                    }
+                    upgradeExistingWidth = true
                 }
             }
             var prepared = keep == .cached ? lock.withLock { preparedShapeCache[shapeKey] } : nil
@@ -7452,14 +7581,18 @@ public final class TextSystem: @unchecked Sendable {
                 }
                 #endif
                 // Probes can reuse a drawn shape at another width without retaining their
-                // own layout, native fonts or masks in the shared cache.
-                guard glidePx == .zero && countAsRebreak && !authText.isEmpty else { return box }
+                // own layout, native fonts or masks in the shared cache. Same-width paint fills
+                // upgrade the existing measured layout slot so subsequent commits reuse its glyphs.
+                guard glidePx == .zero && !authText.isEmpty && (countAsRebreak || (emitGlyphs && upgradeExistingWidth)) else { return box }
                 lock.withLock {
                     let priorLayout = layoutCache[storageKey]
+                    if !countAsRebreak {
+                        guard let priorLayout, Self.widthsMatch(priorLayout.maxWidth, effectiveMaxW) else { return }
+                    }
                     #if canImport(CRuneDesktopText) && !canImport(CoreText)
                     if let native {
                         preparedShapeCache[shapeKey] = native
-                        if let priorLayout, !Self.widthsMatch(priorLayout.maxWidth, effectiveMaxW) {
+                        if countAsRebreak, let priorLayout, !Self.widthsMatch(priorLayout.maxWidth, effectiveMaxW) {
                             _rebrokenCount += 1
                         }
                     }
@@ -7715,10 +7848,11 @@ public final class TextSystem: @unchecked Sendable {
         )
         if !bypassCache {
             lock.lock()
-            if let cached = measureCache[key] {
-                measureCache[key] = (cached.size, layoutCommitSeq)
+            if let idx = measureCache.index(forKey: key) {
+                measureCache.values[idx].usedGeneration = layoutCommitSeq
+                let size = measureCache.values[idx].size
                 lock.unlock()
-                return cached.size
+                return size
             }
             lock.unlock()
         }
@@ -7858,9 +7992,10 @@ public final class TextSystem: @unchecked Sendable {
                 ? (pill.icon?.size ?? 14) + pill.bareGap : pm.lead(icon: pill.icon != nil, style: pill.style)
             if !pill.isBare { trailWidths[pill.range.upperBound] = pm.trail(style: pill.style) }
         }
-        func leadExtra(atUTF8 offset: Int) -> Float { leadWidths[offset] ?? 0 }
-        func trailExtra(endingAtUTF8 offset: Int) -> Float { trailWidths[offset] ?? 0 }
+        func leadExtra(atUTF8 offset: Int) -> Float { leadWidths.isEmpty ? 0 : (leadWidths[offset] ?? 0) }
+        func trailExtra(endingAtUTF8 offset: Int) -> Float { trailWidths.isEmpty ? 0 : (trailWidths[offset] ?? 0) }
         func pillContaining(_ start: Int, _ end: Int) -> (idx: Int, pill: PillChip)? {
+            guard !validPills.isEmpty else { return nil }
             let i = partitionPoint(validPills) { $0.pill.range.upperBound <= start }
             guard i < validPills.count, validPills[i].pill.range.lowerBound <= start,
                   end <= validPills[i].pill.range.upperBound else { return nil }
@@ -7917,7 +8052,7 @@ public final class TextSystem: @unchecked Sendable {
         }
 
         // Split into raw lines on '\n' and wrap/ellipsis if requested.
-        var lines: [(utf8Start: Int, text: String, width: Float, isRTL: Bool, isParaLast: Bool, insets: SIMD2<Float>)] = []
+        var lines: [(utf8Start: Int, text: String, width: Float, isRTL: Bool, isParaLast: Bool, insets: SIMD2<Float>, paraStart: Int)] = []
         var portableTruncated = false
         let rawParagraphs = fullText.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
@@ -7940,7 +8075,7 @@ public final class TextSystem: @unchecked Sendable {
             let insets = style.blockInsetsPx(at: pIdx, scale: scale, rtl: isRTL) * invS
             let availableWidth = maxWidth.map { max(invS, $0 - insets.x - insets.y) }
             if para.isEmpty {
-                lines.append((cursorUTF8, "", 0, isRTL, true, insets))
+                lines.append((cursorUTF8, "", 0, isRTL, true, insets, cursorUTF8))
             } else if style.wrap == .wrap, let maxW = availableWidth {
                 let usePretty = pretty && !isRTL && style.align != .justified && style.maxLines == 0
                     && !style.family.isMonospace && !containsStrongRTL(para)
@@ -7952,7 +8087,7 @@ public final class TextSystem: @unchecked Sendable {
                             trailExtra(endingAtUTF8: byte + ch.utf8.count))
                 }
                 for (i, line) in wrapped.enumerated() {
-                    lines.append((cursorUTF8 + line.start, line.text, line.width, isRTL, i == wrapped.count - 1, insets))
+                    lines.append((cursorUTF8 + line.start, line.text, line.width, isRTL, i == wrapped.count - 1, insets, cursorUTF8))
                 }
             } else if style.wrap == .ellipsis, let maxW = availableWidth, maxW > 0 {
                 let chars = Array(para)
@@ -7963,7 +8098,7 @@ public final class TextSystem: @unchecked Sendable {
                 var u = cursorUTF8
                 var totalParaW: Float = 0
                 for ch in chars {
-                    let chBytes = String(ch).utf8.count
+                    let chBytes = ch.utf8.count
                     let w = leadExtra(atUTF8: u) + charAdvance(ch, atUTF8: u) + trailExtra(endingAtUTF8: u + chBytes)
                     chStarts.append(u)
                     chWidths.append(w)
@@ -7972,7 +8107,7 @@ public final class TextSystem: @unchecked Sendable {
                 }
                 chStarts.append(u)
                 if totalParaW <= maxW + 0.5 * invS {
-                    lines.append((cursorUTF8, para, totalParaW, isRTL, true, insets))
+                    lines.append((cursorUTF8, para, totalParaW, isRTL, true, insets, cursorUTF8))
                 } else {
                     portableTruncated = true
                     let ellW = charAdvance("…", atUTF8: cursorUTF8)
@@ -8032,27 +8167,27 @@ public final class TextSystem: @unchecked Sendable {
                         outStr = String(chars[0..<bestHead]) + "…" + String(chars[bestTail..<chars.count])
                         outW = bestW
                     }
-                    lines.append((cursorUTF8, outStr, outW, isRTL, true, insets))
+                    lines.append((cursorUTF8, outStr, outW, isRTL, true, insets, cursorUTF8))
                 }
             } else {
                 #if canImport(CRuneDesktopText) && !canImport(CoreText)
                 if style.wrap == .noWrap, style.maxLines == 0, let paragraphLayout {
-                    lines.append((cursorUTF8, para, paragraphLayout.width, isRTL, true, insets))
+                    lines.append((cursorUTF8, para, paragraphLayout.width, isRTL, true, insets, cursorUTF8))
                     continue
                 }
                 #endif
                 var w: Float = 0
                 var charUTF8 = cursorUTF8
                 for ch in para {
-                    let chBytes = String(ch).utf8.count
+                    let chBytes = ch.utf8.count
                     w += leadExtra(atUTF8: charUTF8) + charAdvance(ch, atUTF8: charUTF8) + trailExtra(endingAtUTF8: charUTF8 + chBytes)
                     charUTF8 += chBytes
                 }
-                lines.append((cursorUTF8, para, w, isRTL, true, insets))
+                lines.append((cursorUTF8, para, w, isRTL, true, insets, cursorUTF8))
             }
         }
         if lines.isEmpty {
-            lines = [(0, "", 0, false, true, .zero)]
+            lines = [(0, "", 0, false, true, .zero, 0)]
         }
         if style.maxLines > 0 && lines.count > style.maxLines {
             lines = Array(lines.prefix(style.maxLines))
@@ -8066,7 +8201,7 @@ public final class TextSystem: @unchecked Sendable {
                 var charUTF8 = last.utf8Start
                 var kept = ""
                 for ch in trimmed {
-                    let chBytes = String(ch).utf8.count
+                    let chBytes = ch.utf8.count
                     let chW = leadExtra(atUTF8: charUTF8) + charAdvance(ch, atUTF8: charUTF8) + trailExtra(endingAtUTF8: charUTF8 + chBytes)
                     if curW + chW + ellW > maxW { break }
                     kept.append(ch)
@@ -8090,22 +8225,67 @@ public final class TextSystem: @unchecked Sendable {
         }
 
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
-        let desktopLines = lines.enumerated().map { index, item -> DesktopTextLine? in
-            if let paragraph = paragraphLayouts[item.utf8Start], paragraph.text == item.text { return paragraph.line }
+        let canDeferMeasureFragments = !emitGlyphs && retain != .owned && validPills.isEmpty && !portableTruncated
+            && style.align != .justified && tabs.isEmpty && !style.wrapAnywhere
+        let hasInlineHeightSpans = needsSpanFonts && spanEntries.contains { $0.span.monospace || $0.span.size != nil }
+        var lineParaLayouts: [DesktopTextLine?] = []
+        lineParaLayouts.reserveCapacity(lines.count)
+        var desktopLines: [DesktopTextLine?] = []
+        desktopLines.reserveCapacity(lines.count)
+        var lineGrowth: [(over: Float, under: Float)] = []
+        lineGrowth.reserveCapacity(lines.count)
+        for (index, item) in lines.enumerated() {
+            let paraLine = paragraphLayouts[item.paraStart]?.line
+            lineParaLayouts.append(paraLine)
+            if let paragraph = paragraphLayouts[item.utf8Start], paragraph.text == item.text {
+                desktopLines.append(paragraph.line)
+                lineGrowth.append(paragraph.line.growth)
+                continue
+            }
             // A new width can leave some exact byte ranges in place. Their glyph order,
             // font fallback and masks remain valid for the same shape key.
             if let retained, retained.fragments.indices.contains(index), let fragment = retained.fragments[index],
                retained.ranges[index] == item.utf8Start..<(item.utf8Start + item.text.utf8.count) {
-                return fragment
+                desktopLines.append(fragment)
+                lineGrowth.append(fragment.growth)
+                continue
             }
-            return desktopLine(item.text, start: item.utf8Start, rtl: item.isRTL)
+            // During pure layout measurement (`emitGlyphs == false`), an LTR wrapped line
+            // already has exact character advances, strut metrics, and inline-box growth in its
+            // whole-paragraph layout; avoid building a separate native DirectWrite layout per
+            // wrapped line until the line is actually painted.
+            if canDeferMeasureFragments, !item.isRTL, let paraLine, !paraLine.cells.hasRTL {
+                desktopLines.append(nil)
+                if hasInlineHeightSpans {
+                    let range = item.utf8Start..<(item.utf8Start + item.text.utf8.count)
+                    lineGrowth.append(paraLine.inlineGrowth(for: range, spans: spanEntries,
+                        cutsCodePadding: cutsCodePadding, style: style, faceBoxes: faceBoxes))
+                } else {
+                    lineGrowth.append((0, 0))
+                }
+                continue
+            }
+            // When painting into a vertical raster window, lines completely outside the window
+            // only need their layout geometry (from `paraLine`), not a native per-line raster layout.
+            if emitGlyphs, let rasterWindow, validPills.isEmpty, !portableTruncated,
+               style.align != .justified, tabs.isEmpty, !item.isRTL,
+               let paraLine, !paraLine.cells.hasRTL, !hasInlineHeightSpans {
+                let estTop = Float(index) * lineH
+                if estTop + lineH * 2 < rasterWindow.lowerY || estTop - lineH > rasterWindow.upperY {
+                    desktopLines.append(nil)
+                    lineGrowth.append((0, 0))
+                    continue
+                }
+            }
+            let built = desktopLine(item.text, start: item.utf8Start, rtl: item.isRTL)
+            desktopLines.append(built)
+            lineGrowth.append(built?.growth ?? (over: 0, under: 0))
         }
         for i in lines.indices {
             if let line = desktopLines[i] { lines[i].width = line.width }
         }
-        let strutLine = desktopLines.lazy.compactMap { $0 }.first ?? blankStrut()
+        let strutLine = desktopLines.lazy.compactMap { $0 }.first ?? paragraphLayouts.values.first?.line ?? blankStrut()
         let strutBaselinePx = strutLine?.strutBaselinePx ?? lineH * scale * 0.78
-        let lineGrowth = desktopLines.map { $0?.growth ?? (over: 0, under: 0) }
         let grownBoxes: [InlineCodeBox.LineBox]
         let grownExtraPt: Float
         if lineGrowth.contains(where: { $0.over > 0 || $0.under > 0 }) {
@@ -8133,6 +8313,7 @@ public final class TextSystem: @unchecked Sendable {
                                          exact: style.exactLines, extraPt: grownExtraPt)
 
         var glyphs: [PositionedGlyph] = []
+        if emitGlyphs { glyphs.reserveCapacity(fullText.utf8.count) }
         var underlines: [SIMD4<Float>] = []
         var strikethroughs: [SIMD4<Float>] = []
         var rawBackgrounds: [(SIMD4<Float>, Color)] = []
@@ -8140,14 +8321,18 @@ public final class TextSystem: @unchecked Sendable {
         var pillChipsOut: [ShapedText.PillChipQuad] = []
         var inlineIconsOut: [ShapedText.InlineIconQuad] = []
         var lineRecords: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
+        lineRecords.reserveCapacity(lines.count)
         var bidiCells: [Int: [PortableCaretCell]] = [:]
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
         let restingText = emitGlyphs ? DesktopRestingText(glide: glidePx, cache: !bypassCache, rasterWindow: rasterWindow, atlas: glyphAtlas) : nil
         #endif
         var lineGlyphRanges: [Range<Int>] = []
+        lineGlyphRanges.reserveCapacity(lines.count)
 
         var baselinesPx: [Float] = []
+        baselinesPx.reserveCapacity(lines.count)
         var lineAdvancesPx: [(widthPx: Float, trailingWsPx: Float)] = []
+        lineAdvancesPx.reserveCapacity(lines.count)
         for (idx, item) in lines.enumerated() {
             let lineStartGlyphIdx = glyphs.count
             let lineTopPx = grownBoxes.isEmpty ? Float(idx) * lineH * scale : grownBoxes[idx].topPx
@@ -8169,7 +8354,7 @@ public final class TextSystem: @unchecked Sendable {
             func expands(_ character: Character) -> Bool { character == " " || character == "\u{00A0}" }
             if style.wrap == .wrap, maxWidth != nil {
                 #if canImport(CRuneDesktopText) && !canImport(CoreText)
-                nativeWidths = desktopLines[idx]?.cells
+                nativeWidths = desktopLines[idx]?.cells ?? lineParaLayouts[idx]?.cells
                 #endif
                 // Keep terminal whitespace at its authored advance, beyond the visible edge.
                 // A following inline box stops the whitespace from hanging.
@@ -8268,15 +8453,70 @@ public final class TextSystem: @unchecked Sendable {
                 lineAdvancesPx.append(((item.width + extraPerSpace * Float(spaces)) * scale, hanging * scale))
                 continue
             }
+            if emitGlyphs, validPills.isEmpty, let native, !native.cells.hasRTL {
+                let textBytes = item.text.utf8.count
+                var offsets = Array(repeating: Float.zero, count: textBytes + 1)
+                let baselineY = baselinePx * invS
+                let hasSpans = !spanEntries.isEmpty
+                var spanCursor = hasSpans ? partitionPoint(spanEntries) { $0.utf8Range.upperBound <= item.utf8Start } : 0
+                var lineTileCache = DesktopTextLine.LineTileCache()
+                withUnsafeMutablePointer(to: &lineTileCache) { cachePtr in
+                    for cell in native.cells.values {
+                        let chStart = cell.byte
+                        let chEnd = cell.byteEnd
+                        if paintNative {
+                            var spanColor: Color? = nil
+                            if hasSpans {
+                                while spanCursor < spanEntries.count && spanEntries[spanCursor].utf8Range.upperBound <= chStart {
+                                    spanCursor += 1
+                                }
+                                if spanCursor < spanEntries.count && spanEntries[spanCursor].utf8Range.contains(chStart) {
+                                    spanColor = spanEntries[spanCursor].span.color
+                                }
+                            }
+                            let cluster = native.clusterByte(for: cell)
+                            let ink = cluster == chStart ? spanColor : (hasSpans ? spanAt(utf8Offset: cluster)?.color : nil)
+                            if let ink { nativeColors[cluster] = ink }
+                            native.appendGlyphs(for: cell, originX: originX,
+                                baselineY: baselineY, color: ink,
+                                atlas: glyphAtlas, cache: !bypassCache, glidePx: glidePx,
+                                utf8Offset: cluster, rasterWindow: rasterWindow,
+                                tileCache: cachePtr, into: &glyphs)
+                        }
+                        let first = chStart - item.utf8Start, end = chEnd - item.utf8Start
+                        for byte in first..<end { offsets[byte] = cell.caret }
+                        if chEnd == lineEnd { offsets[end] = cell.endCaret }
+                    }
+                }
+                lineRecords.append((item.utf8Start, item.text, originY, originX, offsets))
+                if paintNative, let restingText {
+                    restingText.add(.init(native: native, originX: originX, baselineY: baselineY, colors: nativeColors), at: idx)
+                }
+                lineGlyphRanges.append(lineStartGlyphIdx..<glyphs.count)
+                lineAdvancesPx.append(((item.width + extraPerSpace * Float(spaces)) * scale, hanging * scale))
+                continue
+            }
+            if native == nil, validPills.isEmpty, (!emitGlyphs || rasterWindow != nil), let paraLine = lineParaLayouts[idx] {
+                let offsets = paraLine.sliceCharOffsets(for: item.text, utf8Start: item.utf8Start)
+                lineRecords.append((item.utf8Start, item.text, originY, originX, offsets))
+                lineGlyphRanges.append(lineStartGlyphIdx..<lineStartGlyphIdx)
+                lineAdvancesPx.append(((item.width + extraPerSpace * Float(spaces)) * scale, hanging * scale))
+                continue
+            }
             #endif
-            var charOffsets: [Float] = [0]
+            var charOffsets: [Float] = []
+            charOffsets.reserveCapacity(item.text.utf8.count + 1)
+            charOffsets.append(0)
             var penX: Float = 0
             var bytePos = item.utf8Start
             var pillBounds: [Int: (left: Float, right: Float, iconX: Float?)] = [:]
+            #if canImport(CRuneDesktopText) && !canImport(CoreText)
+            var lineTileCache = DesktopTextLine.LineTileCache()
+            #endif
 
             for ch in item.text {
                 let chStart = bytePos
-                let chBytes = String(ch).utf8.count
+                let chBytes = ch.utf8.count
                 let chEnd = chStart + chBytes
                 bytePos = chEnd
 
@@ -8376,9 +8616,13 @@ public final class TextSystem: @unchecked Sendable {
                         let cluster = native.clusterByte(for: nativeCell)
                         let ink = cluster == chStart ? spanColor : spanAt(utf8Offset: cluster)?.color
                         if let ink { nativeColors[cluster] = ink }
-                        glyphs += native.glyphs(for: nativeCell, originX: originX,
-                            baselineY: baselinePx * invS, color: ink,
-                            atlas: glyphAtlas, cache: !bypassCache, glidePx: glidePx, utf8Offset: cluster, rasterWindow: rasterWindow)
+                        withUnsafeMutablePointer(to: &lineTileCache) { cachePtr in
+                            native.appendGlyphs(for: nativeCell, originX: originX,
+                                baselineY: baselinePx * invS, color: ink,
+                                atlas: glyphAtlas, cache: !bypassCache, glidePx: glidePx,
+                                utf8Offset: cluster, rasterWindow: rasterWindow,
+                                tileCache: cachePtr, into: &glyphs)
+                        }
                     }
                     #endif
                     let paintBitmap = needsBitmapFont && (rasterWindow.map { band in

@@ -53,7 +53,7 @@ internal protocol LayoutTree: AnyObject {
     func cacheClear(_ node: NodeId)
     func cacheGet(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput?
     func cacheStore(_ node: NodeId, _ input: LayoutInput, _ output: LayoutOutput)
-    func measureLeafNode(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput
+    func measureLeafNode(_ node: NodeId, _ style: TaffyStyle, _ input: LayoutInput) -> LayoutOutput
 }
 
 // MARK: - Block Context for Margin Collapsing
@@ -86,8 +86,8 @@ extension Rect where T == LengthPercentageAuto {
     }
 }
 
-internal func computeRootLayout(
-    tree: any LayoutTree,
+internal func computeRootLayout<Tree: LayoutTree>(
+    tree: Tree,
     root: NodeId,
     availableSpace: Size<AvailableSpace>
 ) {
@@ -157,7 +157,7 @@ internal func computeRootLayout(
     tree.setUnroundedLayout(root, rootLayout)
 }
 
-internal func computeHiddenLayout(tree: any LayoutTree, node: NodeId) -> LayoutOutput {
+internal func computeHiddenLayout<Tree: LayoutTree>(tree: Tree, node: NodeId) -> LayoutOutput {
     tree.visitSubtree(node, inheriting: ()) { child, _ in
         tree.cacheClear(child)
         tree.setUnroundedLayout(child, .zero)
@@ -165,8 +165,8 @@ internal func computeHiddenLayout(tree: any LayoutTree, node: NodeId) -> LayoutO
     return .hidden
 }
 
-internal func computeNodeLayout(
-    tree: any LayoutTree,
+internal func computeNodeLayout<Tree: LayoutTree>(
+    tree: Tree,
     node: NodeId,
     input: LayoutInput,
     blockContext: UnsafeMutablePointer<BlockContext>? = nil
@@ -195,25 +195,26 @@ internal func computeNodeLayout(
             tree.containerDepth = grew ? 1 : nextDepth
             defer { tree.containerDepth = previousDepth }
             var out: LayoutOutput
+            var hasOutOfFlow = false
             switch style.display {
             case .block:
-                out = computeBlockLayout(tree: tree, node: node, input: input, blockContext: blockContext)
+                (out, hasOutOfFlow) = computeBlockLayout(tree: tree, node: node, style: style, input: input, blockContext: blockContext)
             case .flowRoot:
-                out = computeBlockLayout(tree: tree, node: node, input: input, blockContext: nil)
+                (out, hasOutOfFlow) = computeBlockLayout(tree: tree, node: node, style: style, input: input, blockContext: nil)
             case .flex:
-                out = computeFlexboxLayout(tree: tree, node: node, input: input)
+                (out, hasOutOfFlow) = computeFlexboxLayout(tree: tree, node: node, style: style, input: input)
             case .grid:
-                out = computeGridLayout(tree: tree, node: node, input: input)
+                (out, hasOutOfFlow) = computeGridLayout(tree: tree, node: node, style: style, input: input)
             case .none:
                 out = .hidden
             }
-            if input.runMode == .performLayout {
-                computeOutOfFlowLayout(tree: tree, node: node, containerOutput: &out)
+            if input.runMode == .performLayout && hasOutOfFlow {
+                computeOutOfFlowLayout(tree: tree, node: node, parentStyle: style, containerOutput: &out)
             }
             return out
         }
     case (_, false):
-        output = computeLeafLayout(tree: tree, node: node, input: input)
+        output = computeLeafLayout(tree: tree, node: node, style: style, input: input)
     }
 
     tree.cacheStore(node, input, output)
@@ -222,12 +223,12 @@ internal func computeNodeLayout(
 
 // MARK: - Leaf Layout
 
-internal func computeLeafLayout(
-    tree: any LayoutTree,
+internal func computeLeafLayout<Tree: LayoutTree>(
+    tree: Tree,
     node: NodeId,
+    style: TaffyStyle,
     input: LayoutInput
 ) -> LayoutOutput {
-    let style = tree.style(node)
     let parentSize = input.parentSize
     let padding = style.resolvedPadding(parentWidth: parentSize.width)
     let border = style.resolvedBorder(parentWidth: parentSize.width)
@@ -309,7 +310,7 @@ internal func computeLeafLayout(
         verticalMarginsAreCollapsible: input.verticalMarginsAreCollapsible
     )
 
-    let measured = tree.measureLeafNode(node, measureInput)
+    let measured = tree.measureLeafNode(node, style, measureInput)
     let measuredTotal = Size(
         width: measured.size.width + pbSum.width + scrollbarSize.width,
         height: measured.size.height + pbSum.height + scrollbarSize.height

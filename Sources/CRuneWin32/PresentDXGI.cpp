@@ -114,6 +114,8 @@ int rune_dxgi_prepare(RuneDXGIPresenter *p) {
     return 1;
 }
 
+int rune_dxgi_arm_next(RuneDXGIPresenter *p) { return p ? (p->queue.take() ? 1 : 0) : 1; }
+
 int rune_dxgi_ready(RuneDXGIPresenter *p, ULONG_PTR token) { return p && p->queue.awakened(token); }
 
 int rune_dxgi_present(RuneDXGIPresenter *p, int width, int height, const int32_t *rects, int count) {

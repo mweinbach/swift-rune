@@ -116,6 +116,14 @@ static void park_target(RuneGLLayers *layers, Target *t) {
     *t = (Target){0};
 }
 
+static void release_root_targets(RuneGLLayers *layers) {
+    release_target(layers, &layers->levels[0].target);
+    release_target(layers, &layers->blur[0]);
+    release_target(layers, &layers->blur[1]);
+    release_target(layers, &layers->spare);
+    release_target(layers, &layers->snapshot);
+}
+
 static void release_targets(RuneGLLayers *layers) {
     for (size_t i = 0; i < layers->capacity; i++) release_target(layers, &layers->levels[i].target);
     release_target(layers, &layers->blur[0]);
@@ -383,7 +391,7 @@ int rune_layers_frame(RuneGLLayers *layers, int width, int height, int srgb_blen
                       char *error, size_t capacity) {
     if (width <= 0 || height <= 0) return fail(error, capacity, "Empty Rune GL drawable");
     if (layers->width != width || layers->height != height) {
-        release_targets(layers);
+        release_root_targets(layers);
         layers->width = width;
         layers->height = height;
     }

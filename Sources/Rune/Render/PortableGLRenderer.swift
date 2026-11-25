@@ -14,10 +14,26 @@ private protocol GLAtlasPage {
 extension RGBA8Atlas: GLAtlasPage {}
 extension R8Atlas: GLAtlasPage {}
 
-/// The retained Swift arrays own the immutable bytes used for fallback diffing.
+private struct GLPageMeta {
+    var width: Int
+    var height: Int
+    var empty: Bool
+    var revision: UInt64?
+}
+
+private struct GLPage0Meta {
+    var width: Int
+    var height: Int
+    var revision: UInt64?
+    var srgb: Bool
+}
+
+/// Retains lightweight metadata for revision-tracked pages so producer atlases keep
+/// unique Swift CoW ownership and edit in-place. Retains `[Page]` byte snapshots only
+/// for untracked/legacy callers without revisions.
 private struct GLResidentPages<Page: GLAtlasPage> {
     var pages: [Page]?
-    var revisions: [UInt64] = []
+    var meta: [GLPageMeta] = []
     var srgb: Bool?
 }
 
@@ -75,16 +91,16 @@ internal final class PortableGLRenderer {
     private var referenceProgramReady = false
     private var referenceBlurReady = false
     private let layerCache = PortableGLLayerCache()
+    private var errorBuffer = [CChar](repeating: 0, count: 2048)
     private var previousGlyphs: R8Atlas?
+    private var previousGlyphMeta: GLPage0Meta?
     private var imagePages = GLResidentPages<RGBA8Atlas>()
     private var glyphPages = GLResidentPages<R8Atlas>()
-    private var previousGlyphRevision: UInt64?
-    private var previousImageRevision: UInt64?
     private static let emptyImagePage = RGBA8Atlas()
     private static let emptyGlyphPage = R8Atlas()
     private static let singlePageTable = [RGBA8Atlas()]
     private var previousImages: RGBA8Atlas?
-    private var previousImageSRGB: Bool?
+    private var previousImageMeta: GLPage0Meta?
 
     init(resolve: @escaping RuneGLResolve, isGLES: Bool, bundledShaderAssets: Bool = false,
          shaderSource: ((String) throws -> String)? = nil) throws {
@@ -167,9 +183,9 @@ internal final class PortableGLRenderer {
             referenceBlurReady = true
         }
         if !filledPages.isEmpty { forgetMaskPages() }
-        try Self.preparePages(scene.glyphPages, channels: 1, on: handle, cache: &glyphPages)
+        try Self.preparePages(scene.glyphPages, channels: 1, on: handle, cache: &glyphPages, error: &errorBuffer)
         try Self.preparePages(scene.imagePages.isEmpty ? Self.singlePageTable : scene.imagePages,
-                              channels: 4, srgb: !scene.srgbBlend, on: handle, cache: &imagePages)
+                              channels: 4, srgb: !scene.srgbBlend, on: handle, cache: &imagePages, error: &errorBuffer)
         try submit(width: scene.width, height: scene.height, clear: scene.clearColor,
                    srgbBlend: scene.srgbBlend, glyphs: scene.glyphAtlas(forPage: 0), images: scene.imageAtlas(forPage: 0),
                    instances: scene.primitives, surfaces: surfaces, production: false)
@@ -329,30 +345,53 @@ internal final class PortableGLRenderer {
         // R8 textures and their revision receipts available to the next resting frame.
         let canDeferGlyphs = frame.outlines != nil || frame.maskFills != nil || !frame.glyphPageFills.isEmpty
         let samplesGlyphs = !canDeferGlyphs || frame.usesGlyphAtlasMasks
-        let glyph = samplesGlyphs ? try prepareGlyphs(frame, on: handle) : previousGlyphs ?? Self.emptyGlyphPage
+        let glyphPrep: PreparedGlyphPage0
+        if samplesGlyphs {
+            glyphPrep = try prepareGlyphs(frame, on: handle)
+        } else if let meta = previousGlyphMeta {
+            glyphPrep = PreparedGlyphPage0(atlas: Self.emptyGlyphPage, width: meta.width, height: meta.height,
+                                           alreadyResidentOnGPU: true, revision: meta.revision, patch: nil)
+        } else {
+            glyphPrep = PreparedGlyphPage0(atlas: Self.emptyGlyphPage, width: Self.emptyGlyphPage.width,
+                                           height: Self.emptyGlyphPage.height, alreadyResidentOnGPU: false,
+                                           revision: nil, patch: nil)
+        }
         try bindOutlines(frame.outlines, on: handle)
         let pages = frame.imagePages.isEmpty && needsImageFallback ? Self.singlePageTable : frame.imagePages
         try Self.preparePages(pages, channels: 4, revisions: frame.imagePageRevisions, patches: frame.imagePagePatches,
-                              on: handle, cache: &imagePages)
+                              on: handle, cache: &imagePages, error: &errorBuffer)
         let first = frame.imagePages.first ?? frame.images
+        let firstEmpty = first.texels.isEmpty
         try submit(width: frame.width, height: frame.height, clear: clear, srgbBlend: frame.srgbBlend,
-                   glyphs: glyph.texels.isEmpty ? Self.emptyGlyphPage : glyph, images: first.texels.isEmpty ? Self.emptyImagePage : first,
+                   glyphs: glyphPrep.atlas, glyphWidthOverride: glyphPrep.width, glyphHeightOverride: glyphPrep.height,
+                   glyphAlreadyResident: glyphPrep.alreadyResidentOnGPU,
+                   images: firstEmpty ? Self.emptyImagePage : first,
                    instances: frame.instances,
-                   surfaces: frame.surfaces, production: true, glyphRevision: samplesGlyphs ? frame.glyphPageRevisions.first : previousGlyphRevision,
-                   glyphPatch: samplesGlyphs ? frame.glyphPagePatches.first ?? nil : nil, imageRevision: frame.imagePageRevisions.first,
-                   imagePatch: frame.imagePagePatches.first ?? frame.imagePatch)
+                   surfaces: frame.surfaces, production: true, glyphRevision: glyphPrep.revision,
+                   glyphPatch: glyphPrep.patch,
+                   imageRevision: firstEmpty ? nil : frame.imagePageRevisions.first,
+                   imagePatch: firstEmpty ? nil : (frame.imagePagePatches.first ?? frame.imagePatch))
+    }
+
+    private struct PreparedGlyphPage0 {
+        var atlas: R8Atlas
+        var width: Int
+        var height: Int
+        var alreadyResidentOnGPU: Bool
+        var revision: UInt64?
+        var patch: GlyphAtlasPatch?
     }
 
     private func forgetMaskPages() {
         filledPages.removeAll(keepingCapacity: true)
         glyphPages = GLResidentPages()
         previousGlyphs = nil
-        previousGlyphRevision = nil
+        previousGlyphMeta = nil
     }
 
     /// Direct draws can use outlines while resting glyphs sample this device's filled R8 pages.
     /// A different store, page recycle or replay of an older snapshot reloads the page.
-    private func prepareGlyphs(_ frame: RenderFrame, on handle: OpaquePointer) throws -> R8Atlas {
+    private func prepareGlyphs(_ frame: RenderFrame, on handle: OpaquePointer) throws -> PreparedGlyphPage0 {
         let plans: [OutlineMaskPlan?] = frame.glyphPageFills.isEmpty ? frame.maskFills.map { [$0] } ?? [] : frame.glyphPageFills
         if !maskFillsRefused, plans.contains(where: { $0 != nil }), rune_gl_outline_eligible(handle) != 0 {
             do {
@@ -361,7 +400,8 @@ internal final class PortableGLRenderer {
                 }
                 try Self.preparePages(frame.baseGlyphPages, channels: 1, revisions: frame.rawGlyphPageRevisions,
                                       patches: frame.rawGlyphPagePatches, maskFills: plans,
-                                      on: handle, cache: &glyphPages)
+                                      on: handle, cache: &glyphPages, error: &errorBuffer)
+                var filledPage0: OutlineMaskPlan?
                 for (page, plan) in plans.enumerated() {
                     guard let plan else { continue }
                     var patch: GlyphAtlasPatch?
@@ -370,11 +410,25 @@ internal final class PortableGLRenderer {
                         patch = frame.rawGlyphPagePatches[page]
                     }
                     try fillMasks(plan, page: page, patch: patch, on: handle)
-                    // Page zero is normally uploaded by submit(). This exact base has
-                    // already been uploaded and filled by the pass above.
-                    if page == 0 { previousGlyphs = plan.base }
+                    if page == 0 { filledPage0 = plan }
                 }
-                return frame.baseGlyphPages.first ?? frame.baseGlyphAtlas
+                if let plan0 = filledPage0 {
+                    // Page zero has already been uploaded and GPU-filled by fillMasks above.
+                    // Record only its dimensions so plan.base keeps unique CoW ownership.
+                    previousGlyphs = nil
+                    previousGlyphMeta = GLPage0Meta(width: plan0.base.width, height: plan0.base.height,
+                                                    revision: nil, srgb: false)
+                    return PreparedGlyphPage0(atlas: Self.emptyGlyphPage, width: plan0.base.width,
+                                              height: plan0.base.height, alreadyResidentOnGPU: true,
+                                              revision: nil, patch: nil)
+                }
+                let base0 = frame.baseGlyphPages.first ?? frame.baseGlyphAtlas
+                let empty = base0.texels.isEmpty
+                let resolved = empty ? Self.emptyGlyphPage : base0
+                return PreparedGlyphPage0(atlas: resolved, width: resolved.width, height: resolved.height,
+                                          alreadyResidentOnGPU: false,
+                                          revision: empty ? nil : frame.rawGlyphPageRevisions.first,
+                                          patch: empty ? nil : (frame.rawGlyphPagePatches.first ?? nil))
             } catch {
                 maskFillsRefused = true
                 forgetMaskPages()
@@ -384,8 +438,14 @@ internal final class PortableGLRenderer {
         if !filledPages.isEmpty { forgetMaskPages() }
         let materialized = frame.glyphPages
         try Self.preparePages(materialized, channels: 1, revisions: frame.glyphPageRevisions,
-                              patches: frame.glyphPagePatches, on: handle, cache: &glyphPages)
-        return materialized.first ?? frame.glyphs
+                              patches: frame.glyphPagePatches, on: handle, cache: &glyphPages, error: &errorBuffer)
+        let mat0 = materialized.first ?? frame.glyphs
+        let empty = mat0.texels.isEmpty
+        let resolved = empty ? Self.emptyGlyphPage : mat0
+        return PreparedGlyphPage0(atlas: resolved, width: resolved.width, height: resolved.height,
+                                  alreadyResidentOnGPU: false,
+                                  revision: empty ? nil : frame.glyphPageRevisions.first,
+                                  patch: empty ? nil : (frame.glyphPagePatches.first ?? nil))
     }
 
     private func prepareMaskProgram(unitWindfoil: Bool, on handle: OpaquePointer) -> Bool {
@@ -449,28 +509,53 @@ internal final class PortableGLRenderer {
         filledPages[page] = FilledPage(plan)
     }
 
-    /// Retain the immutable snapshots that own the comparison pointers. A copied frame shares
-    /// both table and texel storage until its producer changes a page.
+    /// Retain lightweight metadata for revision-tracked frames (preserving unique CoW
+    /// storage in the producer atlas) and retain immutable snapshots only for untracked callers.
     private static func preparePages<Page: GLAtlasPage>(
         _ pages: [Page], channels: Int32, revisions: [UInt64] = [], patches: [ImageAtlasPatch?] = [],
         maskFills: [OutlineMaskPlan?] = [],
-        srgb: Bool = true, on handle: OpaquePointer, cache: inout GLResidentPages<Page>
+        srgb: Bool = true, on handle: OpaquePointer, cache: inout GLResidentPages<Page>,
+        error: inout [CChar]
     ) throws {
-        if cache.srgb == srgb, let previous = cache.pages {
-            if previous.count == pages.count,
-               previous.withUnsafeBufferPointer({ old in
-                   pages.withUnsafeBufferPointer { old.baseAddress == $0.baseAddress }
-               }) {
-                cache.revisions = revisions
+        let tracked = !revisions.isEmpty && revisions.count == pages.count
+        if cache.srgb == srgb {
+            if tracked, cache.meta.count == pages.count {
+                var allMatch = true
+                for index in pages.indices.dropFirst() {
+                    if maskFills.indices.contains(index), maskFills[index] != nil { continue }
+                    let page = pages[index]
+                    let resident = cache.meta[index]
+                    if resident.empty != page.texels.isEmpty || resident.width != page.width ||
+                       resident.height != page.height || resident.revision != revisions[index] {
+                        allMatch = false
+                        break
+                    }
+                }
+                if allMatch {
+                    cache.pages = nil
+                    if !pages.isEmpty {
+                        cache.meta[0] = GLPageMeta(width: pages[0].width, height: pages[0].height,
+                                                   empty: pages[0].texels.isEmpty, revision: revisions[0])
+                    }
+                    return
+                }
+            } else if !tracked, let previous = cache.pages, previous.count == pages.count,
+                      previous.withUnsafeBufferPointer({ old in
+                          pages.withUnsafeBufferPointer { old.baseAddress == $0.baseAddress }
+                      }) {
                 return
             }
         }
-        var error = [CChar](repeating: 0, count: 512)
         let capacity = error.count
-        let old = cache.srgb == srgb ? cache.pages : nil
+        error[0] = 0
+        let oldPages = cache.srgb == srgb ? cache.pages : nil
+        let oldMeta = cache.srgb == srgb ? cache.meta : []
+        let oldCount = cache.srgb == srgb ? (oldPages?.count ?? oldMeta.count) : -1
         // A failed later page must cause a full retry, including any pages already uploaded.
         cache.pages = nil
-        if old?.count != pages.count {
+        cache.meta.removeAll(keepingCapacity: true)
+        cache.srgb = nil
+        if oldCount != pages.count {
             guard rune_gl_atlas_page_count(handle, channels, pages.count, &error, capacity) != 0 else {
                 throw RenderError(Self.message(error))
             }
@@ -478,25 +563,37 @@ internal final class PortableGLRenderer {
         for index in pages.indices.dropFirst() {
             if maskFills.indices.contains(index), maskFills[index] != nil { continue }
             let page = pages[index]
-            let previous = old.flatMap { $0.indices.contains(index) ? $0[index] : nil }
+            let prevMeta: GLPageMeta? = oldMeta.indices.contains(index) ? oldMeta[index] : nil
+            let prevPage: Page? = oldPages.flatMap { $0.indices.contains(index) ? $0[index] : nil }
+            let prevEmpty = prevMeta?.empty ?? prevPage?.texels.isEmpty ?? false
             if page.texels.isEmpty {
-                if previous?.texels.isEmpty == true { continue }
+                if prevEmpty { continue }
                 guard rune_gl_upload_atlas_page(handle, channels, index, 0, 0, srgb ? 1 : 0, nil, nil, &error, capacity) != 0 else {
                     throw RenderError(Self.message(error))
                 }
                 continue
             }
+            let rev: UInt64? = tracked ? revisions[index] : nil
+            let prevWidth = prevMeta?.width ?? prevPage?.width ?? 0
+            let prevHeight = prevMeta?.height ?? prevPage?.height ?? 0
+            let sameResident = (prevMeta != nil || prevPage != nil) && !prevEmpty &&
+                prevWidth == page.width && prevHeight == page.height
+            if sameResident, let rev, let prevRev = prevMeta?.revision, prevRev == rev {
+                continue
+            }
             let result = page.texels.withUnsafeBufferPointer { pixels in
-                if let previous, previous.width == page.width, previous.height == page.height, !previous.texels.isEmpty {
-                    return previous.texels.withUnsafeBufferPointer { before in
-                        if before.baseAddress == pixels.baseAddress { return true }
-                        if patches.indices.contains(index), let patch = patches[index],
-                           cache.revisions.indices.contains(index), patch.fromRevision == cache.revisions[index] {
-                            return Self.patchRegion(on: handle, channels: channels, page: index, width: Int32(page.width), height: Int32(page.height),
-                                                         patch: patch, current: pixels, error: &error)
+                if sameResident {
+                    if patches.indices.contains(index), let patch = patches[index],
+                       let prevRev = prevMeta?.revision, patch.fromRevision == prevRev {
+                        return Self.patchRegion(on: handle, channels: channels, page: index, width: Int32(page.width), height: Int32(page.height),
+                                                patch: patch, current: pixels, error: &error)
+                    }
+                    if let prevPage, !prevPage.texels.isEmpty {
+                        return prevPage.texels.withUnsafeBufferPointer { before in
+                            if before.baseAddress == pixels.baseAddress { return true }
+                            return rune_gl_upload_atlas_page(handle, channels, index, Int32(page.width), Int32(page.height), srgb ? 1 : 0,
+                                                             before.baseAddress, pixels.baseAddress, &error, capacity) != 0
                         }
-                        return rune_gl_upload_atlas_page(handle, channels, index, Int32(page.width), Int32(page.height), srgb ? 1 : 0,
-                                                         before.baseAddress, pixels.baseAddress, &error, capacity) != 0
                     }
                 }
                 return rune_gl_upload_atlas_page(handle, channels, index, Int32(page.width), Int32(page.height), srgb ? 1 : 0,
@@ -504,9 +601,16 @@ internal final class PortableGLRenderer {
             }
             guard result else { throw RenderError(Self.message(error)) }
         }
-        cache.pages = pages
+        cache.meta.reserveCapacity(pages.count)
+        for index in pages.indices {
+            let page = pages[index]
+            let isMasked = maskFills.indices.contains(index) && maskFills[index] != nil
+            cache.meta.append(GLPageMeta(width: page.width, height: page.height,
+                                         empty: page.texels.isEmpty,
+                                         revision: (tracked && !isMasked) ? revisions[index] : nil))
+        }
+        cache.pages = tracked ? nil : pages
         cache.srgb = srgb
-        cache.revisions = revisions
     }
 
     private static func patchRegion(on handle: OpaquePointer, channels: Int32, page: Int, width: Int32, height: Int32,
@@ -523,26 +627,30 @@ internal final class PortableGLRenderer {
         on handle: OpaquePointer, channels: Int32, width: Int32, height: Int32,
         previous: [UInt8]?, current: UnsafeBufferPointer<UInt8>, patch: ImageAtlasPatch? = nil, error: inout [CChar]
     ) -> Bool {
-        guard let previous else { return true } // Allocated or resized in the render call.
+        if let patch {
+            return patchRegion(on: handle, channels: channels, page: 0, width: width, height: height, patch: patch, current: current, error: &error)
+        }
+        guard let previous else { return true } // Allocated or resized in the render call, or revision-matched.
         let capacity = error.count
         return previous.withUnsafeBufferPointer { old in
             if old.baseAddress == current.baseAddress { return true }
-            if let patch {
-                return patchRegion(on: handle, channels: channels, page: 0, width: width, height: height, patch: patch, current: current, error: &error)
-            }
             return rune_gl_patch_atlas(handle, channels, width, height, old.baseAddress,
                                        current.baseAddress, &error, capacity) != 0
         }
     }
 
     private func submit<Instance>(width: Int, height: Int, clear: SIMD4<Float>, srgbBlend: Bool,
-                                  glyphs glyphAtlas: R8Atlas, images imageAtlas: RGBA8Atlas,
+                                  glyphs glyphAtlas: R8Atlas, glyphWidthOverride: Int? = nil,
+                                  glyphHeightOverride: Int? = nil, glyphAlreadyResident: Bool = false,
+                                  images imageAtlas: RGBA8Atlas,
                                   instances: [Instance], surfaces: [SurfaceDraw], production: Bool,
                                   glyphRevision: UInt64? = nil, glyphPatch: ImageAtlasPatch? = nil,
                                   imageRevision: UInt64? = nil, imagePatch: ImageAtlasPatch? = nil) throws {
         guard let handle else { throw RenderError("Rune GL renderer is closed") }
-        guard let glyphWidth = Int32(exactly: glyphAtlas.width),
-              let glyphHeight = Int32(exactly: glyphAtlas.height),
+        let gWidth = glyphWidthOverride ?? glyphAtlas.width
+        let gHeight = glyphHeightOverride ?? glyphAtlas.height
+        guard let glyphWidth = Int32(exactly: gWidth),
+              let glyphHeight = Int32(exactly: gHeight),
               let imageWidth = Int32(exactly: imageAtlas.width),
               let imageHeight = Int32(exactly: imageAtlas.height) else {
             throw RenderError("Rune atlas dimensions exceed the GL texture dimensions")
@@ -553,32 +661,82 @@ internal final class PortableGLRenderer {
         }
         let placements = try nativeSurfaces?.prepare(surfaces, srgbBlend: srgbBlend) ?? []
         let imageSRGB = production || !srgbBlend
-        let oldGlyphs = previousGlyphs.flatMap {
-            $0.width == glyphAtlas.width && $0.height == glyphAtlas.height ? $0.texels : nil
+
+        let glyphFullUpload: Bool
+        let trustedGlyphPatch: ImageAtlasPatch?
+        let oldGlyphs: [UInt8]?
+        if glyphAlreadyResident {
+            glyphFullUpload = false
+            trustedGlyphPatch = nil
+            oldGlyphs = nil
+        } else if let prev = previousGlyphMeta, prev.width == gWidth, prev.height == gHeight, !prev.srgb {
+            if let rev = glyphRevision, let prevRev = prev.revision, rev == prevRev {
+                glyphFullUpload = false
+                trustedGlyphPatch = nil
+                oldGlyphs = nil
+            } else if let patch = glyphPatch, let prevRev = prev.revision, patch.fromRevision == prevRev {
+                glyphFullUpload = false
+                trustedGlyphPatch = patch
+                oldGlyphs = nil
+            } else if let old = previousGlyphs, old.width == gWidth, old.height == gHeight {
+                glyphFullUpload = false
+                trustedGlyphPatch = nil
+                oldGlyphs = old.texels
+            } else {
+                glyphFullUpload = true
+                trustedGlyphPatch = nil
+                oldGlyphs = nil
+            }
+        } else {
+            glyphFullUpload = true
+            trustedGlyphPatch = nil
+            oldGlyphs = nil
         }
-        let oldImages = previousImages.flatMap {
-            $0.width == imageAtlas.width && $0.height == imageAtlas.height && previousImageSRGB == imageSRGB
-                ? $0.texels : nil
+
+        let imageFullUpload: Bool
+        let trustedPatch: ImageAtlasPatch?
+        let oldImages: [UInt8]?
+        if let prev = previousImageMeta, prev.width == imageAtlas.width, prev.height == imageAtlas.height, prev.srgb == imageSRGB {
+            if let rev = imageRevision, let prevRev = prev.revision, rev == prevRev {
+                imageFullUpload = false
+                trustedPatch = nil
+                oldImages = nil
+            } else if let patch = imagePatch, let prevRev = prev.revision, patch.fromRevision == prevRev {
+                imageFullUpload = false
+                trustedPatch = patch
+                oldImages = nil
+            } else if let old = previousImages, old.width == imageAtlas.width, old.height == imageAtlas.height {
+                imageFullUpload = false
+                trustedPatch = nil
+                oldImages = old.texels
+            } else {
+                imageFullUpload = true
+                trustedPatch = nil
+                oldImages = nil
+            }
+        } else {
+            imageFullUpload = true
+            trustedPatch = nil
+            oldImages = nil
         }
-        var error = [CChar](repeating: 0, count: 2048)
-        let capacity = error.count
-        let trustedGlyphPatch = glyphPatch.flatMap { $0.fromRevision == previousGlyphRevision ? $0 : nil }
-        let trustedPatch = imagePatch.flatMap { $0.fromRevision == previousImageRevision ? $0 : nil }
+
+        let capacity = errorBuffer.count
+        errorBuffer[0] = 0
         let render = production ? rune_gl_render_frame : rune_gl_render_surfaces
         let result = instances.withUnsafeBytes { raw in
             placements.withUnsafeBufferPointer { draws in
                 glyphAtlas.texels.withUnsafeBufferPointer { glyphs in
                     imageAtlas.texels.withUnsafeBufferPointer { images in
                         guard Self.patchAtlas(on: handle, channels: 1, width: glyphWidth, height: glyphHeight,
-                                              previous: oldGlyphs, current: glyphs, patch: trustedGlyphPatch, error: &error),
+                                              previous: oldGlyphs, current: glyphs, patch: trustedGlyphPatch, error: &errorBuffer),
                               Self.patchAtlas(on: handle, channels: 4, width: imageWidth, height: imageHeight,
-                                              previous: oldImages, current: images, patch: trustedPatch, error: &error) else { return Int32(0) }
+                                              previous: oldImages, current: images, patch: trustedPatch, error: &errorBuffer) else { return Int32(0) }
                         return withUnsafeBytes(of: clear) { color in
                             render(handle, Int32(width), Int32(height), color.bindMemory(to: Float.self).baseAddress,
                                    srgbBlend ? 1 : 0, raw.baseAddress, instances.count,
-                                   oldGlyphs == nil ? glyphs.baseAddress : nil, glyphWidth, glyphHeight,
-                                   oldImages == nil ? images.baseAddress : nil, imageWidth, imageHeight,
-                                   draws.baseAddress, draws.count, &error, capacity)
+                                   glyphFullUpload ? glyphs.baseAddress : nil, glyphWidth, glyphHeight,
+                                   imageFullUpload ? images.baseAddress : nil, imageWidth, imageHeight,
+                                   draws.baseAddress, draws.count, &errorBuffer, capacity)
                         }
                     }
                 }
@@ -586,14 +744,15 @@ internal final class PortableGLRenderer {
         }
         guard result != 0 else {
             forgetAtlasSnapshots()
-            throw RenderError(Self.message(error))
+            throw RenderError(Self.message(errorBuffer))
         }
         nativeSurfaces?.didSubmit()
-        previousGlyphs = glyphAtlas
-        previousGlyphRevision = glyphRevision
-        previousImages = imageAtlas
-        previousImageRevision = imageRevision
-        previousImageSRGB = imageSRGB
+        if !glyphAlreadyResident {
+            previousGlyphMeta = GLPage0Meta(width: gWidth, height: gHeight, revision: glyphRevision, srgb: false)
+            previousGlyphs = glyphRevision == nil ? glyphAtlas : nil
+        }
+        previousImageMeta = GLPage0Meta(width: imageAtlas.width, height: imageAtlas.height, revision: imageRevision, srgb: imageSRGB)
+        previousImages = imageRevision == nil ? imageAtlas : nil
     }
 
     #if os(Linux) || os(Android)
@@ -606,10 +765,9 @@ internal final class PortableGLRenderer {
         glyphPages = GLResidentPages()
         imagePages = GLResidentPages()
         previousGlyphs = nil
+        previousGlyphMeta = nil
         previousImages = nil
-        previousGlyphRevision = nil
-        previousImageRevision = nil
-        previousImageSRGB = nil
+        previousImageMeta = nil
     }
 
     func close() {

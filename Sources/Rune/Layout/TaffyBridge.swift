@@ -172,6 +172,13 @@ enum TaffyBridge {
         )
     }
 
+    private static let runeDefaultStyle: RuneTaffy.TaffyStyle = {
+        var ts = RuneTaffy.TaffyStyle.runeBase(.row)
+        ts.alignItems = .stretch
+        ts.justifyContent = .flexStart
+        return ts
+    }()
+
     static func toTaffyStyle(
         _ style: LayoutStyle,
         parentAreas: [String: RuneTaffy.GridTemplateArea]? = nil,
@@ -179,13 +186,13 @@ enum TaffyBridge {
         scrollXChild: ScrollXChild? = nil,
         forceScrollXRow: Bool = false
     ) -> RuneTaffy.TaffyStyle {
-        var ts = RuneTaffy.TaffyStyle()
+        var ts = runeDefaultStyle
 
         if style.displayNone {
             ts.display = .none
-        } else {
+        } else if style.displayMode != .flex {
             switch style.displayMode {
-            case .flex: ts.display = .flex
+            case .flex: break
             case .grid: ts.display = .grid
             case .block: ts.display = .block
             }
@@ -195,77 +202,127 @@ enum TaffyBridge {
             ts.position = .absolute
         } else if style.sticky != nil {
             ts.position = .sticky
-        } else {
-            ts.position = .relative
         }
 
-        ts.boxSizing = style.boxSizingBorderBox ? .borderBox : .contentBox
+        if !style.boxSizingBorderBox {
+            ts.boxSizing = .contentBox
+        }
 
-        let ox: RuneTaffy.Overflow = style.scrollAxes.contains(.horizontal)
-            ? .scroll
-            : (style.clipOverflow ? .hidden : .visible)
-        let oy: RuneTaffy.Overflow = style.scrollAxes.contains(.vertical)
-            ? .scroll
-            : (style.clipOverflow ? .hidden : .visible)
-        ts.overflow = RuneTaffy.Point(x: ox, y: oy)
-        ts.scrollbarWidth = max(0, style.scrollbarWidth)
+        if !style.scrollAxes.isEmpty || style.clipOverflow {
+            let ox: RuneTaffy.Overflow = style.scrollAxes.contains(.horizontal)
+                ? .scroll
+                : (style.clipOverflow ? .hidden : .visible)
+            let oy: RuneTaffy.Overflow = style.scrollAxes.contains(.vertical)
+                ? .scroll
+                : (style.clipOverflow ? .hidden : .visible)
+            ts.overflow = RuneTaffy.Point(x: ox, y: oy)
+        }
+        if style.scrollbarWidth > 0 {
+            ts.scrollbarWidth = style.scrollbarWidth
+        }
 
-        ts.size = RuneTaffy.Size(width: mapDimension(style.width), height: mapDimension(style.height))
-        ts.minSize = RuneTaffy.Size(width: mapDimension(style.minWidth), height: mapDimension(style.minHeight))
-        ts.maxSize = RuneTaffy.Size(width: mapDimension(style.maxWidth), height: mapDimension(style.maxHeight))
+        if style.width != .auto || style.height != .auto {
+            ts.size = RuneTaffy.Size(width: mapDimension(style.width), height: mapDimension(style.height))
+        }
+        if style.minWidth != .auto || style.minHeight != .auto {
+            ts.minSize = RuneTaffy.Size(width: mapDimension(style.minWidth), height: mapDimension(style.minHeight))
+        }
+        if style.maxWidth != .auto || style.maxHeight != .auto {
+            ts.maxSize = RuneTaffy.Size(width: mapDimension(style.maxWidth), height: mapDimension(style.maxHeight))
+        }
         if let ratio = style.aspectRatio, ratio.isFinite, ratio > 0 {
             ts.aspectRatio = ratio
         }
 
-        ts.margin = RuneTaffy.Rect(
-            left: .length(style.margin.left),
-            right: .length(style.margin.right),
-            top: .length(style.margin.top),
-            bottom: .length(style.margin.bottom)
-        )
-        ts.padding = RuneTaffy.Rect(
-            left: .length(max(0, style.padding.left)),
-            right: .length(max(0, style.padding.right)),
-            top: .length(max(0, style.padding.top)),
-            bottom: .length(max(0, style.padding.bottom))
-        )
+        if style.margin.left != 0 || style.margin.right != 0 || style.margin.top != 0 || style.margin.bottom != 0 {
+            ts.margin = RuneTaffy.Rect(
+                left: .length(style.margin.left),
+                right: .length(style.margin.right),
+                top: .length(style.margin.top),
+                bottom: .length(style.margin.bottom)
+            )
+        }
+        if style.padding.left > 0 || style.padding.right > 0 || style.padding.top > 0 || style.padding.bottom > 0 {
+            ts.padding = RuneTaffy.Rect(
+                left: .length(max(0, style.padding.left)),
+                right: .length(max(0, style.padding.right)),
+                top: .length(max(0, style.padding.top)),
+                bottom: .length(max(0, style.padding.bottom))
+            )
+        }
         let b = borderOverride ?? style.border
-        ts.border = RuneTaffy.Rect(
-            left: .length(max(0, b.left)),
-            right: .length(max(0, b.right)),
-            top: .length(max(0, b.top)),
-            bottom: .length(max(0, b.bottom))
-        )
-        ts.inset = RuneTaffy.Rect(
-            left: style.pinLeft.map { .length($0) } ?? .auto,
-            right: style.pinRight.map { .length($0) } ?? .auto,
-            top: style.pinTop.map { .length($0) } ?? .auto,
-            bottom: style.pinBottom.map { .length($0) } ?? .auto
-        )
-        ts.gap = RuneTaffy.Size(
-            width: .length(max(0, style.columnGap)),
-            height: .length(max(0, style.rowGap))
-        )
+        if b.left > 0 || b.right > 0 || b.top > 0 || b.bottom > 0 {
+            ts.border = RuneTaffy.Rect(
+                left: .length(max(0, b.left)),
+                right: .length(max(0, b.right)),
+                top: .length(max(0, b.top)),
+                bottom: .length(max(0, b.bottom))
+            )
+        }
+        if style.pinLeft != nil || style.pinRight != nil || style.pinTop != nil || style.pinBottom != nil {
+            ts.inset = RuneTaffy.Rect(
+                left: style.pinLeft.map { .length($0) } ?? .auto,
+                right: style.pinRight.map { .length($0) } ?? .auto,
+                top: style.pinTop.map { .length($0) } ?? .auto,
+                bottom: style.pinBottom.map { .length($0) } ?? .auto
+            )
+        }
+        if style.columnGap > 0 || style.rowGap > 0 {
+            ts.gap = RuneTaffy.Size(
+                width: .length(max(0, style.columnGap)),
+                height: .length(max(0, style.rowGap))
+            )
+        }
 
-        ts.wholeRows = style.wholeRows
-        ts.flexDirection = forceScrollXRow ? .row : mapDirection(style.direction)
-        ts.flexWrap = style.wrapReverse ? .wrapReverse : (style.wrap ? .wrap : .noWrap)
-        ts.flexGrow = max(0, style.flexGrow)
-        ts.flexShrink = max(0, style.flexShrink)
-        ts.flexBasis = mapDimension(style.flexBasis)
+        if style.wholeRows {
+            ts.wholeRows = true
+        }
+        if !forceScrollXRow && style.direction != .row {
+            ts.flexDirection = mapDirection(style.direction)
+        }
+        if style.wrapReverse {
+            ts.flexWrap = .wrapReverse
+        } else if style.wrap {
+            ts.flexWrap = .wrap
+        }
+        if style.flexGrow > 0 {
+            ts.flexGrow = style.flexGrow
+        }
+        if style.flexShrink > 0 {
+            ts.flexShrink = style.flexShrink
+        }
+        if style.flexBasis != .auto {
+            ts.flexBasis = mapDimension(style.flexBasis)
+        }
 
-        ts.alignItems = mapAlignItems(style.alignItems)
-        ts.alignSelf = style.alignSelf.map(mapAlignItems)
-        ts.justifyContent = mapJustifyContent(style.justifyContent)
-        ts.alignContent = style.alignContent.map(mapJustifyContent)
+        if style.alignItems != .stretch {
+            ts.alignItems = mapAlignItems(style.alignItems)
+        }
+        if let alignSelf = style.alignSelf {
+            ts.alignSelf = mapAlignItems(alignSelf)
+        }
+        if style.justifyContent != .start {
+            ts.justifyContent = mapJustifyContent(style.justifyContent)
+        }
+        if let alignContent = style.alignContent {
+            ts.alignContent = mapJustifyContent(alignContent)
+        }
 
         if style.displayMode == .grid, let g = style.grid {
-            ts.gridTemplateColumns = g.templateColumns.map { .single(mapTrack($0)) }
-            ts.gridTemplateRows = g.templateRows.map { .single(mapTrack($0)) }
-            ts.gridAutoColumns = g.autoColumns.map(mapTrack)
-            ts.gridAutoRows = g.autoRows.map(mapTrack)
+            if !g.templateColumns.isEmpty {
+                ts.gridTemplateColumns = g.templateColumns.map { .single(mapTrack($0)) }
+            }
+            if !g.templateRows.isEmpty {
+                ts.gridTemplateRows = g.templateRows.map { .single(mapTrack($0)) }
+            }
+            if !g.autoColumns.isEmpty {
+                ts.gridAutoColumns = g.autoColumns.map(mapTrack)
+            }
+            if !g.autoRows.isEmpty {
+                ts.gridAutoRows = g.autoRows.map(mapTrack)
+            }
             switch g.autoFlow {
-            case .row: ts.gridAutoFlow = .row
+            case .row: break
             case .column: ts.gridAutoFlow = .column
             case .rowDense: ts.gridAutoFlow = .rowDense
             case .columnDense: ts.gridAutoFlow = .columnDense
@@ -273,8 +330,10 @@ enum TaffyBridge {
             ts.justifyItems = mapAlignItems(g.justifyItems)
             ts.justifyContent = mapJustifyContent(g.justifyContent)
             ts.alignContent = mapJustifyContent(g.alignContent)
-            let areaMap = mapGridAreas(g.templateAreas)
-            ts.gridTemplateAreas = Array(areaMap.values)
+            if !g.templateAreas.isEmpty {
+                let areaMap = mapGridAreas(g.templateAreas)
+                ts.gridTemplateAreas = Array(areaMap.values)
+            }
         } else if style.alignContent == nil, let g = style.grid {
             ts.alignContent = mapJustifyContent(g.alignContent)
         }

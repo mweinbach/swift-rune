@@ -232,6 +232,7 @@ extension Runtime {
 
     internal func resolvedShadows(for nid: NodeId, authored: [Shadow]) -> [Shadow] {
         guard !authored.isEmpty else { return [] }
+        guard !shadowTrackCounts.isEmpty, shadowTrackCounts[nid] != nil else { return authored }
         return authored.enumerated().map { k, sh in
             guard k < Self.maxTrackedShadows else { return sh }
             let geomProp = Self.shadowGeomProp(k)
@@ -267,6 +268,9 @@ extension Runtime {
     internal func paintPoseSpringing(for nid: NodeId, shadowCount: Int) -> Bool {
         if scene.store.isMoving(nid, Props.ICON_TURN) {
             return true
+        }
+        guard shadowCount > 0, !shadowTrackCounts.isEmpty, shadowTrackCounts[nid] != nil else {
+            return false
         }
         let tracked = min(shadowCount, Self.maxTrackedShadows)
         for k in 0..<tracked {

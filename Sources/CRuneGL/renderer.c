@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { primitive_slots = 9, primitive_floats = 36 };
+enum { primitive_slots = 9, primitive_floats = 36, instance_ring_slots = 3 };
 #define PRIMITIVE_BYTES (primitive_floats * sizeof(float))
 
 typedef struct {
@@ -31,11 +31,15 @@ struct RuneGL {
     RuneGLProduction *production, *outline_program, *lcd_program, *mask_program, *unit_mask_program, *common_program;
     GLuint outline_texture;
     int outline_rows, use_outlines, use_lcd, opaque_root;
-    GLuint glyph_fill_target, glyph_fill_buffer;
+    GLuint glyph_fill_target, glyph_fill_attached, glyph_fill_buffer;
+    size_t glyph_fill_capacity;
     RuneGLFrameSprings springs;
     RuneGLEffectHook effect_hook;
     void *effect_user;
-    GLuint program, vao, instance_buffer;
+    GLuint program, vao;
+    GLuint instance_buffers[instance_ring_slots];
+    size_t instance_capacities[instance_ring_slots];
+    unsigned instance_slot;
     size_t spring_instance_count;
     int reuse_spring_instances;
     RuneDamageHistory damage;
@@ -43,7 +47,7 @@ struct RuneGL {
     int32_t last_rects[16];
     GLint viewport_uniform;
     GLint max_texture_size;
-    int es, drawing;
+    int es, drawing, check_errors;
     Atlas glyphs, images;
     GLuint empty_image;
     AtlasPages glyph_pages, image_pages;
@@ -168,6 +172,8 @@ RuneGL *rune_gl_create_device(RuneGLResolve resolve, const char *fullscreen, con
         return NULL;
     }
     r->last_damage = -1;
+    const char *check_env = getenv("RUNE_GL_CHECK_ERRORS");
+    r->check_errors = check_env && strcmp(check_env, "1") == 0;
     RuneGLAPI *gl = &r->gl;
     if (!rune_gl_load_api(gl, resolve, error, size)) {
         free(r);
@@ -187,7 +193,7 @@ RuneGL *rune_gl_create_device(RuneGLResolve resolve, const char *fullscreen, con
         goto failure;
     }
     gl->GetIntegerv(GL_MAX_TEXTURE_SIZE, &r->max_texture_size);
-    gl->GenBuffers(1, &r->instance_buffer);
+    gl->GenBuffers(instance_ring_slots, r->instance_buffers);
     set_atlas_params(gl, &r->glyphs);
     set_atlas_params(gl, &r->images);
     r->layers = rune_layers_create(gl, r->es, fullscreen, layer, error, size);
@@ -423,7 +429,9 @@ void rune_gl_destroy(RuneGL *r) {
     if (r->layers) rune_layers_destroy(r->layers);
     if (r->program) r->gl.DeleteProgram(r->program);
     if (r->vao) r->gl.DeleteVertexArrays(1, &r->vao);
-    if (r->instance_buffer) r->gl.DeleteBuffers(1, &r->instance_buffer);
+    for (int i = 0; i < instance_ring_slots; ++i) {
+        if (r->instance_buffers[i]) r->gl.DeleteBuffers(1, &r->instance_buffers[i]);
+    }
     if (r->glyphs.texture) r->gl.DeleteTextures(1, &r->glyphs.texture);
     if (r->images.texture) r->gl.DeleteTextures(1, &r->images.texture);
     AtlasPages *tables[] = { &r->glyph_pages, &r->image_pages };
@@ -466,7 +474,21 @@ void rune_gl_layer_cache_budget(RuneGL *r, uint64_t bytes) {
 void rune_gl_window_rest(RuneGL *r, int all) {
     rune_damage_release(&r->damage);
     rune_layers_window_rest(r->layers, all);
-    if (all) r->gl.Finish();
+    if (all) {
+        for (int i = 0; i < instance_ring_slots; ++i) {
+            if (r->instance_buffers[i] && r->instance_capacities[i]) {
+                r->gl.BindBuffer(GL_ARRAY_BUFFER, r->instance_buffers[i]);
+                r->gl.BufferData(GL_ARRAY_BUFFER, 0, NULL, GL_STREAM_DRAW);
+                r->instance_capacities[i] = 0;
+            }
+        }
+        if (r->glyph_fill_buffer && r->glyph_fill_capacity) {
+            r->gl.BindBuffer(GL_ARRAY_BUFFER, r->glyph_fill_buffer);
+            r->gl.BufferData(GL_ARRAY_BUFFER, 0, NULL, GL_STREAM_DRAW);
+            r->glyph_fill_capacity = 0;
+        }
+        r->gl.Finish();
+    }
 }
 
 void rune_gl_layer_cache_clear(RuneGL *r) {
@@ -646,8 +668,11 @@ int rune_gl_atlas_page_count(RuneGL *r, int channels, size_t count, char *error,
         table->extra = pages;
     } else {
         for (size_t page = count > 1 ? count : 1; page < old; ++page) {
-            if (table->extra[page - 1].texture)
+            if (table->extra[page - 1].texture) {
+                if (channels == 1 && table->extra[page - 1].texture == r->glyph_fill_attached)
+                    r->glyph_fill_attached = 0;
                 r->gl.DeleteTextures(1, &table->extra[page - 1].texture);
+            }
         }
         if (count <= 1) {
             free(table->extra);
@@ -669,6 +694,8 @@ int rune_gl_upload_atlas_page(RuneGL *r, int channels, size_t page, int width, i
     Atlas *atlas = &table->extra[page - 1];
     if (!pixels) {
         if (atlas->texture) {
+            if (channels == 1 && atlas->texture == r->glyph_fill_attached)
+                r->glyph_fill_attached = 0;
             r->gl.DeleteTextures(1, &atlas->texture);
             *atlas = (Atlas){0};
             r->damage.valid = 0;
@@ -707,18 +734,27 @@ int rune_gl_fill_outline_masks_for_profile(RuneGL *r, size_t page, int width, in
     // A deferred page can be created by its first fill before any CPU atlas upload.
     if (!atlas->texture) set_atlas_params(gl, atlas);
     prepare_unpack(gl, 0);
+    int resized = width != atlas->width || height != atlas->height || GL_R8 != atlas->internal_format;
     if (!set_atlas(gl, atlas, GL_TEXTURE0, width, height, GL_R8, GL_RED, base, error, size)) return 0;
+    if (resized && r->glyph_fill_attached == atlas->texture) r->glyph_fill_attached = 0;
     if (base) r->damage.valid = 0;
     if (!count) return 1;
     if (!empty_texture(r, error, size)) return 0;
     GLint destination;
     gl->GetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &destination);
-    if (!r->glyph_fill_target) gl->GenFramebuffers(1, &r->glyph_fill_target);
+    if (!r->glyph_fill_target) {
+        gl->GenFramebuffers(1, &r->glyph_fill_target);
+        r->glyph_fill_attached = 0;
+    }
     gl->BindFramebuffer(GL_DRAW_FRAMEBUFFER, r->glyph_fill_target);
-    gl->FramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, atlas->texture, 0);
-    if (gl->CheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        gl->BindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)destination);
-        return fail(error, size, "The GPU cannot draw into Rune's R8 glyph atlas");
+    if (r->glyph_fill_attached != atlas->texture) {
+        gl->FramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, atlas->texture, 0);
+        if (gl->CheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            r->glyph_fill_attached = 0;
+            gl->BindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)destination);
+            return fail(error, size, "The GPU cannot draw into Rune's R8 glyph atlas");
+        }
+        r->glyph_fill_attached = atlas->texture;
     }
     // Neither float sampler may refer to the R8 attachment, even when the shader
     // dynamically selects the integer outline store instead.
@@ -740,7 +776,15 @@ int rune_gl_fill_outline_masks_for_profile(RuneGL *r, size_t page, int width, in
     gl->Viewport(0, 0, width, height);
     if (!r->glyph_fill_buffer) gl->GenBuffers(1, &r->glyph_fill_buffer);
     gl->BindBuffer(GL_ARRAY_BUFFER, r->glyph_fill_buffer);
-    gl->BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(count * 128), instances, GL_STREAM_DRAW);
+    size_t fill_bytes = count * 128;
+    if (fill_bytes > r->glyph_fill_capacity) {
+        size_t cap = r->glyph_fill_capacity ? r->glyph_fill_capacity : 4096;
+        while (cap < fill_bytes && cap <= (size_t)PTRDIFF_MAX / 2) cap *= 2;
+        if (cap < fill_bytes) cap = fill_bytes;
+        gl->BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)cap, NULL, GL_STREAM_DRAW);
+        r->glyph_fill_capacity = cap;
+    }
+    gl->BufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)fill_bytes, instances);
     rune_production_batch(program, r->glyph_fill_buffer, width, height, 0, 0,
                           0, count, 0, 0, 1, &r->springs);
     gl->BindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)destination);
@@ -795,14 +839,14 @@ static void draw_bound_batch(RuneGL *r, const void *instances, GLuint glyph_text
             gl->BindTexture(GL_TEXTURE_2D, r->outline_texture);
             gl->ActiveTexture(GL_TEXTURE1);
         }
-        rune_production_batch(program, r->instance_buffer, width, height, x, y, start, count,
+        rune_production_batch(program, r->instance_buffers[r->instance_slot], width, height, x, y, start, count,
                               srgb_blend, in_layer, 0, &r->springs);
         return;
     }
     gl->UseProgram(r->program);
     gl->Uniform2f(r->viewport_uniform, (float)width, (float)height);
     gl->BindVertexArray(r->vao);
-    gl->BindBuffer(GL_ARRAY_BUFFER, r->instance_buffer);
+    gl->BindBuffer(GL_ARRAY_BUFFER, r->instance_buffers[r->instance_slot]);
     for (GLuint slot = 0; slot < primitive_slots; slot++) {
         uintptr_t offset = start * PRIMITIVE_BYTES + slot * 4 * sizeof(float);
         gl->VertexAttribPointer(slot, 4, GL_FLOAT, GL_FALSE, PRIMITIVE_BYTES, (const void *)offset);
@@ -893,10 +937,11 @@ static int render(RuneGL *r, int production, int width, int height, const float 
     if (!r->es) gl->Disable(GL_FRAMEBUFFER_SRGB);
     prepare_unpack(gl, 0);
     if (glyphs || images) r->damage.valid = 0;
+    int glyph_resized = gw != r->glyphs.width || gh != r->glyphs.height || GL_R8 != r->glyphs.internal_format;
     if (!set_atlas(gl, &r->glyphs, GL_TEXTURE0, gw, gh, GL_R8, GL_RED, glyphs, error, size) ||
         !set_atlas(gl, &r->images, GL_TEXTURE1, iw, ih, (!production && srgb_blend) ? GL_RGBA8 : GL_SRGB8_ALPHA8,
                    GL_RGBA, images, error, size)) return 0;
-    gl->BindBuffer(GL_ARRAY_BUFFER, r->instance_buffer);
+    if (glyph_resized && r->glyph_fill_attached == r->glyphs.texture) r->glyph_fill_attached = 0;
     int spring_frame = production && r->springs.tracks && r->springs.ids;
     int retained = spring_frame && r->reuse_spring_instances && count == r->spring_instance_count;
     r->reuse_spring_instances = 0;
@@ -907,7 +952,19 @@ static int render(RuneGL *r, int production, int width, int height, const float 
         damage = rune_damage_plan(&r->damage, instances, count, width, height, clear, srgb_blend, rects);
     else
         r->damage.valid = 0;
-    if (count && !retained && damage != 0) gl->BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(count * stride), instances, GL_STREAM_DRAW);
+    if (count && !retained && damage != 0) {
+        r->instance_slot = (r->instance_slot + 1) % instance_ring_slots;
+        size_t needed = count * stride;
+        gl->BindBuffer(GL_ARRAY_BUFFER, r->instance_buffers[r->instance_slot]);
+        if (needed > r->instance_capacities[r->instance_slot]) {
+            size_t cap = r->instance_capacities[r->instance_slot] ? r->instance_capacities[r->instance_slot] : 4096;
+            while (cap < needed && cap <= (size_t)PTRDIFF_MAX / 2) cap *= 2;
+            if (cap < needed) cap = needed;
+            gl->BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)cap, NULL, GL_STREAM_DRAW);
+            r->instance_capacities[r->instance_slot] = cap;
+        }
+        gl->BufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)needed, instances);
+    }
     r->drawing = 1;
     int success = rune_layers_frame(r->layers, width, height, srgb_blend, production, error, size);
     if (!success) goto done;
@@ -1012,7 +1069,7 @@ static int render(RuneGL *r, int production, int width, int height, const float 
     draw_batch(r, instances, production, width, height, srgb_blend, depth > 0, first, count - first);
 present:
     success = rune_layers_present(r->layers, (GLuint)destination, error, size);
-    if (success) success = check_gl(gl, "Drawing Rune frame", error, size);
+    if (success && r->check_errors) success = check_gl(gl, "Drawing Rune frame", error, size);
     if (success) rune_surfaces_prune(r->surfaces, draws, draw_count);
 done:
     r->last_damage = success ? damage : -1;

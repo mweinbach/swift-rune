@@ -173,13 +173,16 @@ vec3 decodeSRGB(vec3 x) {
 vec4 displayPixel(ivec2 px) {
     // Intermediate buffers hold premultiplied values in the scene's blending space.
     vec4 value = texelFetch(uSource, px, 0);
+    float alpha = clamp(value.a, 0.0, 1.0);
     if (uMode == 6 && uSRGBBlend == 0) {
+        if (uDisplaySRGB == 0 && alpha >= 0.9999) {
+            return vec4(clamp(encodeSRGB(value.rgb), 0.0, 1.0), alpha);
+        }
         // Recover the stored sRGB byte before dividing. Hardware samplers can
         // approximate sRGB decoding, which is visible after division by a small alpha.
         vec3 stored = floor(encodeSRGB(value.rgb) * 255.0 + 0.5) / 255.0;
         value.rgb = decodeSRGB(stored);
     }
-    float alpha = clamp(value.a, 0.0, 1.0);
     // Production reads a UNorm root. At zero stored alpha Metal returns its stored
     // RGB bytes, including tiny linear values represented by the sRGB attachment.
     vec3 rgb = alpha > 1e-5 ? clamp(value.rgb / alpha, 0.0, 1.0) : (uMode == 6 ? value.rgb : vec3(0.0));

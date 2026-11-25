@@ -31,6 +31,93 @@ public struct NodeId: Sendable, Hashable, Codable, CustomStringConvertible {
         return NodeId(h)
     }
 
+    @inline(__always)
+    @usableFromInline
+    internal static func fnvAppendDecimal(_ h: inout UInt64, _ value: Int) {
+        if value == 0 {
+            h ^= 0x30
+            h &*= 0x100000001b3
+            return
+        }
+        var n: UInt
+        if value < 0 {
+            h ^= 0x2d
+            h &*= 0x100000001b3
+            n = UInt(bitPattern: 0 &- value)
+        } else {
+            n = UInt(bitPattern: value)
+        }
+        var digits: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+                     UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8) =
+            (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        var count = 0
+        withUnsafeMutableBytes(of: &digits) { ptr in
+            while n > 0 {
+                ptr[count] = UInt8(0x30 + (n % 10))
+                n /= 10
+                count += 1
+            }
+            var i = count - 1
+            while i >= 0 {
+                h ^= UInt64(ptr[i])
+                h &*= 0x100000001b3
+                i -= 1
+            }
+        }
+    }
+
+    /// Zero-allocation equivalent of `child("\(index)")`.
+    @inlinable
+    public func child(index: Int) -> NodeId {
+        var h = rawValue ^ 0x2f
+        h &*= 0x100000001b3
+        Self.fnvAppendDecimal(&h, index)
+        return NodeId(h)
+    }
+
+    /// Zero-allocation equivalent of `child(dup == 0 ? "@\(key)" : "@\(key)#dup\(dup)")`.
+    @inlinable
+    public func child(key: String, dup: Int = 0) -> NodeId {
+        var h = rawValue ^ 0x2f
+        h &*= 0x100000001b3
+        h ^= 0x40
+        h &*= 0x100000001b3
+        for byte in key.utf8 {
+            h ^= UInt64(byte)
+            h &*= 0x100000001b3
+        }
+        if dup > 0 {
+            h ^= 0x23; h &*= 0x100000001b3 // '#'
+            h ^= 0x64; h &*= 0x100000001b3 // 'd'
+            h ^= 0x75; h &*= 0x100000001b3 // 'u'
+            h ^= 0x70; h &*= 0x100000001b3 // 'p'
+            Self.fnvAppendDecimal(&h, dup)
+        }
+        return NodeId(h)
+    }
+
+    /// Zero-allocation equivalent of `NodeId.hash(dup == 0 ? "screen:@\(key)" : "screen:@\(key)#dup\(dup)")`.
+    @inlinable
+    public static func screenKey(_ key: String, dup: Int = 0) -> NodeId {
+        var h: UInt64 = 0xcbf29ce484222325
+        for byte in "screen:@".utf8 {
+            h ^= UInt64(byte)
+            h &*= 0x100000001b3
+        }
+        for byte in key.utf8 {
+            h ^= UInt64(byte)
+            h &*= 0x100000001b3
+        }
+        if dup > 0 {
+            h ^= 0x23; h &*= 0x100000001b3
+            h ^= 0x64; h &*= 0x100000001b3
+            h ^= 0x75; h &*= 0x100000001b3
+            h ^= 0x70; h &*= 0x100000001b3
+            fnvAppendDecimal(&h, dup)
+        }
+        return NodeId(h)
+    }
+
     public var description: String {
         String(format: "NodeId(0x%016llx)", rawValue)
     }

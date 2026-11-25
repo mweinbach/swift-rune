@@ -8,24 +8,24 @@
 
 typedef struct {
     HWND target;
+    RECT target_bounds;
     HRGN remaining;
+    HRGN scratch;
     BOOL covered;
     BOOL has_screen;
+    BOOL has_visible_part;
 } OcclusionWalk;
-
-static BOOL combine_rect(HRGN region, const RECT *rect, int operation) {
-    HRGN part = CreateRectRgnIndirect(rect);
-    if (!part) return FALSE;
-    int shape = CombineRgn(region, region, part, operation);
-    DeleteObject(part);
-    return shape != ERROR;
-}
 
 static BOOL CALLBACK add_monitor(HMONITOR monitor, HDC dc, LPRECT rect, LPARAM data) {
     (void)monitor;
     (void)dc;
     OcclusionWalk *walk = (OcclusionWalk *)data;
-    if (!combine_rect(walk->remaining, rect, RGN_OR)) return FALSE;
+    RECT clipped;
+    if (IntersectRect(&clipped, rect, &walk->target_bounds)) {
+        if (!SetRectRgn(walk->scratch, clipped.left, clipped.top, clipped.right, clipped.bottom)) return FALSE;
+        if (CombineRgn(walk->remaining, walk->remaining, walk->scratch, RGN_OR) == ERROR) return FALSE;
+        walk->has_visible_part = TRUE;
+    }
     walk->has_screen = TRUE;
     return TRUE;
 }
@@ -39,8 +39,10 @@ static DWORD cloak_reason(HWND window) {
     return SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &reason, sizeof(reason))) ? reason : 0;
 }
 
-static BOOL opaque_bounds(HWND window, RECT *bounds) {
+static BOOL opaque_bounds(HWND window, const RECT *target_bounds, HRGN scratch, RECT *bounds) {
     if (!IsWindowVisible(window) || IsIconic(window)) return FALSE;
+    RECT raw, overlap;
+    if (!GetWindowRect(window, &raw) || !IntersectRect(&overlap, &raw, target_bounds)) return FALSE;
     LONG extended = GetWindowLongW(window, GWL_EXSTYLE);
     if (extended & WS_EX_TRANSPARENT) return FALSE;
     if ((extended & WS_EX_TOOLWINDOW) || (GetWindowLongW(window, GWL_STYLE) & WS_POPUP)) {
@@ -54,10 +56,7 @@ static BOOL opaque_bounds(HWND window, RECT *bounds) {
         if (!GetLayeredWindowAttributes(window, &key, &alpha, &flags) ||
             (flags & LWA_COLORKEY) || ((flags & LWA_ALPHA) && alpha < 255)) return FALSE;
     }
-    HRGN region = CreateRectRgn(0, 0, 0, 0);
-    if (!region) return FALSE;
-    int shape = GetWindowRgn(window, region);
-    DeleteObject(region);
+    int shape = GetWindowRgn(window, scratch);
     if (shape == COMPLEXREGION || cloak_reason(window) || !frame_bounds(window, bounds) || IsRectEmpty(bounds)) return FALSE;
     WINDOWPLACEMENT placement = {.length = sizeof(placement)};
     if (GetWindowPlacement(window, &placement) && placement.showCmd == SW_MAXIMIZE) {
@@ -65,17 +64,25 @@ static BOOL opaque_bounds(HWND window, RECT *bounds) {
         if (GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor))
             IntersectRect(bounds, bounds, &monitor.rcWork);
     }
-    return TRUE;
+    return IntersectRect(&overlap, bounds, target_bounds);
 }
 
 static BOOL CALLBACK subtract_window(HWND window, LPARAM data) {
     OcclusionWalk *walk = (OcclusionWalk *)data;
-    RECT bounds;
     if (window == walk->target) {
-        walk->covered = frame_bounds(window, &bounds) && !RectInRegion(walk->remaining, &bounds);
+        walk->covered = !RectInRegion(walk->remaining, &walk->target_bounds);
         return FALSE;
     }
-    return !opaque_bounds(window, &bounds) || combine_rect(walk->remaining, &bounds, RGN_DIFF);
+    RECT bounds;
+    if (!opaque_bounds(window, &walk->target_bounds, walk->scratch, &bounds)) return TRUE;
+    if (!SetRectRgn(walk->scratch, bounds.left, bounds.top, bounds.right, bounds.bottom)) return FALSE;
+    int shape = CombineRgn(walk->remaining, walk->remaining, walk->scratch, RGN_DIFF);
+    if (shape == ERROR) return FALSE;
+    if (shape == NULLREGION) {
+        walk->covered = TRUE;
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static BOOL desktop_name(HDESK desktop, WCHAR (*name)[256]) {
@@ -99,12 +106,26 @@ int32_t rune_win_is_covered(RuneWinWindow *window) {
 BOOL rune_win_covered_on_input_desktop(HWND hwnd) {
     if (!IsWindowVisible(hwnd)) return 0;
     if (IsIconic(hwnd) || (cloak_reason(hwnd) & DWM_CLOAKED_SHELL)) return 1;
+    RECT target_bounds;
+    if (!frame_bounds(hwnd, &target_bounds)) return 0;
 
-    OcclusionWalk walk = {.target = hwnd, .remaining = CreateRectRgn(0, 0, 0, 0)};
-    if (!walk.remaining) return 0;
-    if (EnumDisplayMonitors(NULL, NULL, add_monitor, (LPARAM)&walk) && walk.has_screen)
-        EnumWindows(subtract_window, (LPARAM)&walk);
+    OcclusionWalk walk = {
+        .target = hwnd,
+        .target_bounds = target_bounds,
+        .remaining = CreateRectRgn(0, 0, 0, 0),
+        .scratch = CreateRectRgn(0, 0, 0, 0),
+    };
+    if (!walk.remaining || !walk.scratch) {
+        if (walk.remaining) DeleteObject(walk.remaining);
+        if (walk.scratch) DeleteObject(walk.scratch);
+        return 0;
+    }
+    if (EnumDisplayMonitors(NULL, NULL, add_monitor, (LPARAM)&walk) && walk.has_screen) {
+        if (!walk.has_visible_part) walk.covered = TRUE;
+        else EnumWindows(subtract_window, (LPARAM)&walk);
+    }
     DeleteObject(walk.remaining);
+    DeleteObject(walk.scratch);
     return walk.covered;
 }
 

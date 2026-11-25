@@ -1004,9 +1004,15 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
             case RUNE_WIN_LEAVE: message = .mouseLeave
             case RUNE_WIN_CAPTURE_LOST: message = .captureLost
             default:
-                let buttons: [PointerButton] = [.primary, .secondary, .middle, .back, .forward]
-                guard Int(event.value) < buttons.count else { return 0 }
-                let button = buttons[Int(event.value)]
+                let button: PointerButton
+                switch event.value {
+                case 0: button = .primary
+                case 1: button = .secondary
+                case 2: button = .middle
+                case 3: button = .back
+                case 4: button = .forward
+                default: return 0
+                }
                 message = event.kind == RUNE_WIN_DOWN
                     ? .mouseDown(button: button, x: physical.x, y: physical.y)
                     : .mouseUp(button: button, x: physical.x, y: physical.y)

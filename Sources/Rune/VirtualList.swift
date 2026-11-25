@@ -471,7 +471,7 @@ internal struct VirtualRowHeights: RandomAccessCollection, Sendable {
 internal struct VirtualRowMeasurements: Sendable {
     var places = VirtualRowPlaces<String>([])
     private(set) var heights = VirtualRowHeights()
-    private var cachedOffsets: (estimate: Float, gap: Float, prefix: [Float])?
+    private var cachedOffsets: (estimate: Float, gap: Float, prefix: [Float], dirtyFrom: Int)?
 
     mutating func replacePlaces(_ next: VirtualRowPlaces<String>) {
         heights = heights.remapped(from: places, to: next)
@@ -480,23 +480,46 @@ internal struct VirtualRowMeasurements: Sendable {
     }
 
     func offsets(estimated: Float, gap: Float) -> [Float] {
-        if let cachedOffsets, cachedOffsets.estimate == estimated, cachedOffsets.gap == gap {
-            return cachedOffsets.prefix
+        let count = heights.count
+        if let cachedOffsets, cachedOffsets.estimate == estimated, cachedOffsets.gap == gap,
+           cachedOffsets.prefix.count == count + 1 {
+            if cachedOffsets.dirtyFrom >= count {
+                return cachedOffsets.prefix
+            }
+            var sums = cachedOffsets.prefix
+            var y = sums[cachedOffsets.dirtyFrom]
+            for i in cachedOffsets.dirtyFrom..<count {
+                y += (heights[i] ?? estimated) + (i + 1 < count ? gap : 0)
+                sums[i + 1] = y
+            }
+            return sums
         }
         var sums: [Float] = []
-        sums.reserveCapacity(heights.count + 1)
+        sums.reserveCapacity(count + 1)
         sums.append(0)
         var y: Float = 0
         for i in heights.indices {
-            y += (heights[i] ?? estimated) + (i + 1 < heights.count ? gap : 0)
+            y += (heights[i] ?? estimated) + (i + 1 < count ? gap : 0)
             sums.append(y)
         }
         return sums
     }
 
     mutating func prepareOffsets(estimated: Float, gap: Float) {
-        if cachedOffsets?.estimate != estimated || cachedOffsets?.gap != gap {
-            cachedOffsets = (estimated, gap, offsets(estimated: estimated, gap: gap))
+        let count = heights.count
+        if var cached = cachedOffsets, cached.estimate == estimated, cached.gap == gap,
+           cached.prefix.count == count + 1 {
+            guard cached.dirtyFrom < count else { return }
+            cachedOffsets = nil
+            var y = cached.prefix[cached.dirtyFrom]
+            for i in cached.dirtyFrom..<count {
+                y += (heights[i] ?? estimated) + (i + 1 < count ? gap : 0)
+                cached.prefix[i + 1] = y
+            }
+            cached.dirtyFrom = count
+            cachedOffsets = cached
+        } else {
+            cachedOffsets = (estimated, gap, offsets(estimated: estimated, gap: gap), count)
         }
     }
 
@@ -509,8 +532,10 @@ internal struct VirtualRowMeasurements: Sendable {
 
     mutating func setHeight(_ height: Float?, at index: Int) {
         guard heights[index] != height else { return }
-        if let estimate = cachedOffsets?.estimate, (heights[index] ?? estimate) != (height ?? estimate) {
-            cachedOffsets = nil
+        if let cached = cachedOffsets, (heights[index] ?? cached.estimate) != (height ?? cached.estimate) {
+            if index < cached.dirtyFrom {
+                cachedOffsets?.dirtyFrom = index
+            }
         }
         heights[index] = height
     }

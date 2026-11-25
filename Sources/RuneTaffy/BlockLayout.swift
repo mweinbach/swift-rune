@@ -20,13 +20,13 @@ private struct BlockItem {
     var yPosition: Float = 0
 }
 
-internal func computeBlockLayout(
-    tree: any LayoutTree,
+internal func computeBlockLayout<Tree: LayoutTree>(
+    tree: Tree,
     node: NodeId,
+    style: TaffyStyle,
     input: LayoutInput,
     blockContext: UnsafeMutablePointer<BlockContext>?
-) -> LayoutOutput {
-    let style = tree.style(node)
+) -> (LayoutOutput, Bool) {
     let parentSize = input.parentSize
     let padding = style.resolvedPadding(parentWidth: parentSize.width)
     let border = style.resolvedBorder(parentWidth: parentSize.width)
@@ -65,18 +65,18 @@ internal func computeBlockLayout(
                 height: maybeClamp(Swift.max(h, pbSum.height + scrollbarSize.height), min: minSize.height, max: maxSize.height)
             )
             let ownMargin = style.resolvedMarginOrZero(parentWidth: parentSize.width)
-            return LayoutOutput(
+            return (LayoutOutput(
                 size: clamped,
                 contentSize: clamped,
                 firstBaselines: Point(x: nil, y: nil),
                 topMargin: input.verticalMarginsAreCollapsible.start ? .fromMargin(ownMargin.top) : .zero,
                 bottomMargin: input.verticalMarginsAreCollapsible.end ? .fromMargin(ownMargin.bottom) : .zero,
                 marginsCanCollapseThrough: clamped.height == 0 && pbSum.height == 0
-            )
+            ), false)
         }
         if input.axis == .horizontal, let w = known.width {
             let clampedW = maybeClamp(Swift.max(w, pbSum.width + scrollbarSize.width), min: minSize.width, max: maxSize.width)
-            return LayoutOutput.fromOuterSize(Size(width: clampedW, height: 0))
+            return (LayoutOutput.fromOuterSize(Size(width: clampedW, height: 0)), false)
         }
     }
 
@@ -108,6 +108,7 @@ internal func computeBlockLayout(
     var items: [BlockItem] = []
     items.reserveCapacity(childCount)
     var orderCounter: UInt32 = 0
+    var hasOutOfFlow = false
 
     for i in 0..<childCount {
         let child = tree.childId(node, at: i)
@@ -117,6 +118,7 @@ internal func computeBlockLayout(
             continue
         }
         if cStyle.isOutOfFlow {
+            hasOutOfFlow = true
             orderCounter += 1
             continue
         }
@@ -182,10 +184,10 @@ internal func computeBlockLayout(
         let containerOuterW = maybeClamp(known.width ?? (containerInnerW + innerGapW), min: minSize.width, max: maxSize.width)
         if let h = known.height {
             let containerOuterH = maybeClamp(Swift.max(h, pbSum.height + scrollbarSize.height), min: minSize.height, max: maxSize.height)
-            return LayoutOutput.fromOuterSize(Size(width: containerOuterW, height: containerOuterH))
+            return (LayoutOutput.fromOuterSize(Size(width: containerOuterW, height: containerOuterH)), hasOutOfFlow)
         }
         if input.axis == .horizontal {
-            return LayoutOutput.fromOuterSize(Size(width: containerOuterW, height: 0))
+            return (LayoutOutput.fromOuterSize(Size(width: containerOuterW, height: 0)), hasOutOfFlow)
         }
     }
 
@@ -395,7 +397,7 @@ internal func computeBlockLayout(
         height: Swift.max(finalOuterH, contentBottom + contentBoxInset.bottom)
     )
 
-    return LayoutOutput(
+    return (LayoutOutput(
         size: Size(width: finalOuterW, height: finalOuterH),
         contentSize: finalContentSize,
         firstBaselines: Point(x: nil, y: firstBaselineY),
@@ -403,5 +405,5 @@ internal func computeBlockLayout(
         topMargin: outTopMargin,
         bottomMargin: outBottomMargin,
         marginsCanCollapseThrough: allChildrenCollapsedThrough && pbSum.height == 0 && known.height == nil
-    )
+    ), hasOutOfFlow)
 }

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cfloat>
 #include <cmath>
 #include <cstdlib>
@@ -17,6 +18,9 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
@@ -31,13 +35,47 @@ IDWriteFactory2 *textFactory() {
     return factory.Get();
 }
 
+IDWriteFontCollection *systemFontCollection() {
+    static const ComPtr<IDWriteFontCollection> collection = [] {
+        ComPtr<IDWriteFontCollection> result;
+        if (textFactory()) textFactory()->GetSystemFontCollection(result.GetAddressOf());
+        return result;
+    }();
+    return collection.Get();
+}
+
+const WCHAR *userDefaultLocale() {
+    static const std::wstring locale = [] {
+        WCHAR buf[LOCALE_NAME_MAX_LENGTH] = {};
+        return GetUserDefaultLocaleName(buf, LOCALE_NAME_MAX_LENGTH) ? std::wstring(buf) : std::wstring(L"en-US");
+    }();
+    return locale.c_str();
+}
+
 std::unique_ptr<WCHAR[]> toWide(const char *utf8, int length, int &units) {
-    units = length == 0 ? 0 : MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, length, nullptr, 0);
-    if (length != 0 && units == 0) return nullptr;
-    std::unique_ptr<WCHAR[]> wide(new (std::nothrow) WCHAR[size_t(units) + 1]);
+    if (length == 0) {
+        units = 0;
+        std::unique_ptr<WCHAR[]> wide(new (std::nothrow) WCHAR[1]);
+        if (wide) wide[0] = 0;
+        return wide;
+    }
+    const size_t byteLen = length < 0 ? std::strlen(utf8) : size_t(length);
+    if (byteLen > size_t(INT32_MAX - 1)) return nullptr;
+    std::unique_ptr<WCHAR[]> wide(new (std::nothrow) WCHAR[byteLen + 1]);
     if (!wide) return nullptr;
-    if (length != 0 && !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, length, wide.get(), units))
-        return nullptr;
+    bool ascii = true;
+    for (size_t i = 0; i < byteLen; ++i) {
+        unsigned char b = static_cast<unsigned char>(utf8[i]);
+        if (b >= 0x80) { ascii = false; break; }
+        wide[i] = b;
+    }
+    if (ascii) {
+        units = int(byteLen);
+        wide[byteLen] = 0;
+        return wide;
+    }
+    units = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, int(byteLen), wide.get(), int(byteLen));
+    if (units == 0) return nullptr;
     wide[units] = 0;
     return wide;
 }
@@ -77,6 +115,7 @@ class AppFonts {
     ComPtr<IDWriteInMemoryFontFileLoader> loader;
     ComPtr<IDWriteFontSet> set;
     ComPtr<IDWriteFontCollection1> collection;
+    std::atomic<uint64_t> gen{0};
 
     bool append(IDWriteFontFile *file) {
         ComPtr<IDWriteFontSetBuilder1> builder;
@@ -90,6 +129,7 @@ class AppFonts {
             return false;
         set = std::move(nextSet);
         collection = std::move(nextCollection);
+        gen.fetch_add(1, std::memory_order_release);
         return true;
     }
 public:
@@ -102,6 +142,7 @@ public:
         set.Reset();
         if (loader) factory->UnregisterFontFileLoader(loader.Get());
     }
+    uint64_t generation() const { return gen.load(std::memory_order_acquire); }
     bool addFile(const WCHAR *path) {
         std::lock_guard<std::mutex> guard(lock);
         ComPtr<IDWriteFontFile> file;
@@ -122,6 +163,7 @@ public:
             file.GetAddressOf())) && append(file.Get());
     }
     ComPtr<IDWriteFontCollection> find(const WCHAR *family) {
+        if (gen.load(std::memory_order_acquire) == 0) return {};
         std::lock_guard<std::mutex> guard(lock);
         UINT32 index = 0;
         BOOL found = FALSE;
@@ -136,20 +178,137 @@ AppFonts &appFonts() {
     return fonts;
 }
 
-ComPtr<IDWriteTextLayout> makeLayout(const WCHAR *text, UINT32 length, IDWriteTextFormat *format) {
+struct FormatKey {
+    std::string family;
+    uint32_t sizeBits;
+    int32_t weight;
+    uint64_t appGen;
+    bool mono;
+    bool italic;
+    bool rtl;
+
+    bool operator==(const FormatKey &o) const {
+        return sizeBits == o.sizeBits && weight == o.weight && appGen == o.appGen &&
+               mono == o.mono && italic == o.italic && rtl == o.rtl && family == o.family;
+    }
+};
+
+struct FormatKeyHash {
+    size_t operator()(const FormatKey &k) const {
+        size_t h = std::hash<std::string>{}(k.family);
+        auto mix = [&](size_t v) { h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2); };
+        mix(k.sizeBits);
+        mix(size_t(k.weight));
+        mix(size_t(k.appGen));
+        mix((k.mono ? 1u : 0u) | (k.italic ? 2u : 0u) | (k.rtl ? 4u : 0u));
+        return h;
+    }
+};
+
+ComPtr<IDWriteTextFormat> cachedTextFormat(const char *family, bool mono, float size_px, int32_t weight, bool italic, bool rtl) {
+    const int32_t clampedWeight = std::max(1, std::min(999, int(weight)));
+    uint32_t sizeBits = 0;
+    std::memcpy(&sizeBits, &size_px, sizeof(sizeBits));
+    const uint64_t appGen = appFonts().generation();
+    FormatKey key{family && *family ? std::string(family) : std::string(), sizeBits, clampedWeight, appGen, mono, italic, rtl};
+
+    struct Entry {
+        ComPtr<IDWriteTextFormat> format;
+        uint64_t lastUsed = 0;
+    };
+    static std::mutex lock;
+    static std::unordered_map<FormatKey, Entry, FormatKeyHash> cache;
+    static uint64_t clock = 0;
+    static uint64_t cachedAppGen = 0;
+    static constexpr size_t maxEntries = 128;
+
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        if (cachedAppGen != appGen) {
+            cache.clear();
+            cachedAppGen = appGen;
+        } else {
+            auto it = cache.find(key);
+            if (it != cache.end()) {
+                it->second.lastUsed = ++clock;
+                return it->second.format;
+            }
+        }
+    }
+
+    const WCHAR *face = mono ? L"Consolas" : L"Segoe UI";
+    std::unique_ptr<WCHAR[]> requested;
+    ComPtr<IDWriteFontCollection> appCollection;
+    if (!key.family.empty()) {
+        int familyUnits = 0;
+        requested = toWide(key.family.c_str(), int(key.family.size()), familyUnits);
+        IDWriteFontCollection *fonts = systemFontCollection();
+        for (WCHAR *cursor = requested.get(); cursor && *cursor;) {
+            WCHAR *name = nextFamily(cursor);
+            if (!*name) continue;
+            appCollection = appFonts().find(name);
+            UINT32 index = 0;
+            BOOL exists = FALSE;
+            if (appCollection || (fonts && SUCCEEDED(fonts->FindFamilyName(name, &index, &exists)) && exists)) {
+                face = name;
+                break;
+            }
+        }
+    }
+    ComPtr<IDWriteTextFormat> format;
+    const auto fontWeight = static_cast<DWRITE_FONT_WEIGHT>(clampedWeight);
+    if (FAILED(textFactory()->CreateTextFormat(face, appCollection.Get(), fontWeight,
+        italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+        size_px, userDefaultLocale(), format.GetAddressOf()))) return {};
+    if (FAILED(format->SetReadingDirection(rtl ? DWRITE_READING_DIRECTION_RIGHT_TO_LEFT : DWRITE_READING_DIRECTION_LEFT_TO_RIGHT)) ||
+        FAILED(format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP))) return {};
+
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        if (cachedAppGen == appGen) {
+            if (cache.size() >= maxEntries) {
+                auto oldest = cache.begin();
+                for (auto it = cache.begin(); it != cache.end(); ++it) {
+                    if (it->second.lastUsed < oldest->second.lastUsed) oldest = it;
+                }
+                if (oldest != cache.end()) cache.erase(oldest);
+            }
+            cache.emplace(std::move(key), Entry{format, ++clock});
+        }
+    }
+    return format;
+}
+
+ComPtr<IDWriteTextLayout> makeLayout(const WCHAR *text, UINT32 length, IDWriteTextFormat *format, bool rtl) {
     ComPtr<IDWriteTextLayout> layout;
-    if (FAILED(textFactory()->CreateTextLayout(text, length, format, 1, 1, layout.GetAddressOf()))) return {};
+    const FLOAT maxDim = rtl ? 1.0f : FLT_MAX;
+    if (FAILED(textFactory()->CreateTextLayout(text, length, format, maxDim, maxDim, layout.GetAddressOf()))) return {};
     ComPtr<IDWriteTextLayout1> extended;
     if (length && SUCCEEDED(layout.As(&extended))) extended->SetPairKerning(TRUE, {0, length});
     return layout;
 }
 
 bool autoRTL(const WCHAR *text, int count) {
-    std::unique_ptr<WORD[]> types(new (std::nothrow) WORD[count]);
-    if (count && types && GetStringTypeW(CT_CTYPE2, text, count, types.get())) {
-        for (int i = 0; i < count; ++i) {
-            if (types[i] == C2_LEFTTORIGHT || types[i] == C2_RIGHTTOLEFT)
-                return types[i] == C2_RIGHTTOLEFT;
+    int i = 0;
+    for (; i < count; ++i) {
+        const WCHAR c = text[i];
+        if (c >= 0x80) break;
+        if ((c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z')) return false;
+    }
+    const int rem = count - i;
+    if (rem <= 0) return false;
+    WORD stackTypes[256];
+    std::unique_ptr<WORD[]> heapTypes;
+    WORD *types = stackTypes;
+    if (rem > 256) {
+        heapTypes.reset(new (std::nothrow) WORD[rem]);
+        if (!heapTypes) return false;
+        types = heapTypes.get();
+    }
+    if (GetStringTypeW(CT_CTYPE2, text + i, rem, types)) {
+        for (int j = 0; j < rem; ++j) {
+            if (types[j] == C2_LEFTTORIGHT || types[j] == C2_RIGHTTOLEFT)
+                return types[j] == C2_RIGHTTOLEFT;
         }
     }
     return false;
@@ -196,21 +355,72 @@ struct FontTable {
     UINT16 u16(UINT32 at) const { return UINT16(UINT16(bytes[at]) << 8 | bytes[at + 1]); }
 };
 
+struct ChromiumFaceFacts {
+    ComPtr<IDWriteFontFace> face;
+    std::vector<std::pair<UINT16, bool>> gaspRanges;
+    bool hasMaxpInstructions = false;
+};
+
 DWRITE_RENDERING_MODE chromiumRenderingMode(DWRITE_GLYPH_RUN &run) {
     const float gdi = std::max(1.F, std::round(run.fontEmSize * 64.F) / 64.F);
-    FontTable gasp(run.fontFace, DWRITE_MAKE_OPENTYPE_TAG('g', 'a', 's', 'p'));
-    if (gasp.bytes && gasp.size >= 4 && gasp.u16(0) >= 1 && gasp.u16(2) <= (gasp.size - 4) / 4) {
-        for (UINT32 i = 0; i < gasp.u16(2); ++i) {
-            if (std::round(gdi) <= gasp.u16(4 + i * 4))
-                return (gasp.u16(6 + i * 4) & 8) ? DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC : DWRITE_RENDERING_MODE_NATURAL;
+    static std::array<ChromiumFaceFacts, 32> cache;
+    static size_t nextSlot = 0;
+    static std::mutex lock;
+
+    std::vector<std::pair<UINT16, bool>> gaspRanges;
+    bool hasMaxpInstructions = false;
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        for (const auto &e : cache) {
+            if (e.face.Get() == run.fontFace) {
+                gaspRanges = e.gaspRanges;
+                hasMaxpInstructions = e.hasMaxpInstructions;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            ComPtr<IDWriteFontFace5> comparable;
+            run.fontFace->QueryInterface(__uuidof(IDWriteFontFace5), reinterpret_cast<void **>(comparable.GetAddressOf()));
+            if (comparable) {
+                for (const auto &e : cache) {
+                    if (e.face && comparable->Equals(e.face.Get())) {
+                        gaspRanges = e.gaspRanges;
+                        hasMaxpInstructions = e.hasMaxpInstructions;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!found) {
+            FontTable gasp(run.fontFace, DWRITE_MAKE_OPENTYPE_TAG('g', 'a', 's', 'p'));
+            if (gasp.bytes && gasp.size >= 4 && gasp.u16(0) >= 1 && gasp.u16(2) <= (gasp.size - 4) / 4) {
+                const UINT16 count = gasp.u16(2);
+                gaspRanges.reserve(count);
+                for (UINT32 i = 0; i < count; ++i) {
+                    gaspRanges.emplace_back(gasp.u16(4 + i * 4), (gasp.u16(6 + i * 4) & 8) != 0);
+                }
+            }
+            FontTable maxp(run.fontFace, DWRITE_MAKE_OPENTYPE_TAG('m', 'a', 'x', 'p'));
+            if (maxp.bytes && maxp.size >= 32 && maxp.u16(0) == 1 && maxp.u16(2) == 0 && maxp.u16(26) > 0) {
+                hasMaxpInstructions = true;
+            }
+            cache[nextSlot++ % cache.size()] = {run.fontFace, gaspRanges, hasMaxpInstructions};
         }
     }
-    if (run.fontEmSize <= 20) {
-        FontTable maxp(run.fontFace, DWRITE_MAKE_OPENTYPE_TAG('m', 'a', 'x', 'p'));
-        if (maxp.bytes && maxp.size >= 32 && maxp.u16(0) == 1 && maxp.u16(2) == 0 && maxp.u16(26) > 0) {
-            run.fontEmSize = gdi;
-            return DWRITE_RENDERING_MODE_NATURAL;
+
+    if (!gaspRanges.empty()) {
+        const float roundedGdi = std::round(gdi);
+        for (const auto &r : gaspRanges) {
+            if (roundedGdi <= r.first)
+                return r.second ? DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC : DWRITE_RENDERING_MODE_NATURAL;
         }
+    }
+    if (run.fontEmSize <= 20 && hasMaxpInstructions) {
+        run.fontEmSize = gdi;
+        return DWRITE_RENDERING_MODE_NATURAL;
     }
     return DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC;
 }
@@ -613,24 +823,108 @@ struct UnitEdges {
     UINT32 level;
 };
 
+// Lightweight stack-allocated renderer used during layout creation and InkIndex
+// capture without triggering DirectWrite glyph-run raster analysis.
+class MetricsCollector final : public IDWriteTextRenderer {
+    IDWriteFontFace *lastFace = nullptr;
+    float lastEm = 0;
+public:
+    float fontAscent = 0, fontDescent = 0, capHeight = 0;
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) noexcept override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (iid != __uuidof(IUnknown) && iid != __uuidof(IDWritePixelSnapping) && iid != __uuidof(IDWriteTextRenderer))
+            return E_NOINTERFACE;
+        *out = static_cast<IDWriteTextRenderer *>(this);
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() noexcept override { return 1; }
+    ULONG STDMETHODCALLTYPE Release() noexcept override { return 1; }
+    HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void *, BOOL *disabled) noexcept override {
+        *disabled = TRUE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetCurrentTransform(void *, DWRITE_MATRIX *matrix) noexcept override {
+        *matrix = {1, 0, 0, 1, 0, 0};
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void *, FLOAT *scale) noexcept override {
+        *scale = 1;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawGlyphRun(void *context, FLOAT x, FLOAT y, DWRITE_MEASURING_MODE mode,
+        const DWRITE_GLYPH_RUN *glyphs, const DWRITE_GLYPH_RUN_DESCRIPTION *description, IUnknown *) noexcept override {
+        if (context) return static_cast<InkIndex *>(context)->capture(x, y, mode, *glyphs, description);
+        if (glyphs->fontFace == lastFace && glyphs->fontEmSize == lastEm) return S_OK;
+        lastFace = glyphs->fontFace;
+        lastEm = glyphs->fontEmSize;
+        DWRITE_FONT_METRICS face{};
+        glyphs->fontFace->GetMetrics(&face);
+        if (face.designUnitsPerEm) {
+            const float scale = glyphs->fontEmSize / face.designUnitsPerEm;
+            fontAscent = std::max(fontAscent, face.ascent * scale);
+            fontDescent = std::max(fontDescent, face.descent * scale);
+            capHeight = std::max(capHeight, face.capHeight * scale);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawUnderline(void *, FLOAT, FLOAT, const DWRITE_UNDERLINE *, IUnknown *) noexcept override {
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawStrikethrough(void *, FLOAT, FLOAT, const DWRITE_STRIKETHROUGH *, IUnknown *) noexcept override {
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawInlineObject(void *, FLOAT, FLOAT, IDWriteInlineObject *, BOOL, BOOL, IUnknown *) noexcept override {
+        return E_NOTIMPL;
+    }
+};
+
 // DirectWrite exposes the visual origin and embedding level of each text range
 // and the advance of each cluster. Cache per-unit boundaries for repeated caret
 // and selection queries. Unusual layouts can still use native point hit testing.
-std::unique_ptr<UnitEdges[]> buildHitCache(IDWriteTextLayout *layout, UINT32 length, float &visualWidth) {
+std::unique_ptr<UnitEdges[]> buildHitCache(IDWriteTextLayout *layout, UINT32 length, float &visualWidth, bool &allUnitClusters, bool &allLTR) {
+    allUnitClusters = false;
+    allLTR = false;
     if (length < 2) return nullptr;
-    UINT32 clusterCount = 0, rangeCount = 0;
-    layout->GetClusterMetrics(nullptr, 0, &clusterCount);
-    layout->HitTestTextRange(0, length, 0, 0, nullptr, 0, &rangeCount);
-    if (!clusterCount || !rangeCount) return nullptr;
-    std::unique_ptr<DWRITE_CLUSTER_METRICS[]> clusters(new (std::nothrow) DWRITE_CLUSTER_METRICS[clusterCount]);
-    std::unique_ptr<DWRITE_HIT_TEST_METRICS[]> ranges(new (std::nothrow) DWRITE_HIT_TEST_METRICS[rangeCount]);
+    DWRITE_CLUSTER_METRICS stackClusters[256];
+    DWRITE_HIT_TEST_METRICS stackRanges[16];
+    std::unique_ptr<DWRITE_CLUSTER_METRICS[]> heapClusters;
+    std::unique_ptr<DWRITE_HIT_TEST_METRICS[]> heapRanges;
+    DWRITE_CLUSTER_METRICS *clusters = stackClusters;
+    DWRITE_HIT_TEST_METRICS *ranges = stackRanges;
+
+    UINT32 clusterCount = 0;
+    HRESULT hr = layout->GetClusterMetrics(stackClusters, 256, &clusterCount);
+    if (hr == E_NOT_SUFFICIENT_BUFFER) {
+        if (!clusterCount) return nullptr;
+        heapClusters.reset(new (std::nothrow) DWRITE_CLUSTER_METRICS[clusterCount]);
+        if (!heapClusters || FAILED(layout->GetClusterMetrics(heapClusters.get(), clusterCount, &clusterCount)))
+            return nullptr;
+        clusters = heapClusters.get();
+    } else if (FAILED(hr) || !clusterCount) {
+        return nullptr;
+    }
+
+    UINT32 rangeCount = 0;
+    hr = layout->HitTestTextRange(0, length, 0, 0, stackRanges, 16, &rangeCount);
+    if (hr == E_NOT_SUFFICIENT_BUFFER) {
+        if (!rangeCount) return nullptr;
+        heapRanges.reset(new (std::nothrow) DWRITE_HIT_TEST_METRICS[rangeCount]);
+        if (!heapRanges || FAILED(layout->HitTestTextRange(0, length, 0, 0, heapRanges.get(), rangeCount, &rangeCount)))
+            return nullptr;
+        ranges = heapRanges.get();
+    } else if (FAILED(hr) || !rangeCount) {
+        return nullptr;
+    }
+
     std::unique_ptr<UnitEdges[]> edges(new (std::nothrow) UnitEdges[length]);
-    if (!clusters || !ranges || !edges ||
-        FAILED(layout->GetClusterMetrics(clusters.get(), clusterCount, &clusterCount)) ||
-        FAILED(layout->HitTestTextRange(0, length, 0, 0, ranges.get(), rangeCount, &rangeCount))) return nullptr;
-    std::sort(ranges.get(), ranges.get() + rangeCount, [](const auto &a, const auto &b) {
-        return a.textPosition < b.textPosition;
-    });
+    if (!edges) return nullptr;
+    if (rangeCount > 1) {
+        std::sort(ranges, ranges + rangeCount, [](const auto &a, const auto &b) {
+            return a.textPosition < b.textPosition;
+        });
+    }
     UINT32 unit = 0, cluster = 0;
     float right = 0;
     for (UINT32 i = 0; i < rangeCount; ++i) {
@@ -664,6 +958,8 @@ std::unique_ptr<UnitEdges[]> buildHitCache(IDWriteTextLayout *layout, UINT32 len
         }
     }
     if (unit != length || cluster != clusterCount) return nullptr;
+    allUnitClusters = (clusterCount == length);
+    allLTR = (rangeCount == 1 && (ranges[0].bidiLevel & 1) == 0);
     // GetMetrics accumulates the whole paragraph in logical order. On very
     // long mixed-direction lines its width can differ from the actual right
     // edge by several pixels. Use the visual edge for Rune's width and caret.
@@ -675,11 +971,14 @@ std::unique_ptr<UnitEdges[]> buildHitCache(IDWriteTextLayout *layout, UINT32 len
 struct RuneDesktopLine {
     bool chromiumMask = false;
     ComPtr<IDWriteTextLayout> layout;
-    ComPtr<RunCollector> collector;
+    mutable ComPtr<RunCollector> collector;
+    mutable std::atomic<bool> collectorReady{false};
+    mutable int32_t ink_x = 0, ink_y = 0, ink_width = 0, ink_height = 0;
     std::unique_ptr<WCHAR[]> text;
     std::unique_ptr<UnitEdges[]> hits;
     mutable std::mutex inkLock;
     mutable ComPtr<InkIndex> inkIndex;
+    mutable std::atomic<InkIndex *> inkIndexFast{nullptr};
     // Partial ink views share immutable shaped glyphs with their source; the
     // fast whole-line view delays indexing until an outline is actually read.
     ComPtr<IDWriteTextLayout> wholeInkLayout;
@@ -688,29 +987,62 @@ struct RuneDesktopLine {
     std::unique_ptr<UINT32[]> byteToUnit;
     int32_t byteCount = 0;
     bool rtl = false;
+    bool ascii = false;
+    bool allUnitClusters = false;
+    bool allLTR = false;
 
     bool updateMetrics(IDWriteTextLayout *target) {
         DWRITE_TEXT_METRICS textMetrics{};
-        if (FAILED(target->GetMetrics(&textMetrics)) ||
-            FAILED(target->SetMaxWidth(textMetrics.widthIncludingTrailingWhitespace)) ||
-            FAILED(target->SetMaxHeight(textMetrics.height))) return false;
+        if (FAILED(target->GetMetrics(&textMetrics))) return false;
+        if (rtl) {
+            if (FAILED(target->SetMaxWidth(textMetrics.widthIncludingTrailingWhitespace)) ||
+                FAILED(target->SetMaxHeight(textMetrics.height))) return false;
+        }
         DWRITE_LINE_METRICS row{};
         UINT32 rows = 0;
         if (FAILED(target->GetLineMetrics(&row, 1, &rows)) || rows != 1) return false;
+        MetricsCollector mc;
+        if (FAILED(target->Draw(nullptr, &mc, 0, 0))) return false;
+        metrics = {textMetrics.widthIncludingTrailingWhitespace, row.baseline, row.height - row.baseline,
+            0, 0, 0, 0,
+            mc.fontAscent > 0 ? mc.fontAscent : row.baseline,
+            mc.fontAscent > 0 ? mc.fontDescent : row.height - row.baseline,
+            mc.capHeight};
+        const UINT32 totalUnits = position(byteCount);
+        bool unitClusters = false;
+        bool ltrOnly = false;
+        hits = buildHitCache(target, totalUnits, metrics.advance, unitClusters, ltrOnly);
+        allUnitClusters = totalUnits <= 1 || unitClusters;
+        allLTR = !rtl && ltrOnly;
+        std::lock_guard<std::mutex> guard(inkLock);
+        collector.Reset();
+        ink_x = ink_y = ink_width = ink_height = 0;
+        collectorReady.store(false, std::memory_order_release);
+        inkIndexFast.store(nullptr, std::memory_order_release);
+        inkIndex.Reset();
+        return true;
+    }
+
+    bool ensureCollector() const {
+        if (collectorReady.load(std::memory_order_acquire)) return collector != nullptr;
+        std::lock_guard<std::mutex> guard(inkLock);
+        if (collectorReady.load(std::memory_order_relaxed)) return collector != nullptr;
+        if (!layout) {
+            collectorReady.store(true, std::memory_order_release);
+            return collector != nullptr;
+        }
         ComPtr<RunCollector> updated;
         updated.Attach(new (std::nothrow) RunCollector(chromiumMask));
-        if (!updated || FAILED(target->Draw(nullptr, updated.Get(), 0, 0))) return false;
+        if (!updated || FAILED(layout->Draw(nullptr, updated.Get(), 0, 0))) return false;
         const RECT &ink = updated->ink;
         int64_t width = int64_t(ink.right) - ink.left, height = int64_t(ink.bottom) - ink.top;
         if (width > INT32_MAX || height > INT32_MAX) return false;
-        metrics = {textMetrics.widthIncludingTrailingWhitespace, row.baseline, row.height - row.baseline,
-            ink.left, ink.top, int32_t(width), int32_t(height),
-            updated->fontAscent > 0 ? updated->fontAscent : row.baseline,
-            updated->fontAscent > 0 ? updated->fontDescent : row.height - row.baseline,
-            updated->capHeight};
-        hits = buildHitCache(target, position(byteCount), metrics.advance);
+        ink_x = ink.left;
+        ink_y = ink.top;
+        ink_width = int32_t(width);
+        ink_height = int32_t(height);
         collector = std::move(updated);
-        inkIndex.Reset();
+        collectorReady.store(true, std::memory_order_release);
         return true;
     }
 
@@ -719,9 +1051,11 @@ struct RuneDesktopLine {
         if (!inkIndex) {
             if (!source) return {};
             std::unique_ptr<InkIndex> index(new (std::nothrow) InkIndex(units));
+            MetricsCollector mc;
             if (!index || !index->owners || !index->ownerUnits ||
-                FAILED(source->Draw(index.get(), collector.Get(), 0, 0))) return {};
+                FAILED(source->Draw(index.get(), &mc, 0, 0))) return {};
             inkIndex.Attach(index.release());
+            inkIndexFast.store(inkIndex.Get(), std::memory_order_release);
         }
         return inkIndex;
     }
@@ -754,14 +1088,32 @@ struct RuneDesktopLine {
         }
         return x;
     }
+
+    float caretAt(int32_t offset) const {
+        if (!byteCount) return 0;
+        const UINT32 index = position(offset);
+        if (!index) return rtl ? metrics.advance : 0;
+        if (offset >= byteCount) return rtl ? 0 : metrics.advance;
+        UINT32 nextLevel = 0, previousLevel = 0;
+        const float next = edge(index, false, &nextLevel);
+        const float previous = edge(index - 1, true, &previousLevel);
+        return previousLevel < nextLevel ? previous : next;
+    }
 };
 
 extern "C" int32_t rune_desktop_line_cluster_owner(const RuneDesktopLine *line, int32_t byte) {
     if (!line || !line->layout || byte < 0 || byte >= line->byteCount) return byte;
-    const auto index = line->shapedIndex(line->layout.Get(), line->position(line->byteCount));
-    if (!index) return byte;
     const auto bytes = line->byteToUnit.get();
-    const UINT32 unit = bytes[byte], owner = index->ownerUnits[unit];
+    const UINT32 unit = bytes[byte];
+    if (line->allUnitClusters && (!byte || bytes[byte - 1] != unit)) return byte;
+    const InkIndex *idx = line->inkIndexFast.load(std::memory_order_acquire);
+    ComPtr<InkIndex> held;
+    if (!idx) {
+        held = line->shapedIndex(line->layout.Get(), line->position(line->byteCount));
+        idx = held.Get();
+        if (!idx) return byte;
+    }
+    const UINT32 owner = idx->ownerUnits[unit];
     if (owner == UINT32_MAX || (owner == unit && (!byte || bytes[byte - 1] != unit))) return byte;
     return static_cast<int32_t>(std::lower_bound(bytes, bytes + byte + 1, owner) - bytes);
 }
@@ -845,7 +1197,13 @@ extern "C" RuneDesktopLine *rune_desktop_line_extract_ink(const RuneDesktopLine 
     owned->chromiumMask = line->chromiumMask;
     owned->metrics = line->metrics;
     if (start <= 0 && end >= line->byteCount) {
+        if (!line->ensureCollector()) return nullptr;
         owned->collector = line->collector;
+        owned->ink_x = line->ink_x;
+        owned->ink_y = line->ink_y;
+        owned->ink_width = line->ink_width;
+        owned->ink_height = line->ink_height;
+        owned->collectorReady.store(true, std::memory_order_relaxed);
         owned->wholeInkLayout = line->layout;
         owned->inkEnd = line->position(line->byteCount);
         return owned.release();
@@ -856,6 +1214,7 @@ extern "C" RuneDesktopLine *rune_desktop_line_extract_ink(const RuneDesktopLine 
     if (first < last) {
         owned->inkIndex = line->shapedIndex(line->layout.Get(), line->position(line->byteCount));
         if (!owned->inkIndex) return nullptr;
+        owned->inkIndexFast.store(owned->inkIndex.Get(), std::memory_order_relaxed);
         owned->inkFirst = first;
         owned->inkEnd = last;
         if (!visitOwnedClusters(*owned->inkIndex.Get(), first, last, [&](const ClusterSpan &span, const DWRITE_GLYPH_RUN &run) {
@@ -865,15 +1224,16 @@ extern "C" RuneDesktopLine *rune_desktop_line_extract_ink(const RuneDesktopLine 
     const RECT &ink = owned->collector->ink;
     const int64_t width = int64_t(ink.right) - ink.left, height = int64_t(ink.bottom) - ink.top;
     if (width > INT32_MAX || height > INT32_MAX) return nullptr;
-    owned->metrics.ink_x = ink.left;
-    owned->metrics.ink_y = ink.top;
-    owned->metrics.ink_width = int32_t(width);
-    owned->metrics.ink_height = int32_t(height);
+    owned->ink_x = ink.left;
+    owned->ink_y = ink.top;
+    owned->ink_width = int32_t(width);
+    owned->ink_height = int32_t(height);
+    owned->collectorReady.store(true, std::memory_order_relaxed);
     return owned.release();
 }
 
 extern "C" int32_t rune_desktop_line_outline(const RuneDesktopLine *ink, RuneOutlineEmit emit, void *context) {
-    if (!ink || !emit || ink->layout || !ink->collector || ink->collector->hasColor) return 0;
+    if (!ink || !emit || ink->layout || !ink->ensureCollector() || ink->collector->hasColor) return 0;
     if (ink->inkFirst == ink->inkEnd) return 1;
     auto index = ink->shapedIndex(ink->wholeInkLayout.Get(), ink->inkEnd);
     if (!index) return 0;
@@ -893,7 +1253,7 @@ extern "C" int32_t rune_desktop_line_outline(const RuneDesktopLine *ink, RuneOut
 }
 
 extern "C" int32_t rune_desktop_line_outline_regions(const RuneDesktopLine *line, RuneOutlineRegion emit, void *context) {
-    if (!line || !emit || !line->layout || !line->collector || line->collector->hasColor) return 0;
+    if (!line || !emit || !line->layout || !line->ensureCollector() || line->collector->hasColor) return 0;
     if (!line->byteCount) return 1;
     const UINT32 units = line->position(line->byteCount);
     auto index = line->shapedIndex(line->layout.Get(), units);
@@ -1132,57 +1492,46 @@ RuneDesktopLine *rune_windows_line_create_configured(const char *utf8, int32_t l
     std::unique_ptr<RuneDesktopLine> line(new (std::nothrow) RuneDesktopLine);
     if (!line) return nullptr;
     line->chromiumMask = chromium_mask != 0;
-    int units = 0;
-    auto text = toWide(utf8, length, units);
-    if (!text) return nullptr;
-    line->byteCount = length;
+    std::unique_ptr<WCHAR[]> text(new (std::nothrow) WCHAR[size_t(length) + 1]);
     line->byteToUnit.reset(new (std::nothrow) UINT32[size_t(length) + 1]);
-    if (!line->byteToUnit) return nullptr;
-    UINT32 native = 0;
-    for (int32_t byte = 0; byte < length;) {
-        unsigned char lead = static_cast<unsigned char>(utf8[byte]);
-        int count = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
-        for (int i = 0; i < count; ++i) line->byteToUnit[byte++] = native;
-        native += count == 4 ? 2 : 1;
-    }
-    line->byteToUnit[length] = native;
+    if (!text || !line->byteToUnit) return nullptr;
+    line->byteCount = length;
 
-    const WCHAR *face = mono ? L"Consolas" : L"Segoe UI";
-    std::unique_ptr<WCHAR[]> requested;
-    ComPtr<IDWriteFontCollection> appCollection;
-    if (family && *family) {
-        int familyUnits = 0;
-        requested = toWide(family, -1, familyUnits);
-        ComPtr<IDWriteFontCollection> fonts;
-        textFactory()->GetSystemFontCollection(fonts.GetAddressOf());
-        for (WCHAR *cursor = requested.get(); cursor && *cursor;) {
-            WCHAR *name = nextFamily(cursor);
-            if (!*name) continue;
-            appCollection = appFonts().find(name);
-            UINT32 index = 0;
-            BOOL exists = FALSE;
-            if (appCollection || (fonts && SUCCEEDED(fonts->FindFamilyName(name, &index, &exists)) && exists)) {
-                face = name;
-                break;
-            }
-        }
+    int units = 0;
+    bool ascii = true;
+    for (int32_t i = 0; i < length; ++i) {
+        unsigned char b = static_cast<unsigned char>(utf8[i]);
+        if (b >= 0x80) { ascii = false; break; }
+        text[i] = b;
+        line->byteToUnit[i] = UINT32(i);
     }
-    WCHAR locale[LOCALE_NAME_MAX_LENGTH] = {};
-    const WCHAR *localeName = GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH) ? locale : L"en-US";
-    ComPtr<IDWriteTextFormat> format;
-    const auto fontWeight = static_cast<DWRITE_FONT_WEIGHT>(std::max(1, std::min(999, int(weight))));
-    if (FAILED(textFactory()->CreateTextFormat(face, appCollection.Get(), fontWeight,
-        italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-        size_px, localeName, format.GetAddressOf()))) return nullptr;
-    line->rtl = direction == 2 || (direction == 0 && autoRTL(text.get(), units));
-    if (FAILED(format->SetReadingDirection(line->rtl ? DWRITE_READING_DIRECTION_RIGHT_TO_LEFT : DWRITE_READING_DIRECTION_LEFT_TO_RIGHT)) ||
-        FAILED(format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP))) return nullptr;
-    // Tighten to the measured width before asking for glyph positions. In a
-    // right-to-left line DirectWrite aligns the leading edge to the right.
+    if (ascii) {
+        units = length;
+        text[length] = 0;
+        line->byteToUnit[length] = UINT32(length);
+    } else {
+        units = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, length, text.get(), length);
+        if (units == 0) return nullptr;
+        text[units] = 0;
+        UINT32 native = 0;
+        for (int32_t byte = 0; byte < length;) {
+            unsigned char lead = static_cast<unsigned char>(utf8[byte]);
+            int count = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
+            for (int i = 0; i < count; ++i) line->byteToUnit[byte++] = native;
+            native += count == 4 ? 2 : 1;
+        }
+        line->byteToUnit[length] = native;
+    }
+
+    line->ascii = ascii;
+    line->rtl = direction == 2 || (direction == 0 && !ascii && autoRTL(text.get(), units));
+    auto format = cachedTextFormat(family, mono != 0, size_px, weight, italic != 0, line->rtl);
+    if (!format) return nullptr;
+    // Tighten to the measured width before asking for glyph positions on RTL lines.
     // Collect native glyphs and hit-test geometry once, under the requested shaping settings.
     // Unavailable or invalid settings keep the ordinary unconfigured layout.
     if (!configureLine(*line, text.get(), units, format.Get(), language, features, variations)) {
-        line->layout = makeLayout(text.get(), units, format.Get());
+        line->layout = makeLayout(text.get(), units, format.Get(), line->rtl);
         if (!line->layout || !line->updateMetrics(line->layout.Get())) return nullptr;
     }
     line->text = std::move(text);
@@ -1194,7 +1543,7 @@ static bool configureLine(RuneDesktopLine &line, const WCHAR *text, UINT32 units
     if (!units || ((!language || !*language) && (!features || !*features) && (!variations || !*variations)))
         return false;
     DWRITE_TEXT_RANGE range{0, units};
-    auto adjusted = makeLayout(text, units, format);
+    auto adjusted = makeLayout(text, units, format, line.rtl);
     if (!adjusted) return false;
     bool changed = false;
     if (language && *language) {
@@ -1245,19 +1594,27 @@ void rune_desktop_line_configure(RuneDesktopLine *line, const char *language, co
 void rune_desktop_line_destroy(RuneDesktopLine *line) { delete line; }
 
 RuneDesktopLineMetrics rune_desktop_line_metrics(const RuneDesktopLine *line) {
+    if (!line) return RuneDesktopLineMetrics{};
+    RuneDesktopLineMetrics out = line->metrics;
+    if (line->ensureCollector()) {
+        out.ink_x = line->ink_x;
+        out.ink_y = line->ink_y;
+        out.ink_width = line->ink_width;
+        out.ink_height = line->ink_height;
+    }
+    return out;
+}
+
+RuneDesktopLineMetrics rune_windows_line_layout_metrics(const RuneDesktopLine *line) {
     return line ? line->metrics : RuneDesktopLineMetrics{};
 }
 
+int32_t rune_windows_line_is_unit_clusters(const RuneDesktopLine *line) {
+    return line && line->allUnitClusters ? 1 : 0;
+}
+
 float rune_desktop_line_caret(const RuneDesktopLine *line, int32_t offset) {
-    if (!line || !line->byteCount) return 0;
-    const UINT32 index = line->position(offset);
-    if (!index) return line->rtl ? line->metrics.advance : 0;
-    if (offset >= line->byteCount) return line->rtl ? 0 : line->metrics.advance;
-    // At a bidi boundary the strong caret follows the shallower embedding.
-    UINT32 nextLevel = 0, previousLevel = 0;
-    const float next = line->edge(index, false, &nextLevel);
-    const float previous = line->edge(index - 1, true, &previousLevel);
-    return previousLevel < nextLevel ? previous : next;
+    return line ? line->caretAt(offset) : 0;
 }
 
 int32_t rune_desktop_line_cell(const RuneDesktopLine *line, int32_t start, int32_t end, float *left, float *advance) {
@@ -1275,13 +1632,62 @@ int32_t rune_desktop_line_cell(const RuneDesktopLine *line, int32_t start, int32
     return (level & 1) ? -1 : 1;
 }
 
+void rune_windows_line_cells(const RuneDesktopLine *line, RuneWindowsCell *cells, int32_t count) {
+    if (!line || !cells || count <= 0) return;
+    if (line->hits && line->allLTR && line->ascii) {
+        const UnitEdges *hits = line->hits.get();
+        const int32_t len = line->byteCount;
+        const float advance = line->metrics.advance;
+        for (int32_t i = 0; i < count; ++i) {
+            auto &c = cells[i];
+            const int32_t s = c.start, e = c.end;
+            if (s >= 0 && e > s && e <= len) {
+                const float startX = hits[s].leading;
+                const float endX = hits[e - 1].trailing;
+                c.advance = std::abs(endX - startX);
+                c.left = std::min(startX, endX);
+                c.direction = 1;
+                c.caret = s == 0 ? 0.0f : hits[s].leading;
+                c.end_caret = e < len ? hits[e].leading : advance;
+            } else {
+                c.left = 0;
+                c.advance = 0;
+                c.direction = 0;
+                c.caret = line->caretAt(s);
+                c.end_caret = line->caretAt(e);
+            }
+        }
+        return;
+    }
+    for (int32_t i = 0; i < count; ++i) {
+        auto &c = cells[i];
+        const UINT32 uStart = line->position(c.start);
+        const UINT32 uEnd = line->position(c.end);
+        if (uEnd <= uStart) {
+            c.left = 0;
+            c.advance = 0;
+            c.direction = 0;
+        } else {
+            UINT32 level = 0;
+            const float startX = line->edge(uStart, false, &level);
+            const float endX = line->edge(uEnd - 1, true);
+            c.advance = std::abs(endX - startX);
+            c.left = std::min(startX, endX);
+            c.direction = (level & 1) ? -1 : 1;
+        }
+        c.caret = line->caretAt(c.start);
+        c.end_caret = line->caretAt(c.end);
+    }
+}
+
 namespace {
 int32_t drawTile(const RuneDesktopLine *line, int32_t x, int32_t y, int32_t width, int32_t height,
     uint8_t *pixels, bool color, bool lcd = false) {
     int channels = color ? 4 : lcd ? 3 : 1;
     if (!line || !pixels || width <= 0 || height <= 0 ||
         int64_t(width) * height > UINT32_MAX / channels ||
-        int64_t(x) + width > INT32_MAX || int64_t(y) + height > INT32_MAX) return 0;
+        int64_t(x) + width > INT32_MAX || int64_t(y) + height > INT32_MAX ||
+        !line->ensureCollector()) return 0;
     size_t tilePixels = size_t(width) * height;
     std::memset(pixels, 0, tilePixels * channels);
     for (auto *run = line->collector->runs; run; run = run->next) {
@@ -1342,7 +1748,7 @@ int32_t rune_windows_line_lcd(const RuneDesktopLine *line, int32_t x, int32_t y,
 }
 
 int32_t rune_desktop_line_has_color(const RuneDesktopLine *line) {
-    return line && line->collector->hasColor;
+    return line && line->ensureCollector() && line->collector->hasColor;
 }
 
 int32_t rune_desktop_line_color(const RuneDesktopLine *line, int32_t x, int32_t y,

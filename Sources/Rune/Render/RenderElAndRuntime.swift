@@ -658,7 +658,9 @@ private typealias PaintHeader = (
     activeFade: SIMD4<UInt32>,
     effScale: Float,
     nodePaintHash: UInt64,
-    elideCache: (sig: UInt64, relBounds: SIMD4<Float>, k: Float)?
+    elideCache: (sig: UInt64, relBounds: SIMD4<Float>, k: Float)?,
+    needsFocusRing: Bool,
+    effectiveRotate: Float
 )
 
 private struct PaintContext {
@@ -857,7 +859,11 @@ extension Runtime {
             labelDrawCommit = viewCommitCount
         }
         var nextLabelDraws: [NodeId: RetainedLabelDraws] = [:]
-        if !freshRaster { nextLabelDraws.reserveCapacity(labelDraws.count) }
+        if !freshRaster {
+            swap(&nextLabelDraws, &spareLabelDraws)
+            nextLabelDraws.removeAll(keepingCapacity: true)
+            if nextLabelDraws.capacity < labelDraws.count { nextLabelDraws.reserveCapacity(labelDraws.count) }
+        }
 
         let scale = max(pixelScale, 0.5)
         let widthPx = max(1, Int((viewport.x * scale).rounded()))
@@ -882,7 +888,8 @@ extension Runtime {
         let hasSticky = topology.hasSticky
         let hasRaised = topology.hasRaised
         let hasAnimatedTracks = paintStore.activeLen != 0
-        let canPaintFocusRing = focusedPath != nil || cxSettings.viewDefaults.forceFocusRings
+        let forceFocusRings = cxSettings.viewDefaults.forceFocusRings
+        let canPaintFocusRing = focusedPath != nil || forceFocusRings
         let mountedCount = flatNodes.count
         let exitNodesSnapshot = topology.exits
         func renderNode(_ slot: Int) -> FlatNode { slot >= 0 ? flatNodes[slot] : exitNodesSnapshot[~slot] }
@@ -1050,7 +1057,7 @@ extension Runtime {
         let hasGroupOpacity = topology.hasGroupOpacity || hasGroupFades
         // Group opacity follows the current parent in paint order. Raised or dissolving
         // branches can draw out of order or inspect children before the first child paints.
-        let needsInteractionPrepass = (hasGroupOpacity && hasRaised) || topology.hasPressColor
+        let needsInteractionPrepass = (hasGroupOpacity && hasRaised) || (topology.hasPressColor && (canPress || hasLiveTracks))
             || !topology.dissolveIndices.isEmpty || !loopRuntime.tracks.isEmpty || !exitingIds.isEmpty
         if needsInteractionPrepass {
             var pending: [(slot: Int, scope: InteractionScope)] = []
@@ -1112,24 +1119,25 @@ extension Runtime {
         }
 
         let scaledAnimNow = cxSettings.scaledTime(at: now)
-        func hasLiveAnimatedIconOnNode(_ n: FlatNode) -> Bool {
+        func hasLiveAnimatedIconOnNode(_ n: UnsafePointer<FlatNode>, el: UnsafePointer<El<State>>) -> Bool {
             guard !reducedMotion, textSystem.hasAnimatedIcons else { return false }
-            if let (svg, _) = n.el.iconPayload {
-                let mountT = iconMountTime(node: n.nodeId, icon: svg, fallback: scaledAnimNow)
+            let nid = n.pointee.nodeId
+            if let (svg, _) = el.pointee.iconPayload {
+                let mountT = iconMountTime(node: nid, icon: svg, fallback: scaledAnimNow)
                 if textSystem.iconAnimLive(svg, at: scaledAnimNow, mountTime: mountT) {
                     return true
                 }
             }
-            if let shaped = nodeTextLayouts[n.nodeId]?.box.shaped {
+            if let shaped = nodeTextLayouts[nid]?.box.shaped {
                 for chip in shaped.pillChips {
                     if let svg = chip.icon,
-                       textSystem.iconAnimLive(svg, at: scaledAnimNow, mountTime: iconMountTime(node: n.nodeId, icon: svg, fallback: scaledAnimNow)) {
+                       textSystem.iconAnimLive(svg, at: scaledAnimNow, mountTime: iconMountTime(node: nid, icon: svg, fallback: scaledAnimNow)) {
                         return true
                     }
                 }
                 for inline in shaped.inlineIcons {
                     if let svg = inline.icon,
-                       textSystem.iconAnimLive(svg, at: scaledAnimNow, mountTime: iconMountTime(node: n.nodeId, icon: svg, fallback: scaledAnimNow)) {
+                       textSystem.iconAnimLive(svg, at: scaledAnimNow, mountTime: iconMountTime(node: nid, icon: svg, fallback: scaledAnimNow)) {
                         return true
                     }
                 }
@@ -1156,7 +1164,9 @@ extension Runtime {
                 || n.el.runtimeExtra(RenderExtrasKey.effectSpec) != nil
                 || n.el.runtimeExtra("systemMaterial") != nil
                 || n.el.backdropBlur > 0
-                || hasLiveAnimatedIconOnNode(n)
+                || withUnsafePointer(to: n) { nPtr in
+                    nPtr.pointee.element.withValuePointer { hasLiveAnimatedIconOnNode(nPtr, el: $0) }
+                }
             }
         }
 
@@ -1403,8 +1413,17 @@ extension Runtime {
         // Publish resting geometry without running the material painter for clipped boxes
         // and plain fills. Their children still paint with inherited snapping.
         let canProjectGeometry = publishHitGeometry && !hasRaised && !hasHolds && !hasPresenceFlights
-            && !hasAnimatedTracks && !canPress && !canPaintFocusRing && growthRows.isEmpty
+            && !hasAnimatedTracks && !canPress && !forceFocusRings && growthRows.isEmpty
             && activeTextFlights.isEmpty && !needsInteractionPrepass && exitingIds.isEmpty
+
+        let hasFrameGrowthSnapOffsets = !slice2State.frameGrowthSnapOffsetsY.isEmpty
+        @inline(__always)
+        func nodeGrowthSnapOffsetY(_ nodePtr: UnsafePointer<FlatNode>) -> Float {
+            let base = nodePtr.pointee.growthRowProjectionY + nodePtr.pointee.growthContentShiftY
+            return hasFrameGrowthSnapOffsets
+                ? base + (slice2State.frameGrowthSnapOffsetsY[nodePtr.pointee.nodeId] ?? 0)
+                : base
+        }
 
         // Sticky constraints use the presented bounds of scroll ancestors, before their own
         // sticky displacement. A sampled local offset does not move the constraint box.
@@ -1449,6 +1468,9 @@ extension Runtime {
                 guard rect.bottom + margin < max(0, clip.y) / scale ||
                         rect.top - margin > min(Float(heightPx), clip.w) / scale else { return false }
             }
+            if let fp = focusedPath, nodePtr.pointee.path == fp || elPtr.pointee.focusRingColor != nil {
+                return false
+            }
             guard elSliceRenderState.scaleSettles[id] == nil, !elSliceRenderState.groupFadeIds.contains(id),
                   !isActiveVirtualPath(nodePtr.pointee.path),
                   !dissolveParentIds.contains(id), !flightTargets.contains(id), !flightSources.contains(id)
@@ -1466,8 +1488,14 @@ extension Runtime {
                 childClip.fadeOrigin.x = childClip.withoutScrollOrigin.x
                 childClip.fade = packFade(width: childClip.fadeWidth, origin: childClip.fadeOrigin, clip: clip)
             }
+            let preEdges = PixelSnap.edgesPx(rect, scale: scale)
+            let preDrawClip = childClip.clipPx
+            let inPreDrawBand = !clipMisses
+                && (nodePtr.pointee.isSticky
+                    || (preEdges.w >= max(0, preDrawClip.y) - 2 && preEdges.y <= min(Float(heightPx), preDrawClip.w) + 2
+                        && preEdges.z >= max(0, preDrawClip.x) - 2 && preEdges.x <= min(Float(widthPx), preDrawClip.z) + 2))
             if !isLeaf || paintsBox {
-                guard childClip.fadeWidth == .zero, childClip.fade == .zero,
+                guard (!inPreDrawBand || (childClip.fadeWidth == .zero && childClip.fade == .zero)),
                       context.opacity == 1, snap.layer == 0, paintScene.rest(id) == nil
                 else { return false }
                 // A rectangular cut through a rounded corner requires a separate layer.
@@ -1538,7 +1566,7 @@ extension Runtime {
 
             childClip.rectPt = intersectRects(childClip.rectPt, rect)
             if !isLeaf || paintsBox {
-                snap.grow(growthSnapOffsetY(for: nodePtr.pointee))
+                snap.grow(nodeGrowthSnapOffsetY(nodePtr))
                 if nodePtr.pointee.isSticky {
                     snap.scroll(0, by: stickyShift.x - context.stickyShift.x)
                     snap.scroll(1, by: stickyShift.y - context.stickyShift.y)
@@ -1585,7 +1613,7 @@ extension Runtime {
 
         @inline(never)
         func paintNodeHeader(
-            _ slot: Int, _ nodePtr: UnsafePointer<FlatNode>, el: El<State>, presented: Presented?, loop: LoopSampleResult?,
+            _ slot: Int, _ nodePtr: UnsafePointer<FlatNode>, elPtr: UnsafePointer<El<State>>, effectiveRotate: Float, presented: Presented?, loop: LoopSampleResult?,
             parentClip inheritedClip: RenderClipState,
             snap: inout PixelSnap.Inherit,
             stickyShift: inout Vec2,
@@ -1601,11 +1629,11 @@ extension Runtime {
             parentInCache: Bool = false,
             parentIsRotated: Bool = false
         ) -> PaintHeader {
-            let node = nodePtr.pointee
-            let nid = node.nodeId
-            currentInheritedMark = el.elMark ?? currentInheritedMark
+            let nid = nodePtr.pointee.nodeId
+            let hasExtras = elPtr.pointee.runtimeExtraCount > 0
+            currentInheritedMark = elPtr.pointee.elMark ?? currentInheritedMark
             var parentClip = inheritedClip
-            if let edge = el.stickyConfig?.edge {
+            if let edge = elPtr.pointee.stickyConfig?.edge {
                 let slot: Int
                 switch edge {
                 case .left: slot = 0
@@ -1616,12 +1644,12 @@ extension Runtime {
                 parentClip.fadeOrigin[slot] = parentClip.withoutScrollOrigin[slot]
                 parentClip.fade = packFade(width: parentClip.fadeWidth, origin: parentClip.fadeOrigin, clip: parentClip.clipPx)
             }
-            let subtreeDynamic = loop != nil || !el.liveBindings.isEmpty
-                || el.surfacePayload != nil
-                || el.runtimeExtra(RenderExtrasKey.effectSpec) != nil
-                || el.runtimeExtra("systemMaterial") != nil
-                || el.backdropBlur > 0
-                || hasLiveAnimatedIconOnNode(node)
+            let subtreeDynamic = loop != nil || !elPtr.pointee.liveBindings.isEmpty
+                || elPtr.pointee.surfacePayload != nil
+                || (hasExtras && (elPtr.pointee.runtimeExtra(RenderExtrasKey.effectSpec) != nil
+                    || elPtr.pointee.runtimeExtra("systemMaterial") != nil))
+                || elPtr.pointee.backdropBlur > 0
+                || (!reducedMotion && textSystem.hasAnimatedIcons && hasLiveAnimatedIconOnNode(nodePtr, el: elPtr))
 
             var liveOpacity: Float? = nil
             var liveScale: Vec2? = nil
@@ -1635,40 +1663,43 @@ extension Runtime {
             var liveGradientBottom: Color?
             var liveRect: MotionRect? = nil
             var liveTrim: Vec2? = nil
-            for b in el.liveBindings {
-                let lnid = NodeId.hash("live:\(node.path):\(b.target)")
-                if b.target == .opacity, let v = paintLiveStore.get(lnid, Props.OPACITY) { liveOpacity = v }
-                else if b.target == .scale, let v = paintLiveStore.get(lnid, Props.SCALE) { liveScale = v }
-                else if b.target == .blur, let bl = paintLiveStore.get(lnid, Props.BLUR) { liveBlur = bl.radius }
-                else if b.target == .offset, let o = paintLiveStore.get(lnid, Props.OFFSET) { liveOffset = o }
-                else if b.target == .trim, let tr = paintLiveStore.get(lnid, Props.OFFSET) { liveTrim = tr }
-                else if b.target == .fill { liveFill = presentedLiveColor(lnid) }
-                else if b.target == .textColor { liveTextColor = presentedLiveColor(lnid) }
-                else if b.target == .borderColor { liveBorderColor = presentedLiveColor(lnid) }
-                else if b.target == .shadowColor { liveShadowColor = presentedLiveColor(lnid) }
-                else if b.target == .gradientTop { liveGradientTop = presentedLiveColor(lnid) }
-                else if b.target == .gradientBottom { liveGradientBottom = presentedLiveColor(lnid) }
-                else if b.target == .rect, let r = paintLiveStore.get(lnid, Props.RECT) {
-                    // `El::live_rect` is in parent points (`el.rs:359`); offset into world space by parent's origin.
-                    let parentOrigin = presented?.parent.flatMap { presentedById[$0]?.rect.origin }
-                        ?? node.parentIndex.flatMap { flatNodes.indices.contains($0) ? flatNodes[$0].targetRect.origin : nil }
-                        ?? .zero
-                    liveRect = MotionRect(
-                        left: parentOrigin.x + r.left,
-                        top: parentOrigin.y + r.top,
-                        right: parentOrigin.x + r.right,
-                        bottom: parentOrigin.y + r.bottom
-                    )
+            if !elPtr.pointee.liveBindings.isEmpty {
+                let nodePath = nodePtr.pointee.path
+                for b in elPtr.pointee.liveBindings {
+                    let lnid = NodeId.hash("live:\(nodePath):\(b.target)")
+                    if b.target == .opacity, let v = paintLiveStore.get(lnid, Props.OPACITY) { liveOpacity = v }
+                    else if b.target == .scale, let v = paintLiveStore.get(lnid, Props.SCALE) { liveScale = v }
+                    else if b.target == .blur, let bl = paintLiveStore.get(lnid, Props.BLUR) { liveBlur = bl.radius }
+                    else if b.target == .offset, let o = paintLiveStore.get(lnid, Props.OFFSET) { liveOffset = o }
+                    else if b.target == .trim, let tr = paintLiveStore.get(lnid, Props.OFFSET) { liveTrim = tr }
+                    else if b.target == .fill { liveFill = presentedLiveColor(lnid) }
+                    else if b.target == .textColor { liveTextColor = presentedLiveColor(lnid) }
+                    else if b.target == .borderColor { liveBorderColor = presentedLiveColor(lnid) }
+                    else if b.target == .shadowColor { liveShadowColor = presentedLiveColor(lnid) }
+                    else if b.target == .gradientTop { liveGradientTop = presentedLiveColor(lnid) }
+                    else if b.target == .gradientBottom { liveGradientBottom = presentedLiveColor(lnid) }
+                    else if b.target == .rect, let r = paintLiveStore.get(lnid, Props.RECT) {
+                        // `El::live_rect` is in parent points (`el.rs:359`); offset into world space by parent's origin.
+                        let parentOrigin = presented?.parent.flatMap { presentedById[$0]?.rect.origin }
+                            ?? nodePtr.pointee.parentIndex.flatMap { flatNodes.indices.contains($0) ? flatNodes[$0].targetRect.origin : nil }
+                            ?? .zero
+                        liveRect = MotionRect(
+                            left: parentOrigin.x + r.left,
+                            top: parentOrigin.y + r.top,
+                            right: parentOrigin.x + r.right,
+                            bottom: parentOrigin.y + r.bottom
+                        )
+                    }
                 }
             }
 
             let presentedBorder = presented?.border.map(Color.init)
-            let baseRect = liveRect ?? presented?.rect ?? node.targetRect
+            let baseRect = liveRect ?? presented?.rect ?? nodePtr.pointee.targetRect
             let pinh: PresentedTransform
             var inheritedSnap = snap
-            inheritedSnap.grow(growthSnapOffsetY(for: node))
+            inheritedSnap.grow(nodeGrowthSnapOffsetY(nodePtr))
             var anchorScaleMotion: PaintScaleMotion = .still
-            if let a = el.anchor,
+            if let a = elPtr.pointee.anchor,
                let anchorNode = renderNodes.first(where: { $0.key == a.key }) ?? flatNodes.first(where: { $0.key == a.key }) {
                 inheritedSnap.placeAtAnchor()
                 let anchorRect = newPresentedRects[anchorNode.path]
@@ -1685,8 +1716,8 @@ extension Runtime {
                 pinh = AnchorLayoutHelper.anchoredPaintTransform(
                     anchor: a,
                     baseRect: liveRect ?? paintScene.world(nid) ?? baseRect,
-                    ownElScale: el.scale,
-                    hasScaleTrack: anchoredOverlayHasScaleTrack(el, nodeId: nid),
+                    ownElScale: elPtr.pointee.scale,
+                    hasScaleTrack: anchoredOverlayHasScaleTrack(elPtr.pointee, nodeId: nid),
                     anchorDrawnRect: anchorRect,
                     anchorInheritedZoom: anchorZoom,
                     viewport: viewport
@@ -1705,18 +1736,18 @@ extension Runtime {
                     }
                 }
             } else {
-                pinh = (el.anchor == nil ? inheritedTransform : .identity)
+                pinh = (elPtr.pointee.anchor == nil ? inheritedTransform : .identity)
             }
             let loopOffset = loop?.offset ?? .zero
             let lo = Vec2((liveOffset?.x ?? 0) + loopOffset.x, (liveOffset?.y ?? 0) + loopOffset.y)
-            let baseScale = presented?.scale ?? el.scale
+            let baseScale = presented?.scale ?? elPtr.pointee.scale
             let baseScNoPress = Vec2(baseScale.x * (loop?.scale ?? 1), baseScale.y * (loop?.scale ?? 1))
             let ownScNoPress = liveScale.map { Vec2(baseScNoPress.x * max(0, $0.x), baseScNoPress.y * max(0, $0.y)) } ?? baseScNoPress
-            let pressSc = el.pressScaleFactor == nil ? 1 : pressScaleValue(for: nid)
+            let pressSc = elPtr.pointee.pressScaleFactor == nil ? 1 : pressScaleValue(for: nid)
             let ownSc = Vec2(ownScNoPress.x * pressSc, ownScNoPress.y * pressSc)
             let sc = Vec2(pinh.scale.x * ownSc.x, pinh.scale.y * ownSc.y)
             let scNoPress = Vec2(pinh.scale.x * ownScNoPress.x, pinh.scale.y * ownScNoPress.y)
-            let norm = node.anchorAttachNorm ?? el.origin
+            let norm = nodePtr.pointee.anchorAttachNorm ?? elPtr.pointee.origin
             let pivot = Vec2(baseRect.x + baseRect.width * norm.x, baseRect.y + baseRect.height * norm.y)
             let ownDx = pinh.dx + lo.x
             let ownDy = pinh.dy + lo.y
@@ -1729,7 +1760,7 @@ extension Runtime {
             let hasOwnScale = hasOwnScaleNoPress || abs(ownSc.x - 1.0) > 1e-5 || abs(ownSc.y - 1.0) > 1e-5
             let (anchor, anchorTo) = hasOwnScale ? (centre, centreTo) : (pinh.anchor, pinh.anchorTo)
             let (anchorRest, anchorRestTo) = hasOwnScaleNoPress ? (centre, centreTo) : (pinh.anchor, pinh.anchorTo)
-            let extraScrollY = el.layout.scrollAxes.contains(.vertical) ? slice2State.scrollExtraYByPath[node.path] ?? 0 : 0
+            let extraScrollY = elPtr.pointee.layout.scrollAxes.contains(.vertical) ? slice2State.scrollExtraYByPath[nodePtr.pointee.path] ?? 0 : 0
             var nextChildTransform = PresentedTransform(
                 dx: ownDx,
                 dy: ownDy - extraScrollY,
@@ -1737,7 +1768,7 @@ extension Runtime {
                 anchorTo: anchorTo,
                 scale: sc
             )
-            let staticOffset = (presented?.rect == nil || liveRect != nil) ? el.offset : .zero
+            let staticOffset = (presented?.rect == nil || liveRect != nil) ? elPtr.pointee.offset : .zero
             let shifted = baseRect.offsetBy(Vec2(ownDx + staticOffset.x, ownDy + staticOffset.y))
             let restingRect: MotionRect
             if abs(scNoPress.x - 1.0) > 1e-5 || abs(scNoPress.y - 1.0) > 1e-5 || anchorRest != anchorRestTo {
@@ -1764,60 +1795,59 @@ extension Runtime {
             let parentShift = stickyShift
             if hasSticky {
                 if topology.exitingSlot.isEmpty || topology.exitingSlot[nid] == nil {
-                    beforeSticky[node.index] = effRect
+                    beforeSticky[nodePtr.pointee.index] = effRect
                 }
-                if el.anchor != nil && !node.isSticky {
+                if elPtr.pointee.anchor != nil && !nodePtr.pointee.isSticky {
                     stickyShift = .zero
-                } else if (node.isSticky || hasHolds) && nodeIndexById[nid] != nil {
+                } else if (nodePtr.pointee.isSticky || hasHolds) && nodeIndexById[nid] != nil {
                     stickyShift = stickyShiftAtPresentation(nodePtr, rect: effRect, parent: parentShift,
                                                            localOffset: lo, inheritedScale: pinh.scale)
                 }
                 if stickyShift != .zero {
                     effRect = effRect.offsetBy(stickyShift)
-                    stuckShiftsByPath[node.path] = stickyShift
+                    stuckShiftsByPath[nodePtr.pointee.path] = stickyShift
                 }
             }
-            if el.pressScaleFactor != nil {
-                recordPressRestingHit(path: node.path, rect: restingRect.offsetBy(stickyShift), clip: parentClip.rectPt, turn: el.rotate)
+            if elPtr.pointee.pressScaleFactor != nil {
+                recordPressRestingHit(path: nodePtr.pointee.path, rect: restingRect.offsetBy(stickyShift), clip: parentClip.rectPt, turn: effectiveRotate)
             }
-            let ownScaleSpringMoving = paintMotion.unheldScale.contains(nid)
-            let ownLiveScaleMoving = el.liveBindings.contains { b in
+            let ownScaleSpringMoving = hasAnimatedTracks && !paintMotion.unheldScale.isEmpty && paintMotion.unheldScale.contains(nid)
+            let ownLiveScaleMoving = !elPtr.pointee.liveBindings.isEmpty && elPtr.pointee.liveBindings.contains { b in
                 b.target == .scale
-                    && (paintLiveStore.isMoving(NodeId.hash("live:\(node.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source))
+                    && (paintLiveStore.isMoving(NodeId.hash("live:\(nodePtr.pointee.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source))
             }
             let effectiveParentScaleMotion = max(parentScaleMotion, anchorScaleMotion)
             let nodeScaleMotion = textScaleMotion(
                 node: nid, local: ownSc.x, world: sc.x, inherited: effectiveParentScaleMotion,
-                live: el.liveBindings.contains(where: { $0.target == .scale }), anchored: el.anchor != nil,
+                live: !elPtr.pointee.liveBindings.isEmpty && elPtr.pointee.liveBindings.contains(where: { $0.target == .scale }),
+                anchored: elPtr.pointee.anchor != nil,
                 animating: ownScaleSpringMoving || ownLiveScaleMoving, at: now)
-            let restScale = el.anchor != nil && effectiveParentScaleMotion == .still ? pinh.scale.x : pinh.stillScale
+            let restScale = elPtr.pointee.anchor != nil && effectiveParentScaleMotion == .still ? pinh.scale.x : pinh.stillScale
             nextChildTransform.stillScale = nodeScaleMotion == .still ? sc.x : restScale
             let rasterScale = nodeScaleMotion.raster(sc: sc.x, rest: restScale)
-            let effInert = inheritedInert || el.isInert
-            let hoverFrac = needsInteractionPrepass ? (nodeHoverFracById[nid] ?? 0) : withUnsafePointer(to: el) { elPtr in
-                resolveNodeHoverFrac(nodePtr, el: elPtr, inert: effInert)
-            }
+            let effInert = inheritedInert || elPtr.pointee.isInert
+            let hoverFrac = needsInteractionPrepass ? (nodeHoverFracById[nid] ?? 0) : resolveNodeHoverFrac(nodePtr, el: elPtr, inert: effInert)
             let ownOpacity: Float
             if needsInteractionPrepass {
                 ownOpacity = nodeOwnOpacityById[nid] ?? 1
             } else {
-                let groupFactor = hasGroupFades || node.paintTraits.contains(.groupOpacity)
-                    ? resolveGroupOpacityFactor(nodeId: nid, group: el.groupOpacity, nodePath: node.path,
+                let groupFactor = hasGroupFades || nodePtr.pointee.paintTraits.contains(.groupOpacity)
+                    ? resolveGroupOpacityFactor(nodeId: nid, group: elPtr.pointee.groupOpacity, nodePath: nodePtr.pointee.path,
                                                 inheritedGroupFrac: groupHover, sampledRest: paintScene.get(nid, Props.GROUP_REST))
                     : 1
-                ownOpacity = ((liveOpacity ?? presented?.opacity ?? el.opacity) * groupFactor).clamped(to: 0...1)
-                if hasGroupOpacity && (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil) {
+                ownOpacity = ((liveOpacity ?? presented?.opacity ?? elPtr.pointee.opacity) * groupFactor).clamped(to: 0...1)
+                if hasGroupOpacity && (elPtr.pointee.isHoverGroup || elPtr.pointee.hoverBg != nil || elPtr.pointee.hoverGroupShare != nil) {
                     groupHover = hoverFrac
                 }
             }
             let effOpacity = (parentOpacity * ownOpacity).clamped(to: 0...1)
-            let effBlur = max(0, liveBlur ?? presented?.blur ?? el.blur)
-            let isContinuousCorners = (el.runtimeExtra(RenderExtrasKey.continuousCorners) as? Bool) ?? false
+            let effBlur = max(0, liveBlur ?? presented?.blur ?? elPtr.pointee.blur)
+            let isContinuousCorners = hasExtras && ((elPtr.pointee.runtimeExtra(RenderExtrasKey.continuousCorners) as? Bool) ?? false)
             let baseRadii = SIMD4<Float>(
-                el.corners.topLeft,
-                el.corners.topRight,
-                el.corners.bottomRight,
-                el.corners.bottomLeft
+                elPtr.pointee.corners.topLeft,
+                elPtr.pointee.corners.topRight,
+                elPtr.pointee.corners.bottomRight,
+                elPtr.pointee.corners.bottomLeft
             )
             let animR = presented?.corners
             let radiiPt = (animR.map { r in
@@ -1826,46 +1856,54 @@ extension Runtime {
             let radiiPx = radiiPt * scale
 
             let visibleClipPt = intersectRects(parentClip.rectPt, effRect)
-            newPresentedRects.record(effRect, at: node.index, path: node.path)
-            newPresentedScales.record(at: node.index, path: node.path, id: nid, scale: sc, motion: nodeScaleMotion)
+            let nodeIndex = nodePtr.pointee.index
+            let nodePath = nodePtr.pointee.path
+            newPresentedRects.record(effRect, at: nodeIndex, path: nodePath)
+            newPresentedScales.record(at: nodeIndex, path: nodePath, id: nid, scale: sc, motion: nodeScaleMotion)
 
-            let isExiting = exitingIds.contains(nid)
+            let isExiting = !exitingIds.isEmpty && exitingIds.contains(nid)
             let parentSpringing = !newRectSpringingById.isEmpty && presented?.parent.flatMap { newRectSpringingById[$0] } == true
             let ownSpatialMoving =
-                paintMotion.spatial.contains(nid) ||
-                (!el.layout.scrollAxes.isEmpty && scrollStore.isMoving(NodeId.hash("scroll:" + node.path), Props.SCROLL))
+                (!paintMotion.spatial.isEmpty && paintMotion.spatial.contains(nid)) ||
+                (!elPtr.pointee.layout.scrollAxes.isEmpty && scrollStore.isMoving(NodeId.hash("scroll:" + nodePath), Props.SCROLL))
             if !isExiting {
                 if parentSpringing || ownSpatialMoving { newRectSpringingById[nid] = true }
             }
-            let flatFocusWithin = el.focusWithinFlat && !effInert && !isExiting && isFocusWithin(node.path)
-            let hovered = !flatFocusWithin && !isExiting && (hoverFrac > 0.0005 || (!effInert && matchesAuthoredKey(hoveredKey, node.key)))
-            let pressed = canPress && (isNodePressedVisually(path: node.path, effectiveInert: effInert || isExiting)
-                || (!effInert && !isExiting && pressedPath != node.path && pressedPointerInside && matchesAuthoredKey(pressedKey, node.key)))
-            let pressTint = nodePressById[nid] ?? (nil, 0.0)
-            let focused = (focusedPath == node.path) && !isExiting
-            let highlightActive = focused && (focusVisible || (el.focusHighlightColor != nil && hoveredHighlightActive))
+            let flatFocusWithin = elPtr.pointee.focusWithinFlat && !effInert && !isExiting && isFocusWithin(nodePath)
+            let hovered = !flatFocusWithin && !isExiting && (hoverFrac > 0.0005 || (!effInert && matchesAuthoredKey(hoveredKey, nodePtr.pointee.key)))
+            let pressed = canPress && (isNodePressedVisually(path: nodePath, effectiveInert: effInert || isExiting)
+                || (!effInert && !isExiting && pressedPath != nodePath && pressedPointerInside && matchesAuthoredKey(pressedKey, nodePtr.pointee.key)))
+            let pressTint: (color: Color?, frac: Float) = nodePressById.isEmpty ? (nil, 0.0) : (nodePressById[nid] ?? (nil, 0.0))
+            let focused = (focusedPath == nodePath) && !isExiting
+            let highlightActive = focused && (focusVisible || (elPtr.pointee.focusHighlightColor != nil && hoveredHighlightActive))
+            let needsFocusRing = canPaintFocusRing && !elPtr.pointee.noFocusRing && !hasActiveTextLinks(elPtr.pointee) && (
+                forceFocusRings
+                || elPtr.pointee.focusWithinRing != nil
+                || (focused && (focusVisible || elPtr.pointee.role == .textInput))
+                || (focusedPath != nil && focusVisible && elPtr.pointee.focusRingColor != nil)
+            )
 
             // At rest the authored fill preserves exact saturated channel endpoints.
             let animatedFill = presented?.fill.flatMap { fill in
                 (presented?.isExiting == true || (hasAnimatedTracks && paintStore.isAnimating(nid, Props.FILL))) ? Color(fill) : nil
             }
-            var effBg = liveFill ?? animatedFill ?? el.background
-            if pressed, let pbg = el.pressBg {
+            var effBg = liveFill ?? animatedFill ?? elPtr.pointee.background
+            if pressed, let pbg = elPtr.pointee.pressBg {
                 effBg = blendColorOver(bottom: effBg, top: pbg, srgb: srgbBlend)
-            } else if !flatFocusWithin, let hbg = el.hoverBg {
+            } else if !flatFocusWithin, let hbg = elPtr.pointee.hoverBg {
                 let effectiveHover = hoverFrac > 0.0005 ? hoverFrac : (hovered ? 1.0 : 0.0)
                 if effectiveHover > 0.0005 {
                     effBg = blendColorOver(bottom: effBg, top: hbg.scaleAlpha(effectiveHover), srgb: srgbBlend)
                 }
             }
-            if highlightActive, let activeFocusFill = el.focusFillColor ?? el.focusHighlightColor {
+            if highlightActive, let activeFocusFill = elPtr.pointee.focusFillColor ?? elPtr.pointee.focusHighlightColor {
                 effBg = activeFocusFill
             }
 
-            if publishHitGeometry, !isExiting, let fid = el.flightId {
+            if publishHitGeometry, !isExiting, let fid = elPtr.pointee.flightId {
                 newSeenMatched[fid] = MatchedSeenSnapshot(
-                    id: nid, path: node.path, rect: effRect,
-                    corners: animR ?? el.corners, fill: effBg.motionColor, opacity: effOpacity
+                    id: nid, path: nodePath, rect: effRect,
+                    corners: animR ?? elPtr.pointee.corners, fill: effBg.motionColor, opacity: effOpacity
                 )
                 matchedFlightRegistry.recordPrevious(flightId: fid, rect: effRect)
             }
@@ -1877,15 +1915,15 @@ extension Runtime {
             if !publishHitGeometry, !rasterTurns.isEmpty, let parentElementIndex {
                 turn = rasterTurns[parentElementIndex]
             }
-            let hasOwnTurn = abs(el.rotate) > 1e-4
+            let hasOwnTurn = abs(effectiveRotate) > 1e-4
             if hasOwnTurn {
-                let pivot = Vec2(effRect.x + effRect.width * el.origin.x, effRect.y + effRect.height * el.origin.y)
-                let localTurn = Turn.about(pivot, radians: el.rotate)
+                let pivot = Vec2(effRect.x + effRect.width * elPtr.pointee.origin.x, effRect.y + effRect.height * elPtr.pointee.origin.y)
+                let localTurn = Turn.about(pivot, radians: effectiveRotate)
                 turn = turn.map { $0.after(localTurn) } ?? localTurn
             }
             let infoRect = turn?.bbox(effRect) ?? effRect
             if !isExiting && (!exitingIds.isEmpty || infoRect != effRect) {
-                drawnOverrides[node.path] = infoRect
+                drawnOverrides[nodePath] = infoRect
             }
             var infoVisible = visibleClipPt
             var presenceScreenClip = initialClipPt
@@ -1899,7 +1937,7 @@ extension Runtime {
                 let localClip = parentScope?.localClip ?? parentClip.rectPt
                 let world = turn?.bbox(home) ?? home
                 let screen = intersectRects(parentScope?.outerClip ?? initialClipPt, initialClipPt)
-                let baseOpacity = (parentScope?.opacity ?? parentOpacity) * (liveOpacity ?? presented?.opacity ?? el.opacity)
+                let baseOpacity = (parentScope?.opacity ?? parentOpacity) * (liveOpacity ?? presented?.opacity ?? elPtr.pointee.opacity)
                 loopVisible = baseOpacity >= 1.0 / 255.0 && localClip.width > 0 && localClip.height > 0 &&
                     home.right > localClip.left - margin && home.left < localClip.right + margin &&
                     home.bottom > localClip.top - margin && home.top < localClip.bottom + margin &&
@@ -1929,10 +1967,10 @@ extension Runtime {
                     rect: effRect, clipRect: scope.localClip ?? effRect,
                     outerClip: scope.outerClip.map { intersectRects($0, initialClipPt) } ?? initialClipPt,
                     turn: scope.turn, opacity: scope.opacity, isExiting: scope.exiting,
-                    hasVisualBlocker: el.blocksHits(fill: effBg, border: liveBorderColor ?? presentedBorder ?? el.borderColor),
-                    isInteractiveBlocker: el.blocksInteractiveHits,
+                    hasVisualBlocker: elPtr.pointee.blocksHits(fill: effBg, border: liveBorderColor ?? presentedBorder ?? elPtr.pointee.borderColor),
+                    isInteractiveBlocker: elPtr.pointee.blocksInteractiveHits,
                     parentScreenClip: parentScreenClip
-                ), at: node.index, path: node.path)
+                ), at: nodeIndex, path: nodePath)
                 // A turned box is reported in window coordinates. Only its ancestors' clips
                 // cut that box. Picking and presence still use the viewport above.
                 let reportClip = parentScreenClip ?? (turn == nil ? initialClipPt : nil)
@@ -1946,17 +1984,17 @@ extension Runtime {
             } else if let turn {
                 rasterTurns[myElementIndex] = turn
             }
-            let shadows = resolvedShadows(for: nid, authored: el.shadows)
-            let editLens = el.hasEditLens ? el.handlers.editLens : nil
+            let shadows = resolvedShadows(for: nid, authored: elPtr.pointee.shadows)
+            let editLens = elPtr.pointee.hasEditLens ? elPtr.pointee.handlers.editLens : nil
             let edit = isExiting ? nil : editLens?.get(state)
             let moving = presented?.isMoving == true
-            let growing = !movingGrowthPaths.isEmpty && movingGrowthPaths.contains(node.path)
+            let growing = !movingGrowthPaths.isEmpty && movingGrowthPaths.contains(nodePath)
             let flightTarget = !flightTargets.isEmpty && flightTargets.contains(nid)
             let inFlight = flightTarget || (!flightSources.isEmpty && flightSources.contains(nid))
             var pose: RawPoseNodeData?
-            if publishHitGeometry && needsPaintPose(node, el: el, rotation: el.rotate, shadows: shadows, growing: growing, inFlight: inFlight) {
-                let liveSpatialMoving = el.liveBindings.contains { binding in
-                    let id = NodeId.hash("live:\(node.path):\(binding.target)")
+            if publishHitGeometry && needsPaintPose(nodePtr.pointee, el: elPtr.pointee, rotation: effectiveRotate, shadows: shadows, growing: growing, inFlight: inFlight) {
+                let liveSpatialMoving = !elPtr.pointee.liveBindings.isEmpty && elPtr.pointee.liveBindings.contains { binding in
+                    let id = NodeId.hash("live:\(nodePath):\(binding.target)")
                     switch binding.target {
                     case .scale: return paintLiveStore.isMoving(id, Props.SCALE) || isLinearTweenActive(binding.source)
                     case .offset: return paintLiveStore.isMoving(id, Props.OFFSET) || isLinearTweenActive(binding.source)
@@ -1965,10 +2003,10 @@ extension Runtime {
                     }
                 }
                 pose = inspectPaintedNode(
-                    node, el: el, rotation: el.rotate, scale: sc.x, shadows: shadows, liveShadowColor: liveShadowColor,
+                    nodePtr.pointee, el: elPtr.pointee, rotation: effectiveRotate, scale: sc.x, shadows: shadows, liveShadowColor: liveShadowColor,
                     spatialMoving: moving || liveSpatialMoving, flightTarget: flightTarget, inFlight: inFlight, growthMoving: growing
                 )
-                rawPoseByPath[node.path] = pose
+                rawPoseByPath[nodePath] = pose
                 if let pose, pose.ownMoving || pose.ownScrolling || pose.ownGrowingRow || pose.ownMotionLive
                     || pose.ownLiveIntent != 0 || pose.instantHoverGroupRule {
                     hasInheritedFlags = true
@@ -1978,11 +2016,11 @@ extension Runtime {
             if publishHitGeometry {
                 let carried = paintCarriedScroll(nodePtr)
                 let reportedScroll: Vec2
-                if el.layout.scrollAxes.isEmpty {
+                if elPtr.pointee.layout.scrollAxes.isEmpty {
                     reportedScroll = carried
                 } else {
-                    let offset = scrollOffsets[node.path] ?? .zero
-                    reportedScroll = Vec2(offset.x, offset.y + (slice2State.scrollExtraYByPath[node.path] ?? 0))
+                    let offset = scrollOffsets[nodePath] ?? .zero
+                    reportedScroll = Vec2(offset.x, offset.y + (slice2State.scrollExtraYByPath[nodePath] ?? 0))
                 }
                 let element = PaintedElement(
                     slot: slot, parentIndex: parentElementIndex,
@@ -1995,12 +2033,12 @@ extension Runtime {
                     inert: effInert || infoExiting, moving: moving, exiting: infoExiting
                 )
                 newElements.append(element)
-                if edit != nil || el.a11yRange != nil {
+                if edit != nil || elPtr.pointee.a11yRange != nil {
                     newCaptured[myElementIndex] = CapturedElementReport(element.report(node: nodePtr.pointee, pose: pose, edit: edit))
                 }
-                if el.textHighlights != nil {
-                    let owner = newCaptured[myElementIndex]?.info ?? element.report(node: nodePtr.pointee, pose: rawPoseByPath[node.path])
-                    let marks = highlightElementInfos(node: node, owner: owner, ownerIndex: myElementIndex,
+                if elPtr.pointee.textHighlights != nil {
+                    let owner = newCaptured[myElementIndex]?.info ?? element.report(node: nodePtr.pointee, pose: rawPoseByPath[nodePath])
+                    let marks = highlightElementInfos(node: nodePtr.pointee, owner: owner, ownerIndex: myElementIndex,
                                                       rect: effRect, scaleVec: sc, visibleRect: visibleClipPt)
                     for mark in marks {
                         let markIndex = newElements.count
@@ -2010,22 +2048,22 @@ extension Runtime {
                 }
             }
 
-            let effectSpec = el.runtimeExtra(RenderExtrasKey.effectSpec) as? RenderEffectSpec
+            let effectSpec = hasExtras ? (elPtr.pointee.runtimeExtra(RenderExtrasKey.effectSpec) as? RenderEffectSpec) : nil
             if publishHitGeometry, let presented {
                 let scope = hitScopesByDepth[hitDepth]
                 let flight = (hasPresenceFlights && (activeFlightIds.contains(nid) || launchedFlightIds.contains(nid)
-                    || unclippedMatchedFlightIds.contains(nid))) || (el.flightId != nil && paintScene.isEdgeAnimating(nid))
+                    || unclippedMatchedFlightIds.contains(nid))) || (elPtr.pointee.flightId != nil && paintScene.isEdgeAnimating(nid))
                 let margin = 2 / scale + 3 * scope.blur + (effectSpec?.bleed ?? 0) * max(sc.x, sc.y)
-                let sticky = (el.anchor != nil && !node.isSticky) ? Vec2.zero
+                let sticky = (elPtr.pointee.anchor != nil && !nodePtr.pointee.isSticky) ? Vec2.zero
                     : Vec2(stickyShift.x - parentShift.x, stickyShift.y - parentShift.y)
                 kitHooks.unseenPresence.recordNativeFrameNode(
                     presented, rect: effRect, drawn: infoRect, scale: sc, turn: scope.turn,
                     localClip: scope.localClip, screenClip: presenceScreenClip, margin: margin,
-                    bypassClip: el.isolatedLayer || flight, opacity: infoOpacity, sticky: sticky
+                    bypassClip: elPtr.pointee.isolatedLayer || flight, opacity: infoOpacity, sticky: sticky
                 )
             }
 
-            let isDissolveScope = dissolveParentIds.contains(nid)
+            let isDissolveScope = hasDissolve && dissolveParentIds.contains(nid)
             // A retained table cell can be mounted far beyond its scroll viewport. Keep its
             // geometry and inspection records, but do not resolve glyphs or emit draws below a
             // clip which cannot cover a framebuffer pixel. Layers may render beyond the window.
@@ -2034,62 +2072,62 @@ extension Runtime {
                 || (parentClip.viewportApplies && (clip.z < -1 || clip.w < -1
                     || clip.x > Float(widthPx) + 1 || clip.y > Float(heightPx) + 1))
             let canCullToViewport = parentClip.viewportApplies && !parentInCache && !parentIsRotated
-                && el.rotate == 0 && effBlur == 0 && !el.isolatedLayer && effectSpec == nil
+                && effectiveRotate == 0 && effBlur == 0 && !elPtr.pointee.isolatedLayer && effectSpec == nil
             // Ordinary box ink and icons can reject distant overscan before
             // snapping, resolving materials, or touching an atlas. Keep geometry above.
             var clippedBox = false
-            let isLeaf = topology.children(of: node).isEmpty
+            let isLeaf = topology.children(at: slot).isEmpty
             if canCullToViewport,
                effRect.bottom * scale < max(0, clip.y) - 2 || effRect.top * scale > min(Float(heightPx), clip.w) + 2 {
-                let iconHeight = el.iconPayload.map { max(1, ($0.1 * scale).rounded()) } ?? 0
+                let iconHeight = elPtr.pointee.iconPayload.map { max(1, ($0.1 * scale).rounded()) } ?? 0
                 let overhang = max(0, (iconHeight - effRect.height * scale) * 0.5)
                 clippedBox = (effRect.bottom * scale < max(0, clip.y) - overhang - 2
                     || effRect.top * scale > min(Float(heightPx), clip.w) + overhang + 2)
-                    && el.plainText == nil && el.richSpans == nil && el.advanceInRun == nil
-                    && el.terminalGridPayload == nil && el.shapes.isEmpty && shadows.isEmpty
-                    && (el.hasOnlyCulledPaintExtras)
-                    && el.backdropBlur == 0 && el.elOutline == nil
-                    && !focused && !el.focusable && el.focusWithinRing == nil && el.anchor == nil
+                    && elPtr.pointee.plainText == nil && elPtr.pointee.richSpans == nil && elPtr.pointee.advanceInRun == nil
+                    && elPtr.pointee.terminalGridPayload == nil && elPtr.pointee.shapes.isEmpty && shadows.isEmpty
+                    && (elPtr.pointee.hasOnlyCulledPaintExtras)
+                    && elPtr.pointee.backdropBlur == 0 && elPtr.pointee.elOutline == nil
+                    && !focused && !elPtr.pointee.focusable && elPtr.pointee.focusWithinRing == nil && elPtr.pointee.anchor == nil
             }
             let clippedSingleLine: Bool
             if !clipMisses, canCullToViewport, sc.y > 0,
                effRect.bottom * scale < max(0, clip.y) || effRect.top * scale > min(Float(heightPx), clip.w),
-               el.plainText != nil || el.richSpans != nil,
-               el.isTruncateFadeEnabled || (el.textStyle.wrap != .wrap && el.textStyle.maxLines == 0),
-               el.liveText == nil, el.advanceInRun == nil, el.pillChips.isEmpty,
-               el.iconPayload == nil, el.imagePayload == nil, el.terminalGridPayload == nil, el.shapes.isEmpty, shadows.isEmpty,
-               el.backdropBlur == 0, el.focusRingColor == nil, el.focusWithinRing == nil, el.elOutline == nil,
-               !focused, !el.focusable, el.textHighlights == nil, el.spanRingsSpec.isEmpty, el.elStrikes.isEmpty,
-               el.hasOnlyCulledPaintExtras {
+               elPtr.pointee.plainText != nil || elPtr.pointee.richSpans != nil,
+               elPtr.pointee.isTruncateFadeEnabled || (elPtr.pointee.textStyle.wrap != .wrap && elPtr.pointee.textStyle.maxLines == 0),
+               elPtr.pointee.liveText == nil, elPtr.pointee.advanceInRun == nil, elPtr.pointee.pillChips.isEmpty,
+               elPtr.pointee.iconPayload == nil, elPtr.pointee.imagePayload == nil, elPtr.pointee.terminalGridPayload == nil, elPtr.pointee.shapes.isEmpty, shadows.isEmpty,
+               elPtr.pointee.backdropBlur == 0, elPtr.pointee.focusRingColor == nil, elPtr.pointee.focusWithinRing == nil, elPtr.pointee.elOutline == nil,
+               !focused, !elPtr.pointee.focusable, elPtr.pointee.textHighlights == nil, elPtr.pointee.spanRingsSpec.isEmpty, elPtr.pointee.elStrikes.isEmpty,
+               elPtr.pointee.hasOnlyCulledPaintExtras {
                 // A no-wrap label may still contain hard breaks. Keep the shaper's overhang
                 // allowance and account for the text offset from vertical padding.
                 let yScale = max(abs(sc.y) * scale, 0.0625)
-                let spans = el.richSpans
+                let spans = elPtr.pointee.richSpans
                 let band = TextRasterWindow(lowerY: max(0, clip.y) / yScale,
                                             upperY: min(Float(heightPx), clip.w) / yScale)
-                    .expanded(for: el.textStyle, spans: nil, scale: yScale)
-                let padding = el.layout.padding.top * yScale
+                    .expanded(for: elPtr.pointee.textStyle, spans: nil, scale: yScale)
+                let padding = elPtr.pointee.layout.padding.top * yScale
                 let outside = effRect.bottom * scale + max(0, padding) < band.lowerY * yScale
                     || effRect.top * scale + min(0, padding) > band.upperY * yScale
                 // A larger span can move the baseline by the font's line-height multiplier.
                 // Use the measured line boxes for those labels.
-                clippedSingleLine = outside && el.plainText.map(hasTextLineBreak) != true
-                    && spans?.contains(where: { $0.pad > 0 || ($0.size ?? 0) > el.textStyle.size || hasTextLineBreak($0.text) }) != true
+                clippedSingleLine = outside && elPtr.pointee.plainText.map(hasTextLineBreak) != true
+                    && spans?.contains(where: { $0.pad > 0 || ($0.size ?? 0) > elPtr.pointee.textStyle.size || hasTextLineBreak($0.text) }) != true
             } else {
                 clippedSingleLine = false
             }
             if clipMisses || clippedSingleLine || clippedBox, isLeaf, !parentInCache, !parentIsRotated,
-               el.surfacePayload == nil, el.pixelsPayload == nil, el.role != .textInput,
-               editLens == nil, !hasActiveTextLinks(el), !el.isSecure,
-               el.runtimeExtra(RenderExtrasKey.cacheEnabled) == nil, activeTextFlights.isEmpty {
+               elPtr.pointee.surfacePayload == nil, elPtr.pointee.pixelsPayload == nil, elPtr.pointee.role != .textInput,
+               editLens == nil, !hasActiveTextLinks(elPtr.pointee), !elPtr.pointee.isSecure,
+               (!hasExtras || elPtr.pointee.runtimeExtra(RenderExtrasKey.cacheEnabled) == nil), activeTextFlights.isEmpty {
                 snap = rootSnap
-                return (false, subtreeDynamic, effOpacity, effBlur, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil)
+                return (false, subtreeDynamic, effOpacity, effBlur, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil, false, effectiveRotate)
             }
             if effOpacity <= 0.001 && (!isExiting || parentOpacity == 0) {
                 if publishHitGeometry && !isLeaf {
-                    let clip = el.runtimeExtra(RenderExtrasKey.clipSpec) as? RenderClipSpec
-                    if el.layout.clipOverflow || el.clipRadius != nil || el.clipCorners != nil
-                        || el.clipFade != nil || clip != nil {
+                    let clip = hasExtras ? (elPtr.pointee.runtimeExtra(RenderExtrasKey.clipSpec) as? RenderClipSpec) : nil
+                    if elPtr.pointee.layout.clipOverflow || elPtr.pointee.clipRadius != nil || elPtr.pointee.clipCorners != nil
+                        || elPtr.pointee.clipFade != nil || clip != nil {
                         parentClip.rectPt = visibleClipPt
                         hitScopesByDepth[hitDepth].localClip = hitScopesByDepth[hitDepth].localClip.map {
                             intersectRects($0, effRect)
@@ -2097,23 +2135,23 @@ extension Runtime {
                     }
                 }
                 snap = rootSnap
-                return (false, subtreeDynamic, effOpacity, effBlur, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil)
+                return (false, subtreeDynamic, effOpacity, effBlur, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil, false, effectiveRotate)
             }
 
             let exactEdgesPx = PixelSnap.edgesPx(effRect, scale: scale)
             let rawEdgesPx = PixelSnap.edgesPx(shifted, scale: scale)
-            if el.anchor == nil || node.isSticky {
+            if elPtr.pointee.anchor == nil || nodePtr.pointee.isSticky {
                 inheritedSnap.scroll(0, by: stickyShift.x - parentShift.x)
                 inheritedSnap.scroll(1, by: stickyShift.y - parentShift.y)
             }
             let rigidPx = inheritedSnap.rigid * scale
-            let canSnap = !inheritedSnap.off && el.isPixelSnapEnabled && abs(el.rotate) < 1e-6
+            let canSnap = !inheritedSnap.off && elPtr.pointee.isPixelSnapEnabled && abs(effectiveRotate) < 1e-6
             let unscaled = abs(sc.x - 1) <= 1e-5 && abs(sc.y - 1) <= 1e-5 && anchor == anchorTo
-            let opensLayer = hasOwnScale || (el.anchor != nil && !unscaled)
+            let opensLayer = hasOwnScale || (elPtr.pointee.anchor != nil && !unscaled)
             let snapLayer = canSnap && opensLayer
-                ? pixelSnapGlides.layer(id: nid, r: exactEdgesPx, unscaled: rawEdgesPx, rigid: rigidPx, cached: parentInCache || el.isolatedLayer)
+                ? pixelSnapGlides.layer(id: nid, r: exactEdgesPx, unscaled: rawEdgesPx, rigid: rigidPx, cached: parentInCache || elPtr.pointee.isolatedLayer)
                 : inheritedSnap.layer
-            let steps = inheritedSnap.steps || el.motionSnapsEnabled
+            let steps = inheritedSnap.steps || elPtr.pointee.motionSnapsEnabled
             let rest = canSnap && !steps ? paintScene.rest(nid) : nil
             let boxGliding = canSnap && (rest != nil || !unscaled)
             let paintedEdges: SIMD4<Float>
@@ -2123,27 +2161,27 @@ extension Runtime {
             } else if rest == nil && unscaled {
                 (paintedEdges, snapParent) = pixelSnapGlides.atRest(id: nid, r: exactEdgesPx, rigid: rigidPx, parent: inheritedSnap.parent)
             } else {
-                let growthRow = !growthRows.isEmpty && (growthRows["growth:\(node.path)"] != nil || growthRows["fold:\(node.path)"] != nil)
-                let motion = PixelSnap.motion(rect: shifted, rest: rest, scale: scale, anchored: el.anchor != nil, growthRow: growthRow)
+                let growthRow = !growthRows.isEmpty && (growthRows["growth:\(nodePath)"] != nil || growthRows["fold:\(nodePath)"] != nil)
+                let motion = PixelSnap.motion(rect: shifted, rest: rest, scale: scale, anchored: elPtr.pointee.anchor != nil, growthRow: growthRow)
                 (paintedEdges, snapParent) = pixelSnapGlides.snapped(
                     id: nid, motion: motion, r: exactEdgesPx, unscaled: rawEdgesPx,
                     rigid: rigidPx, layer: snapLayer, scale: sc.x, parent: inheritedSnap.parent
                 )
             }
-            let textShifted = inheritedSnap.shifted || el.offset != .zero
+            let textShifted = inheritedSnap.shifted || elPtr.pointee.offset != .zero
             if !isLeaf {
                 snap = inheritedSnap
                 snap.shifted = textShifted
                 snap.off = !canSnap
                 snap.steps = steps
                 snap.layer = snapLayer
-                if let origin = el.paintContain {
+                if let origin = elPtr.pointee.paintContain {
                     snap.containAt(SIMD2<Float>(origin.x, origin.y))
                 }
-                snap.scroll(1, by: node.virtualWindowSnapOriginY)
-                snap.scroll(0, by: -node.scrollShift.x)
-                snap.scroll(1, by: -(node.scrollShift.y + extraScrollY))
-                snap.parent = snap.rigid == inheritedSnap.rigid && PixelSnap.frames(el, effectiveFill: effBg, effectiveBorder: presentedBorder)
+                snap.scroll(1, by: nodePtr.pointee.virtualWindowSnapOriginY)
+                snap.scroll(0, by: -nodePtr.pointee.scrollShift.x)
+                snap.scroll(1, by: -(nodePtr.pointee.scrollShift.y + extraScrollY))
+                snap.parent = snap.rigid == inheritedSnap.rigid && PixelSnap.frames(elPtr.pointee, effectiveFill: effBg, effectiveBorder: presentedBorder)
                     ? snapParent : nil
             }
             let rectPx = SIMD4<Float>(paintedEdges.x, paintedEdges.y, max(0, paintedEdges.z - paintedEdges.x), max(0, paintedEdges.w - paintedEdges.y))
@@ -2152,15 +2190,15 @@ extension Runtime {
             // box is outside the draw clip. Composited scopes use the full layer setup.
             if clippedBox, !isLeaf, !hasRaised, !isExiting, !isDissolveScope, !parentIsDissolve,
                ownOpacity == 1, parentClip.roundedMask == nil, parentClip.fadeWidth == .zero, parentClip.fade == .zero,
-               growthRows.isEmpty, el.layout.scrollAxes.isEmpty, !el.layout.clipOverflow || radiiPt == .zero,
-               el.clipRadius == nil, el.clipCorners == nil, el.clipFade == nil, el.gradient == nil,
-               el.borderWidth == 0, el.borderSides == nil,
-               el.iconPayload == nil, el.imagePayload == nil, el.surfacePayload == nil, el.pixelsPayload == nil,
-               el.liveText == nil, editLens == nil, loop == nil,
+               growthRows.isEmpty, elPtr.pointee.layout.scrollAxes.isEmpty, !elPtr.pointee.layout.clipOverflow || radiiPt == .zero,
+               elPtr.pointee.clipRadius == nil, elPtr.pointee.clipCorners == nil, elPtr.pointee.clipFade == nil, elPtr.pointee.gradient == nil,
+               elPtr.pointee.borderWidth == 0, elPtr.pointee.borderSides == nil,
+               elPtr.pointee.iconPayload == nil, elPtr.pointee.imagePayload == nil, elPtr.pointee.surfacePayload == nil, elPtr.pointee.pixelsPayload == nil,
+               elPtr.pointee.liveText == nil, editLens == nil, loop == nil,
                paintedEdges.w < max(0, clip.y) - 2 || paintedEdges.y > min(Float(heightPx), clip.w) + 2 {
                 var nextClip = parentClip
                 nextClip.rectPt = visibleClipPt
-                if el.layout.clipOverflow {
+                if elPtr.pointee.layout.clipOverflow {
                     nextClip.clipPx = intersectClipRects(nextClip.clipPx, SIMD4(rectPx.x, rectPx.y, rectPx.x + rectPx.z, rectPx.y + rectPx.w))
                     if publishHitGeometry {
                         hitScopesByDepth[hitDepth].localClip = hitScopesByDepth[hitDepth].localClip.map {
@@ -2170,23 +2208,23 @@ extension Runtime {
                 }
                 return (true, subtreeDynamic, effOpacity, 0, rectPx, radiiPx, effInert, nextClip,
                         nextChildTransform, false, false, [], false, myElementIndex, 0, 0, 0, 0,
-                        nodeScaleMotion, nextClip.clipPx, .zero, sc.x * scale, 0, nil)
+                        nodeScaleMotion, nextClip.clipPx, .zero, sc.x * scale, 0, nil, needsFocusRing, effectiveRotate)
             }
-            let clipSpec = el.runtimeExtra(RenderExtrasKey.clipSpec) as? RenderClipSpec
-            let linearGradSpec = el.runtimeExtra(RenderExtrasKey.linearGradient) as? RenderLinearGradientSpec
-            let radialGradSpec = el.runtimeExtra(RenderExtrasKey.radialGradient) as? RenderRadialGradientSpec
-            let borderGradSpec = el.runtimeExtra(RenderExtrasKey.borderGradient) as? RenderBorderGradientSpec
-            let shapeTrim = el.runtimeExtra(RenderExtrasKey.shapeTrim) as? Vec2 ?? liveTrim
+            let clipSpec = hasExtras ? (elPtr.pointee.runtimeExtra(RenderExtrasKey.clipSpec) as? RenderClipSpec) : nil
+            let linearGradSpec = hasExtras ? (elPtr.pointee.runtimeExtra(RenderExtrasKey.linearGradient) as? RenderLinearGradientSpec) : nil
+            let radialGradSpec = hasExtras ? (elPtr.pointee.runtimeExtra(RenderExtrasKey.radialGradient) as? RenderRadialGradientSpec) : nil
+            let borderGradSpec = hasExtras ? (elPtr.pointee.runtimeExtra(RenderExtrasKey.borderGradient) as? RenderBorderGradientSpec) : nil
+            let shapeTrim = (hasExtras ? (elPtr.pointee.runtimeExtra(RenderExtrasKey.shapeTrim) as? Vec2) : nil) ?? liveTrim
 
             let boundsClipPx = SIMD4<Float>(rectPx.x, rectPx.y, rectPx.x + rectPx.z, rectPx.y + rectPx.w)
             // Precedence (`paint/build.rs:618-633`): explicit `clipCorners` beats `clipRadius`;
             // `clipRadius` follows element's own `corners` when non-zero, otherwise uses `clipRadius`.
             let rawClipRadiiPt: SIMD4<Float>? = clipSpec?.radii
-                ?? el.clipCorners.map { SIMD4<Float>($0.topLeft, $0.topRight, $0.bottomRight, $0.bottomLeft) }
-                ?? el.clipRadius.map { r in
+                ?? elPtr.pointee.clipCorners.map { SIMD4<Float>($0.topLeft, $0.topRight, $0.bottomRight, $0.bottomLeft) }
+                ?? elPtr.pointee.clipRadius.map { r in
                     baseRadii != .zero ? radiiPt : SIMD4<Float>(repeating: r)
                 }
-                ?? ((el.layout.clipOverflow && radiiPt != .zero) ? radiiPt : nil)
+                ?? ((elPtr.pointee.layout.clipOverflow && radiiPt != .zero) ? radiiPt : nil)
             var ownRound: (rect: SIMD4<Float>, radii: SIMD4<Float>)? = rawClipRadiiPt.map { rawR in
                 let half = max(0, min(rectPx.z, rectPx.w) * 0.5)
                 func resolveCorner(_ r: Float) -> Float {
@@ -2197,12 +2235,12 @@ extension Runtime {
             }
             let growthMaskPt: Float? = {
                 guard !growthRows.isEmpty, !slice2State.joinedRowsWithoutRevealMask.contains(nid) else { return nil }
-                let key = el.foldGlideSpec != nil ? "fold:\(node.path)" : "growth:\(node.path)"
+                let key = elPtr.pointee.foldGlideSpec != nil ? "fold:\(nodePath)" : "growth:\(nodePath)"
                 guard let gEntry = growthRows[key] else { return nil }
                 let t = gEntry.track
                 let overflows = gEntry.edge.overflow && (t.streaming || t.isPaced)
                 guard gEntry.edge.clip && !overflows else { return nil }
-                guard t.h < t.target - 0.01 || t.mask > 0.01 || gEntry.withheld > 0.01 || t.isShuttingFold || (el.foldGlideSpec != nil && abs(t.h - t.target) > 0.25) else {
+                guard t.h < t.target - 0.01 || t.mask > 0.01 || gEntry.withheld > 0.01 || t.isShuttingFold || (elPtr.pointee.foldGlideSpec != nil && abs(t.h - t.target) > 0.25) else {
                     return nil
                 }
                 let withheldMask: Float = gEntry.withheld > 0.01 ? min(gEntry.withheld, gEntry.edge.floor) : 0
@@ -2210,7 +2248,7 @@ extension Runtime {
                 let featherH: Float
                 if combinedMask > 0.01 {
                     featherH = combinedMask
-                } else if let fg = el.foldGlideSpec?.feather, abs(t.h - t.target) > 0.25 {
+                } else if let fg = elPtr.pointee.foldGlideSpec?.feather, abs(t.h - t.target) > 0.25 {
                     featherH = fg
                 } else {
                     return nil
@@ -2220,7 +2258,7 @@ extension Runtime {
             }()
             let clipFadeLTRB: SIMD4<Float>? = clipSpec?.fadeLTRB
                 ?? growthMaskPt.map { SIMD4<Float>(0, 0, 0, $0) }
-                ?? el.clipFade
+                ?? elPtr.pointee.clipFade
             let ownFadePx: SIMD4<Float>
             if let ltrb = clipFadeLTRB {
                 ownFadePx = SIMD4<Float>(ltrb.x * scale, ltrb.y * scale, ltrb.z * scale, ltrb.w * scale)
@@ -2237,15 +2275,15 @@ extension Runtime {
 
             let hasCutout = clipSpec?.cutoutCircle != nil
             let hasChildren = hasRaised ? topology.children(at: slot).contains { !renderNode($0).el.isRaised } : !isLeaf
-            let hasOverlappingShape = el.shapes.count > 1 || (el.shapes.first?.ops.count ?? 0) > 1
-            let opacityNeedsLayer = effOpacity > 0.001 && ownOpacity > 0.001 && ownOpacity < 1.0 && (hasChildren || hasOverlappingShape || (el.iconPayload != nil && effBg.a > 0.001))
-            let cacheRequested = (el.runtimeExtra(RenderExtrasKey.cacheEnabled) as? Bool) ?? false
+            let hasOverlappingShape = elPtr.pointee.shapes.count > 1 || (elPtr.pointee.shapes.first?.ops.count ?? 0) > 1
+            let opacityNeedsLayer = effOpacity > 0.001 && ownOpacity > 0.001 && ownOpacity < 1.0 && (hasChildren || hasOverlappingShape || (elPtr.pointee.iconPayload != nil && effBg.a > 0.001))
+            let cacheRequested = hasExtras && ((elPtr.pointee.runtimeExtra(RenderExtrasKey.cacheEnabled) as? Bool) ?? false)
             var cacheEligible = cacheRequested
                 && !hasCutout
-                && el.backdropBlur <= 0
-                && el.runtimeExtra(RenderExtrasKey.effectSpec) == nil
-                && el.runtimeExtra("systemMaterial") == nil
-                && !hasDynamicInSubtree(node)
+                && elPtr.pointee.backdropBlur <= 0
+                && effectSpec == nil
+                && elPtr.pointee.runtimeExtra("systemMaterial") == nil
+                && !hasDynamicInSubtree(nodePtr.pointee)
             let effScale = sc.x * scale
             var nodePaintHash: UInt64 = 0xCBF2_9CE4_8422_2325
             if cacheEligible {
@@ -2316,11 +2354,11 @@ extension Runtime {
                 if scaleSettling { elSliceRenderState.cacheScaleFramePending = true }
                 // A plain shape has no mutable atlas input or descendant paint to re-hash.
                 // Text, images and nested content continue through content-signature validation.
-                let plainLeaf = !hasChildren && el.role == .group && el.plainText == nil && el.richSpans == nil
-                    && el.iconPayload == nil && el.imagePayload == nil && el.terminalGridPayload == nil
-                    && editLens == nil && el.runtimeExtraCount == 1
+                let plainLeaf = !hasChildren && elPtr.pointee.role == .group && elPtr.pointee.plainText == nil && elPtr.pointee.richSpans == nil
+                    && elPtr.pointee.iconPayload == nil && elPtr.pointee.imagePayload == nil && elPtr.pointee.terminalGridPayload == nil
+                    && editLens == nil && elPtr.pointee.runtimeExtraCount == 1
                 let sameRaster = sameCommit && !scaleDiff && isResident && !entry.isLivePhase && plainLeaf
-                if (sameRaster || scaleSettling) && entry.paintHash == nodePaintHash && !hasLiveTextInSubtree(node) {
+                if (sameRaster || scaleSettling) && entry.paintHash == nodePaintHash && !hasLiveTextInSubtree(nodePtr.pointee) {
                     elideCache = (
                         entry.signature,
                         entry.relBounds,
@@ -2330,12 +2368,12 @@ extension Runtime {
                 elSliceRenderState.nodeCaches[nid] = entry
             }
 
-            var rectClip = (ownRound == nil && (el.layout.clipOverflow || (clipSpec?.clipRect ?? false) || clipFadeLTRB != nil || clipSpec?.fadeLinear != nil))
+            var rectClip = (ownRound == nil && (elPtr.pointee.layout.clipOverflow || (clipSpec?.clipRect ?? false) || clipFadeLTRB != nil || clipSpec?.fadeLinear != nil))
                 ? intersectClipRects(parentClip.clipPx, boundsClipPx)
                 : parentClip.clipPx
             var mergedFadeWidth = parentClip.fadeWidth
             var mergedFadeOrigin = parentClip.fadeOrigin
-            let hasClipScope = el.layout.clipOverflow || (clipSpec?.clipRect ?? false) || ownRound != nil || clipFadeLTRB != nil || clipSpec?.fadeLinear != nil
+            let hasClipScope = elPtr.pointee.layout.clipOverflow || (clipSpec?.clipRect ?? false) || ownRound != nil || clipFadeLTRB != nil || clipSpec?.fadeLinear != nil
             if publishHitGeometry && hasClipScope {
                 hitScopesByDepth[hitDepth].localClip = hitScopesByDepth[hitDepth].localClip.map {
                     intersectRects($0, effRect)
@@ -2345,7 +2383,7 @@ extension Runtime {
                 inheritFade(width: &mergedFadeWidth, origin: &mergedFadeOrigin, rect: boundsClipPx, own: ownFadePx)
             }
 
-            let savedUnclippedClip = hasClipScope || !el.layout.scrollAxes.isEmpty
+            let savedUnclippedClip = hasClipScope || !elPtr.pointee.layout.scrollAxes.isEmpty
                 ? intersectClipRects(rectClip, boundsClipPx) : rectClip
 
             var activeRounded = parentClip.roundedMask
@@ -2356,9 +2394,9 @@ extension Runtime {
 
             // 1. Backdrop blur (`KIND_BACKDROP_BLUR = 13`): emitted ahead of element's layer & shadows (`slots.rs` + `build.rs:654`).
             var blurHole: Float? = nil
-            if el.backdropBlur > 0, backdropBlurCount < MAX_BACKDROP_BLURS,
+            if elPtr.pointee.backdropBlur > 0, backdropBlurCount < MAX_BACKDROP_BLURS,
                visibleClipPt.width > 0, visibleClipPt.height > 0,
-               effOpacity * el.elLayerOpacity * el.elPaintAlpha > 0.001 {
+               effOpacity * elPtr.pointee.elLayerOpacity * elPtr.pointee.elPaintAlpha > 0.001 {
                 backdropBlurCount += 1
                 var blurClip = parentClip.clipPx
                 var roundRadii: SIMD4<Float>? = nil
@@ -2374,9 +2412,9 @@ extension Runtime {
                 var blurInst = RenderInstance(
                     rect: rectPx,
                     radii: radiiPx,
-                    fill: SIMD4<Float>(0, 0, 0, effOpacity * el.elLayerOpacity * el.elPaintAlpha),
+                    fill: SIMD4<Float>(0, 0, 0, effOpacity * elPtr.pointee.elLayerOpacity * elPtr.pointee.elPaintAlpha),
                     border: .zero,
-                    params: SIMD4<Float>(el.backdropBlur * sc.x * scale, KIND_BACKDROP_BLUR, 0, sc.x * scale),
+                    params: SIMD4<Float>(elPtr.pointee.backdropBlur * sc.x * scale, KIND_BACKDROP_BLUR, 0, sc.x * scale),
                     uv: .zero,
                     clip: blurClip,
                     fade: parentClip.fade
@@ -2451,45 +2489,55 @@ extension Runtime {
             // Live/truncated text clear of rounded corners can skip isolation and the rounded corner SDF (`build.rs:701-705`).
             var glyphsClear = false
             if let (mask, roundR) = activeRounded,
-               ((el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) || el.advanceInRun != nil),
-               (el.liveText != nil || el.isTruncateFadeEnabled)
+               ((elPtr.pointee.plainText?.isEmpty == false) || (elPtr.pointee.richSpans?.isEmpty == false) || elPtr.pointee.advanceInRun != nil),
+               (elPtr.pointee.liveText != nil || elPtr.pointee.isTruncateFadeEnabled)
             {
-                let textLeft = effRect.x + el.layout.padding.left * sc.x
-                let textTop = effRect.y + el.layout.padding.top * sc.y
-                let boxW = max(0, effRect.width - (el.layout.padding.left + el.layout.padding.right) * sc.x) * scale
-                let boxH = max(0, effRect.height - (el.layout.padding.top + el.layout.padding.bottom) * sc.y) * scale
+                let textLeft = effRect.x + elPtr.pointee.layout.padding.left * sc.x
+                let textTop = effRect.y + elPtr.pointee.layout.padding.top * sc.y
+                let boxW = max(0, effRect.width - (elPtr.pointee.layout.padding.left + elPtr.pointee.layout.padding.right) * sc.x) * scale
+                let boxH = max(0, effRect.height - (elPtr.pointee.layout.padding.top + elPtr.pointee.layout.padding.bottom) * sc.y) * scale
                 let textClipRect = intersectClipRects(rectClip, SIMD4<Float>(textLeft * scale, textTop * scale, textLeft * scale + boxW, textTop * scale + boxH))
                 glyphsClear = insideRounded(textClipRect, mask: mask, radii: roundR)
             }
 
-            let ownPaintsCount: Int = {
-                let effBorder = liveBorderColor ?? presentedBorder ?? (borderGradSpec?.top ?? el.borderColor)
-                let hasGrad = radialGradSpec != nil || linearGradSpec != nil || el.gradient != nil
+            func computeOwnPaintsCount() -> Int {
+                let effBorder = liveBorderColor ?? presentedBorder ?? (borderGradSpec?.top ?? elPtr.pointee.borderColor)
+                let hasGrad = radialGradSpec != nil || linearGradSpec != nil || elPtr.pointee.gradient != nil
                 var c = 0
                 if !hasGrad && effBg.a > 0.001 { c += 1 }
-                if el.borderWidth > 0 && (effBorder.a > 0.001 || borderGradSpec != nil) { c += 1 }
-                if hasGrad || el.surfacePayload != nil { c += 1 }
-                if !el.shapes.isEmpty { c += 1 }
-                if el.imagePayload != nil || el.pixelsPayload != nil { c += 1 }
-                if !el.shadows.isEmpty { c += 1 }
-                if (el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) || el.iconPayload != nil { c += 1 }
+                if elPtr.pointee.borderWidth > 0 && (effBorder.a > 0.001 || borderGradSpec != nil) { c += 1 }
+                if hasGrad || elPtr.pointee.surfacePayload != nil { c += 1 }
+                if !elPtr.pointee.shapes.isEmpty { c += 1 }
+                if elPtr.pointee.imagePayload != nil || elPtr.pointee.pixelsPayload != nil { c += 1 }
+                if !elPtr.pointee.shadows.isEmpty { c += 1 }
+                if (elPtr.pointee.plainText?.isEmpty == false) || (elPtr.pointee.richSpans?.isEmpty == false) || elPtr.pointee.iconPayload != nil { c += 1 }
                 return c
-            }()
+            }
+            var cachedOwnPaintsCount: Int? = nil
+            func getOwnPaintsCount() -> Int {
+                if let c = cachedOwnPaintsCount { return c }
+                let c = computeOwnPaintsCount()
+                cachedOwnPaintsCount = c
+                return c
+            }
             let fadeNeedsLayer = effOpacity > 0.001
                 && scopeFadeWidth != .zero
                 && inFade(boundsClipPx, clip: rectClip, width: scopeFadeWidth, origin: scopeFadeOrigin)
-                && (ownPaintsCount >= 2 || (ownPaintsCount == 1 && hasChildren))
+                && {
+                    let count = getOwnPaintsCount()
+                    return count >= 2 || (count == 1 && hasChildren)
+                }()
             let roundedTextNeedsLayer = activeRounded != nil && (
                 (edit?.multiline == false)
-                || (((el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) || el.advanceInRun != nil)
-                    && (el.liveText != nil || el.isTruncateFadeEnabled)
+                || (((elPtr.pointee.plainText?.isEmpty == false) || (elPtr.pointee.richSpans?.isEmpty == false) || elPtr.pointee.advanceInRun != nil)
+                    && (elPtr.pointee.liveText != nil || elPtr.pointee.isTruncateFadeEnabled)
                     && !glyphsClear)
             )
 
-            let layerOp = el.elLayerOpacity
+            let layerOp = elPtr.pointee.elLayerOpacity
             let paintEffOpacity = (effOpacity * layerOp).clamped(to: 0...1)
-            let layerOpacityNeedsLayer = paintEffOpacity > 0.001 && paintEffOpacity < 0.999 && layerOp < 0.999 && (hasChildren || ownPaintsCount >= 2)
-            let needsLayer = el.isolatedLayer || cacheEligible || effBlur > 0.05 || abs(el.rotate) > 1e-4 || hasCutout || isDissolveScope || parentIsDissolve || opacityNeedsLayer || fadeNeedsLayer || roundedTextNeedsLayer || layerOpacityNeedsLayer
+            let layerOpacityNeedsLayer = paintEffOpacity > 0.001 && paintEffOpacity < 0.999 && layerOp < 0.999 && (hasChildren || getOwnPaintsCount() >= 2)
+            let needsLayer = elPtr.pointee.isolatedLayer || cacheEligible || effBlur > 0.05 || abs(effectiveRotate) > 1e-4 || hasCutout || isDissolveScope || parentIsDissolve || opacityNeedsLayer || fadeNeedsLayer || roundedTextNeedsLayer || layerOpacityNeedsLayer
 
             var nextChildClip: RenderClipState
             if needsLayer {
@@ -2497,7 +2545,7 @@ extension Runtime {
                 nextChildClip = RenderClipState(rectPt: visibleClipPt, clipPx: NO_CLIP, fadeWidth: .zero, fadeOrigin: NO_CLIP, fade: .zero, roundedMask: nil)
             } else if hasClipScope {
                 var childClip = rectClip
-                if ownRound != nil && (el.layout.clipOverflow || (clipSpec?.clipRect ?? false)) {
+                if ownRound != nil && (elPtr.pointee.layout.clipOverflow || (clipSpec?.clipRect ?? false)) {
                     childClip = intersectClipRects(childClip, boundsClipPx)
                 }
                 nextChildClip = RenderClipState(
@@ -2531,14 +2579,14 @@ extension Runtime {
 
             // Keep the outer fade on a sticky edge, including explicit clips between the
             // viewport and its header. Scroll ramps apply to content inside the viewport.
-            let axes = el.layout.scrollAxes
+            let axes = elPtr.pointee.layout.scrollAxes
             if !axes.isEmpty {
                 nextChildClip.clipPx = intersectClipRects(nextChildClip.clipPx, boundsClipPx)
                 for slot in 0..<4 where axes.contains(slot == 0 || slot == 2 ? .horizontal : .vertical) {
                     withoutScrollWidth[slot] = nextChildClip.fadeWidth[slot]
                     withoutScrollOrigin[slot] = nextChildClip.fadeOrigin[slot]
                 }
-                if let ramp = node.ownScrollFade {
+                if let ramp = nodePtr.pointee.ownScrollFade {
                     let widths = ramp.widths * SIMD4<Float>(sc.x, sc.y, sc.x, sc.y) * scale
                     let offset = ramp.packedOffsets ?? .zero
                     let origin = boundsClipPx + SIMD4<Float>(-abs(widths.x), -abs(widths.y), abs(widths.z), abs(widths.w)) * offset
@@ -2560,11 +2608,11 @@ extension Runtime {
             let activeFade = needsLayer ? SIMD4<UInt32>.zero : scopeRoundFade
             let activeGlyphBaseFade = (needsLayer || glyphsClear) ? (needsLayer ? SIMD4<UInt32>.zero : scopeBaseFade) : scopeRoundFade
             let rawLocalOpacity = needsLayer ? 1.0 : paintEffOpacity
-            let localOpacity = (rawLocalOpacity * el.elPaintAlpha).clamped(to: 0...1)
+            let localOpacity = (rawLocalOpacity * elPtr.pointee.elPaintAlpha).clamped(to: 0...1)
 
-            let turnPivot = SIMD2(rectPx.x + rectPx.z * el.origin.x, rectPx.y + rectPx.w * el.origin.y)
+            let turnPivot = SIMD2(rectPx.x + rectPx.z * elPtr.pointee.origin.x, rectPx.y + rectPx.w * elPtr.pointee.origin.y)
             if hasRaised && !isLeaf {
-                savedNodeStates[node.nodeId] = SavedRaisedNodeState(
+                savedNodeStates[nid] = SavedRaisedNodeState(
                     childSnap: snap,
                     stickyShift: stickyShift,
                     elementIndex: myElementIndex,
@@ -2579,13 +2627,13 @@ extension Runtime {
                     enclosingLayerOpacity: enclosingLayerOpacity,
                     nextInert: effInert,
                     nextChildTransform: nextChildTransform,
-                    childIsRotated: parentIsRotated || abs(el.rotate) > 1e-4,
+                    childIsRotated: parentIsRotated || abs(effectiveRotate) > 1e-4,
                     isDissolveScope: isDissolveScope,
                     scaleMotionRaw: nodeScaleMotion.rawValue,
                     rectPx: rectPx,
                     boundsClipPx: boundsClipPx,
                     ownClipRadiiPx: ownRound?.radii,
-                    rotate: el.rotate,
+                    rotate: effectiveRotate,
                     turnPivot: turnPivot,
                     outerTurnClip: parentClip.clipPx
                 )
@@ -2607,9 +2655,9 @@ extension Runtime {
                     let r = max(0, hole.radius * scale)
                     scopeInst.radii = SIMD4<Float>((effRect.x + hole.cx) * scale, (effRect.y + hole.cy) * scale, r, r + f)
                 }
-                if abs(el.rotate) > 1e-4 {
+                if abs(effectiveRotate) > 1e-4 {
                     scopeInst = scopeInst.turned(
-                        angle: el.rotate,
+                        angle: effectiveRotate,
                         pivot: turnPivot
                     )
                 }
@@ -2621,8 +2669,9 @@ extension Runtime {
             var nativeMaterialHole: Float? = nil
             var paintBg: Color = effBg
             let shapeRadiiPx = radiiPx
-            if let mat = el.runtimeExtra("systemMaterial") as? SystemMaterial {
-                let blending = (el.runtimeExtra("systemMaterialBlending") as? MaterialBlendingMode) ?? .behindWindow
+            let systemMaterial = hasExtras ? (elPtr.pointee.runtimeExtra("systemMaterial") as? SystemMaterial) : nil
+            if let mat = systemMaterial {
+                let blending = (elPtr.pointee.runtimeExtra("systemMaterialBlending") as? MaterialBlendingMode) ?? .behindWindow
                 let isContinuous = isContinuousCorners || radiiPt.x < 0 || radiiPt.y < 0 || radiiPt.z < 0 || radiiPt.w < 0
                 let rPx = MaterialMath.clampRadius(
                     [radiiPx.x, radiiPx.y, radiiPx.z, radiiPx.w],
@@ -2630,7 +2679,7 @@ extension Runtime {
                     height: rectPx.w
                 )
                 // Native views sit outside GPU layers, so apply the opacity the GPU would composite.
-                let materialOpacity = enclosingLayerOpacity * paintEffOpacity * el.elPaintAlpha
+                let materialOpacity = enclosingLayerOpacity * paintEffOpacity * elPtr.pointee.elPaintAlpha
                 if materials.count < MAX_NATIVE_MATERIALS, visibleClipPt.width > 0, visibleClipPt.height > 0,
                    materialOpacity > 0.001 {
                     let matDraw = MaterialDraw(
@@ -2660,11 +2709,11 @@ extension Runtime {
             }
 
             // 3. Outer drop shadows (`runtime/paint/shadow.rs`)
-            let flatFocusWithinShadows = el.focusWithinFlat && !effInert && !isExiting && isFocusWithin(node.path)
-            let castsShadow = !flatFocusWithinShadows && !shadows.isEmpty && blurHole == nil && el.attachedSystemMaterial == nil
+            let flatFocusWithinShadows = flatFocusWithin
+            let castsShadow = !flatFocusWithinShadows && !shadows.isEmpty && blurHole == nil && systemMaterial == nil
             let fillA = castsShadow ? paintBg.a : 0.0
             let solidFill = castsShadow && fillA >= 1.0
-            let opaqueForBands = solidFill && localOpacity >= 1.0 && linearGradSpec == nil && radialGradSpec == nil && el.gradient == nil && el.surfacePayload == nil
+            let opaqueForBands = solidFill && localOpacity >= 1.0 && linearGradSpec == nil && radialGradSpec == nil && elPtr.pointee.gradient == nil && elPtr.pointee.surfacePayload == nil
             let seeThroughFill = castsShadow && fillA > 0.0 && fillA < 1.0
             let dimHole: Float? = ((solidFill && localOpacity < 1.0) || seeThroughFill)
                 ? clampSignedCornerRadius(shapeRadiiPx, width: rectPx.z, height: rectPx.w)
@@ -2735,7 +2784,7 @@ extension Runtime {
 
             // 4. Background fill, multi-stop gradients, and borders
             let bwPx = borderGradSpec.map { snapBorderWidthPx($0.width, scale: scale) }
-                ?? snapBorderWidthPx(el.borderWidth, scale: scale)
+                ?? snapBorderWidthPx(elPtr.pointee.borderWidth, scale: scale)
             // The fragment shader supplies the half-pixel antialiasing floor. Encoding
             // that floor here enlarges the vertex quad and invalidates neighboring tiles.
             let softEdge = max(0, (clipSpec?.soft ?? 0) * scale)
@@ -2750,12 +2799,12 @@ extension Runtime {
             // Dimmed, an opaque fill and its linear gradient draw as one opaque gradient (`paint/build.rs:926`).
             let flatDimLinearGradient: Bool = {
                 guard hasSolidBg && paintBg.a >= 0.999 && localOpacity < 0.999 else { return false }
-                if case .linear = el.gradient, radialGradSpec == nil, linearGradSpec == nil {
+                if case .linear = elPtr.pointee.gradient, radialGradSpec == nil, linearGradSpec == nil {
                     return true
                 }
                 return false
             }()
-            let hasAnyGradient = radialGradSpec != nil || linearGradSpec != nil || el.gradient != nil
+            let hasAnyGradient = radialGradSpec != nil || linearGradSpec != nil || elPtr.pointee.gradient != nil
             if hasSolidBg && hasAnyGradient && !flatDimLinearGradient {
                 instances.append(RenderInstance(
                     rect: rectPx,
@@ -2811,7 +2860,7 @@ extension Runtime {
                     into: &instances,
                     marks: &marks
                 )
-            } else if let grad = el.gradient {
+            } else if let grad = elPtr.pointee.gradient {
                 switch grad {
                 case let .linear(authoredTop, authoredBottom, angle):
                     let top = liveGradientTop ?? authoredTop
@@ -2870,25 +2919,37 @@ extension Runtime {
                 }
             }
 
-            let effBorderColor = liveBorderColor ?? presentedBorder ?? (borderGradSpec?.top ?? el.borderColor)
-            let springingBottom = paintStore.has(nid, Props.BORDER_BOTTOM)
-                && (paintStore.isAnimating(nid, Props.BORDER_BOTTOM) || paintStore.isAnimating(nid, Props.BORDER))
-            let topPremul = premulSIMD4(effBorderColor, opacity: localOpacity, srgb: srgbBlend)
-            let borderBottomColor: Color? = (bwPx > 0 && (borderGradSpec != nil || springingBottom))
-                ? (paintStore.get(nid, Props.BORDER_BOTTOM).map(Color.init) ?? borderGradSpec?.bottom ?? effBorderColor)
-                : nil
-            let borderBottomPremul: SIMD4<Float>? = borderBottomColor.flatMap { c in
-                let p = premulSIMD4(c, opacity: localOpacity, srgb: srgbBlend)
-                return (borderGradSpec != nil || p != topPremul) ? p : nil
+            let effBorderColor: Color
+            let topPremul: SIMD4<Float>
+            let borderBottomColor: Color?
+            let borderBottomPremul: SIMD4<Float>?
+            if bwPx > 0 {
+                effBorderColor = liveBorderColor ?? presentedBorder ?? (borderGradSpec?.top ?? elPtr.pointee.borderColor)
+                topPremul = premulSIMD4(effBorderColor, opacity: localOpacity, srgb: srgbBlend)
+                let springingBottom = hasAnimatedTracks
+                    && paintStore.has(nid, Props.BORDER_BOTTOM)
+                    && (paintStore.isAnimating(nid, Props.BORDER_BOTTOM) || paintStore.isAnimating(nid, Props.BORDER))
+                borderBottomColor = (borderGradSpec != nil || springingBottom)
+                    ? (paintStore.get(nid, Props.BORDER_BOTTOM).map(Color.init) ?? borderGradSpec?.bottom ?? effBorderColor)
+                    : nil
+                borderBottomPremul = borderBottomColor.flatMap { c in
+                    let p = premulSIMD4(c, opacity: localOpacity, srgb: srgbBlend)
+                    return (borderGradSpec != nil || p != topPremul) ? p : nil
+                }
+            } else {
+                effBorderColor = .transparent
+                topPremul = .zero
+                borderBottomColor = nil
+                borderBottomPremul = nil
             }
 
             // Border & solid fill handling
-            let fillPaintedByGrad = radialGradSpec != nil || linearGradSpec != nil || el.gradient != nil
+            let fillPaintedByGrad = hasAnyGradient
             // Video and other native pictures sit above the box fill but below its border,
             // inset shadows, effect slots and children (runtime/paint/build.rs).
-            let hasSurface = el.surfacePayload != nil
+            let hasSurface = elPtr.pointee.surfacePayload != nil
             let fillDrawnSeparately = fillPaintedByGrad || hasSurface
-            if let (surface, fit) = el.surfacePayload {
+            if let (surface, fit) = elPtr.pointee.surfacePayload {
                 if hasSolidBg && !fillPaintedByGrad {
                     instances.append(RenderInstance(
                         rect: rectPx, radii: shapeRadiiPx,
@@ -2897,20 +2958,20 @@ extension Runtime {
                     ))
                     marks.append(0)
                 }
-                surfaceVideo.snapshot(surface, path: node.path)
+                surfaceVideo.snapshot(surface, path: nodePath)
                 let visible = rectPx.x < activeClip.z && rectPx.y < activeClip.w
                     && rectPx.x + rectPx.z > activeClip.x && rectPx.y + rectPx.w > activeClip.y
                 if visible {
                     surfaceVideo.pull(surface, at: now, wallTime: currentTime, waker: waker)
                     newSurfaces.append(SurfaceDraw(
-                        surface: surface.placed(el.surfacePlace), fit: fit, beforeInstance: UInt32(instances.count),
+                        surface: surface.placed(elPtr.pointee.surfacePlace), fit: fit, beforeInstance: UInt32(instances.count),
                         rect: rectPx, radii: radiiPx, clip: activeClip, clipFade: activeFade, opacity: localOpacity
                     ))
                 } else {
                     surfaceVideo.unpulled(surface)
                 }
             }
-            if let dash = el.dashedBorder, bwPx > 0 && (effBorderColor.a > 0.001 || (borderBottomColor?.a ?? 0) > 0.001) {
+            if let dash = elPtr.pointee.dashedBorder, bwPx > 0 && (effBorderColor.a > 0.001 || (borderBottomColor?.a ?? 0) > 0.001) {
                 if hasSolidBg && !fillPaintedByGrad && !hasSurface {
                     instances.append(RenderInstance(
                         rect: rectPx,
@@ -2950,7 +3011,7 @@ extension Runtime {
                 marks.append(0)
             } else if (hasSolidBg && !fillDrawnSeparately) || (bwPx > 0 && effBorderColor.a > 0.001) {
                 let sidesVec: SIMD4<Float>
-                if let s = el.borderSides {
+                if let s = elPtr.pointee.borderSides {
                     sidesVec = SIMD4<Float>(
                         snapBorderWidthPx(s.top, scale: scale),
                         snapBorderWidthPx(s.right, scale: scale),
@@ -2963,7 +3024,7 @@ extension Runtime {
                 let fill: SIMD4<Float>
                 if fillDrawnSeparately {
                     fill = .zero
-                } else if el.borderWidth == 0 && bwPx == 0 && sidesVec == .zero {
+                } else if elPtr.pointee.borderWidth == 0 && bwPx == 0 && sidesVec == .zero {
                     fill = plainFill(paintBg, opacity: localOpacity, srgb: srgbBlend)
                 } else {
                     fill = premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend)
@@ -2981,13 +3042,13 @@ extension Runtime {
                 if (!hasSolidBg || fillDrawnSeparately) && bwPx > 0 && effBorderColor.a > 0.001 && sidesVec == .zero {
                     PaintBands.pushRing(into: &instances, marks: &marks, inst: rectInst)
                 } else {
-                    if loopVisible, let spec = el.loopingSpec, case let .opacityCycle(curve) = spec.kind,
+                    if loopVisible, let spec = elPtr.pointee.loopingSpec, case let .opacityCycle(curve) = spec.kind,
                        spec.mode == .wrap, loopRuntime.tracks[nid]?.isActive(at: paintStore.nodeTime(nid)) == true,
                        publishHitGeometry, instances.count == layerStartIdx,
                        !parentInCache, !parentIsRotated, !needsLayer, !hasChildren,
                        parentOpacity == 1, (parentScope?.opacity ?? 1) == 1, parentScope?.turn == nil,
                        effOpacity == loop?.opacity, localOpacity == effOpacity, bwPx == 0, sidesVec == .zero,
-                       el.isPlainCycleDecoration, let dt = curve.frameInterval(), dt.isFinite,
+                       elPtr.pointee.isPlainCycleDecoration, let dt = curve.frameInterval(), dt.isFinite,
                        curve.stops.allSatisfy({ $0.fraction.isFinite && $0.opacity.isFinite &&
                            $0.opacity > 0.001 && $0.opacity <= 1 && paintBg.a * $0.opacity > 0.0005 }) {
                         var ink = paintBg.simd4(srgb: srgbBlend)
@@ -2998,7 +3059,7 @@ extension Runtime {
                         }
                         rectInst.fill = SIMD4(ink.x * fill.w, ink.y * fill.w, ink.z * fill.w, fill.w)
                         rectInst.params.w = localOpacity
-                        cyclePaint.record(node: nid, element: myElementIndex, path: node.path, index: instances.count,
+                        cyclePaint.record(node: nid, element: myElementIndex, path: nodePath, index: instances.count,
                                           rect: rectPx, ink: ink, curve: curve, interval: dt)
                     }
                     instances.append(rectInst)
@@ -3068,7 +3129,7 @@ extension Runtime {
             }
 
             // 8. Image (`RGBA8Atlas` / `Pixels` + optional `SurfaceFit`)
-            if let img = el.imagePayload, img.width > 0 && img.height > 0 {
+            if let img = elPtr.pointee.imagePayload, img.width > 0 && img.height > 0 {
                 let region = imagePacker.insert(img)
                 let imageEdges = region.edges
                 let idx = instances.count
@@ -3084,24 +3145,24 @@ extension Runtime {
                 ))
                 marks.append(0)
                 imageFixups.append((idx, imageEdges, Float(img.width), Float(img.height)))
-            } else if let px = el.pixelsPayload {
-                let visible = paintEffOpacity * el.elPaintAlpha > 0.001 && visibleClipPt.width > 0 && visibleClipPt.height > 0
+            } else if let px = elPtr.pointee.pixelsPayload {
+                let visible = paintEffOpacity * elPtr.pointee.elPaintAlpha > 0.001 && visibleClipPt.width > 0 && visibleClipPt.height > 0
                 if let (region, sz) = placedPixels(px, at: now, visible: visible, box: rectPx,
-                                                       fit: el.pixelsFitMode, place: el.surfacePlace) {
+                                                       fit: elPtr.pointee.pixelsFitMode, place: elPtr.pointee.surfacePlace) {
                     let imageEdges = region.edges
                     let fitted = Runtime.fittedPixelsGeometry(
                         box: rectPx,
                         uv: imageEdges,
                         imageWidth: Float(sz.width),
                         imageHeight: Float(sz.height),
-                        fit: el.pixelsFitMode,
-                        place: el.surfacePlace,
+                        fit: elPtr.pointee.pixelsFitMode,
+                        place: elPtr.pointee.surfacePlace,
                         pixelScale: scale
                     )
                     let drawRect = fitted.rect
                     let drawUV = fitted.uv
                     let maxR = min(drawRect.z, drawRect.w) * 0.5
-                    let drawRadii: SIMD4<Float> = el.pixelsFitMode != nil
+                    let drawRadii: SIMD4<Float> = elPtr.pointee.pixelsFitMode != nil
                         ? SIMD4<Float>(min(radiiPx.x, maxR), min(radiiPx.y, maxR), min(radiiPx.z, maxR), min(radiiPx.w, maxR))
                         : radiiPx
                     let idx = instances.count
@@ -3212,23 +3273,24 @@ extension Runtime {
                 }
             }
 
-            if !el.shapes.isEmpty {
+            if !elPtr.pointee.shapes.isEmpty {
                 let drawFrac = (presented?.draw ?? 1.0).clamped(to: 0...1)
-                for shape in el.shapes { paintShape(shape, drawFrac: drawFrac) }
+                for shape in elPtr.pointee.shapes { paintShape(shape, drawFrac: drawFrac) }
             }
 
             // 10. Icon (`SVGIcon`)
-            if let (svg, iconSizePt) = el.iconPayload {
+            if let (svg, iconSizePt) = elPtr.pointee.iconPayload {
                 let iconPx = max(1, Int((iconSizePt * scale).rounded()))
-                let iconColor = applyPressColor(pressTint.color, to: liveTextColor ?? paintStore.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? defaultForeground, frac: pressTint.frac)
+                let iconColor = applyPressColor(pressTint.color, to: liveTextColor ?? paintStore.get(nid, Props.TEXT_COLOR).map(Color.init) ?? elPtr.pointee.textColor ?? defaultForeground, frac: pressTint.frac)
                 let iconKind = textSystem.iconKind(svg)
+                let mirrored = nodePtr.pointee.mirroredInRtl
                 if iconKind == .animatedMono, !reducedMotion {
                     let col = premulSIMD4(iconColor, opacity: localOpacity, srgb: srgbBlend)
-                    let rotated = parentIsRotated || abs(el.rotate) > 1e-4
+                    let rotated = parentIsRotated || abs(effectiveRotate) > 1e-4
                     let exactSide = min(effRect.width, effRect.height) * scale
                     let restingExact = !rotated && nodeScaleMotion == .still && unscaled && !boxGliding && !inFlight
                         && abs(exactSide - iconSizePt * scale) < 1.0 / 512.0
-                        && abs(paintStore.get(nid, Props.ICON_TURN) ?? el.iconRotation) < 1e-6
+                        && abs(paintStore.get(nid, Props.ICON_TURN) ?? elPtr.pointee.iconRotation) < 1e-6
                     let canvas = restingExact && exactSide > 1e-4 ? max(1, Int(ceil(exactSide - 1.0 / 64.0))) : iconPx
                     let drawnSide: Float? = restingExact && exactSide > 1e-4 ? exactSide : nil
                     let pw = Float(canvas)
@@ -3249,7 +3311,7 @@ extension Runtime {
                         pixelSize: canvas,
                         drawnSize: drawnSide,
                         origin: SIMD2<Float>(ix, iy),
-                        mirrored: node.mirroredInRtl,
+                        mirrored: mirrored,
                         color: iconColor,
                         opacity: localOpacity,
                         at: now
@@ -3261,14 +3323,14 @@ extension Runtime {
                             clip: activeClip,
                             fade: activeFade,
                             rotated: rotated,
-                            animatedRecord: anim.state == .finished ? nil : (nid, svg, canvas, drawnSide, node.mirroredInRtl)
+                            animatedRecord: anim.state == .finished ? nil : (nid, svg, canvas, drawnSide, mirrored)
                         )
                     } else {
                         let placed = textSystem.glyphAtlas.rasterizeIcon(
                             svg,
                             pixelSize: canvas,
                             drawnSize: drawnSide,
-                            mirrored: node.mirroredInRtl
+                            mirrored: mirrored
                         )
                         appendIcon(
                             placed,
@@ -3284,8 +3346,8 @@ extension Runtime {
                     svg,
                     pixelSize: iconPx,
                     currentColor: iconColor,
-                    oneColor: el.isIconOneColor ? iconColor : nil,
-                    mirrored: node.mirroredInRtl
+                    oneColor: elPtr.pointee.isIconOneColor ? iconColor : nil,
+                    mirrored: mirrored
                 ), let baseMip = colorDecoded.mips.first {
                     let atlas = RGBA8Atlas(width: Int(baseMip.width), height: Int(baseMip.height), texels: [UInt8](baseMip.rgba))
                     let region = imagePacker.insert(atlas)
@@ -3311,12 +3373,12 @@ extension Runtime {
                     let placed = textSystem.glyphAtlas.rasterizeIcon(
                         svg,
                         pixelSize: iconPx,
-                        mirrored: node.mirroredInRtl
+                        mirrored: mirrored
                     )
                     let col = premulSIMD4(iconColor, opacity: localOpacity, srgb: srgbBlend)
                     let pw = Float(placed.pixelSize.x)
                     let ph = Float(placed.pixelSize.y)
-                    let rotated = parentIsRotated || abs(el.rotate) > 1e-4
+                    let rotated = parentIsRotated || abs(effectiveRotate) > 1e-4
                     let exactSide = min(effRect.width, effRect.height) * scale
                     let ix: Float, iy: Float
                     // A resting 1:1 mask snaps its own origin, as in Rust's content.rs.
@@ -3324,7 +3386,7 @@ extension Runtime {
                     if !rotated, nodeScaleMotion == .still, unscaled, !boxGliding, !inFlight,
                        abs(exactSide - iconSizePt * scale) < 1.0 / 512.0,
                        abs(exactSide - pw) < 1.0 / 512.0, pw == ph,
-                       abs(paintStore.get(nid, Props.ICON_TURN) ?? el.iconRotation) < 1e-6 {
+                       abs(paintStore.get(nid, Props.ICON_TURN) ?? elPtr.pointee.iconRotation) < 1e-6 {
                         let contain = inheritedSnap.contain * scale
                         ix = PixelSnap.onGrid(exactEdgesPx.x + (effRect.width * scale - exactSide) * 0.5, contain: contain.x)
                         iy = PixelSnap.onGrid(exactEdgesPx.y + (effRect.height * scale - exactSide) * 0.5, contain: contain.y)
@@ -3337,9 +3399,9 @@ extension Runtime {
                 }
             }
 
-            if let grid = el.terminalGridPayload {
-                let ink = liveTextColor ?? paintStore.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? defaultForeground
-                let padding = SIMD4<Float>(el.layout.padding.left * sc.x * scale, el.layout.padding.top * sc.y * scale, 0, 0)
+            if let grid = elPtr.pointee.terminalGridPayload {
+                let ink = liveTextColor ?? paintStore.get(nid, Props.TEXT_COLOR).map(Color.init) ?? elPtr.pointee.textColor ?? defaultForeground
+                let padding = SIMD4<Float>(elPtr.pointee.layout.padding.left * sc.x * scale, elPtr.pointee.layout.padding.top * sc.y * scale, 0, 0)
                 paintTerminalGridInstances(grid, snappedRect: paintedEdges + padding, exactRect: exactEdgesPx + padding,
                                            clip: activeClip, fade: activeFade,
                                            opacity: localOpacity, defaultColor: ink,
@@ -3348,32 +3410,32 @@ extension Runtime {
             }
 
             // 11. Text (`editLens` textInput / `plainText` / `richSpans` / `advanceIn`)
-            let isTextFlightTarget = activeTextFlights.contains { $0.targetNodeId == nid }
+            let isTextFlightTarget = !activeTextFlights.isEmpty && activeTextFlights.contains { $0.targetNodeId == nid }
             func rasterWindow(clip: SIMD4<Float>, originY: Float) -> TextRasterWindow? {
                 let margin = effBlur * scale * 3 + (effectSpec?.bleed ?? 0) * max(sc.x, sc.y) * scale + 2
                 return TextRasterWindow.paint(top: clip.y, bottom: clip.w, viewport: viewport.y * scale,
                                               origin: originY, scale: sc.y * scale, margin: margin,
-                                              transformed: parentIsRotated || abs(el.rotate) > 1e-4 ||
+                                              transformed: parentIsRotated || abs(effectiveRotate) > 1e-4 ||
                                                 parentInCache || cacheEligible || isTextFlightTarget)
             }
             @inline(never)
             func paintField(_ value: TextEdit) {
                 var edit = value
-                if el.isSecure {
+                if elPtr.pointee.isSecure {
                     edit.isSecure = true
-                    if let revealed = el.revealedOverride { edit.isRevealed = revealed }
+                    if let revealed = elPtr.pointee.revealedOverride { edit.isRevealed = revealed }
                 }
-                let textTop = effRect.y + el.layout.padding.top * sc.y
-                let innerW = max(0, (effRect.width - (el.layout.padding.left + el.layout.padding.right) * sc.x) / max(1e-4, sc.x))
+                let textTop = effRect.y + elPtr.pointee.layout.padding.top * sc.y
+                let innerW = max(0, (effRect.width - (elPtr.pointee.layout.padding.left + elPtr.pointee.layout.padding.right) * sc.x) / max(1e-4, sc.x))
                 let resolvedInput = ElDisplayResolver.resolveInput(
-                    el: el,
+                    el: elPtr.pointee,
                     edit: edit,
                     innerWidth: innerW,
                     pxScale: rasterScale * scale
                 )
-                let defaultTextColor = liveTextColor ?? el.textColor ?? defaultForeground
+                let defaultTextColor = liveTextColor ?? elPtr.pointee.textColor ?? defaultForeground
                 let textCol = resolvedInput.showingPlaceholder
-                    ? (el.placeholderColor ?? defaultForeground.alpha(0.4))
+                    ? (elPtr.pointee.placeholderColor ?? defaultForeground.alpha(0.4))
                     : defaultTextColor
                 let inputClipEdges = intersectClipRects(activeClip, boundsClipPx)
                 let inputWindow = rasterWindow(clip: inputClipEdges, originY: textTop * scale)
@@ -3382,17 +3444,17 @@ extension Runtime {
                     style: resolvedInput.style, maxWidth: resolvedInput.maxWidthForShape,
                     pixelScale: rasterScale * scale, emitGlyphs: !resolvedInput.renderedString.isEmpty,
                     keep: resolvedInput.isSecure ? .secret : .cached,
-                    request: Self.paragraphRequest(field: nid, el: el, edit: edit, resolved: resolvedInput),
+                    request: Self.paragraphRequest(field: nid, el: elPtr.pointee, edit: edit, resolved: resolvedInput),
                     rasterWindow: inputWindow
                 )
                 let inputBox = prepareVisibleParagraphs(in: layout, field: nid, window: inputWindow)
-                let (outlineMode, lcdMask) = directOutlineMode(el.textStyle.fontSmoothing, node: nid, moving: nodeScaleMotion != .still)
+                let (outlineMode, lcdMask) = directOutlineMode(elPtr.pointee.textStyle.fontSmoothing, node: nid, moving: nodeScaleMotion != .still)
                 let shaped = inputBox.shaped
                 let scrollX = computeSingleLineScroll(
-                    path: node.path, edit: edit, shaped: shaped, isFocused: focused,
+                    path: nodePath, edit: edit, shaped: shaped, isFocused: focused,
                     showingPlaceholder: resolvedInput.showingPlaceholder, innerWidthPt: innerW, pixelScale: inputBox.pixelScale
                 )
-                let textLeft = effRect.x + (el.layout.padding.left - scrollX) * sc.x
+                let textLeft = effRect.x + (elPtr.pointee.layout.padding.left - scrollX) * sc.x
                 let forceScaled = nodeScaleMotion != .still
                     || abs(sc.x - rasterScale) > 1e-4
                     || abs(sc.y - rasterScale) > 1e-4
@@ -3400,7 +3462,7 @@ extension Runtime {
                     RichTextFieldRender.emitBlockDecorations(
                         blocks: resolvedInput.blocks, softBreaks: edit.softBreaks,
                         richStyle: resolvedInput.richStyle, displayText: resolvedInput.showingPlaceholder ? "" : resolvedInput.renderedString, shaped: shaped,
-                        textSystem: textSystem, font: resolvedInput.showingPlaceholder ? el.textStyle : resolvedInput.style, textColor: defaultTextColor,
+                        textSystem: textSystem, font: resolvedInput.showingPlaceholder ? elPtr.pointee.textStyle : resolvedInput.style, textColor: defaultTextColor,
                         innerW: innerW * sc.x, textOriginX: textLeft, textOriginY: textTop,
                         scaleVec: sc, pxScale: scale, shapingScale: rasterScale * scale,
                         rect: { rect, radius, color in
@@ -3423,15 +3485,15 @@ extension Runtime {
                     sc: sc,
                     rasterScale: rasterScale,
                     localOpacity: localOpacity,
-                    spanRadius: el.elSpanRadius,
+                    spanRadius: elPtr.pointee.elSpanRadius,
                     defaultTextColor: defaultTextColor,
                     clipEdges: inputClipEdges,
                     fade: activeFade,
-                    rotated: parentIsRotated || abs(el.rotate) > 1e-4
+                    rotated: parentIsRotated || abs(effectiveRotate) > 1e-4
                 )
                 if focused && edit.hasSelection && edit.preedit == nil && !resolvedInput.showingPlaceholder {
                     let displayRange = resolvedInput.selectionRange(for: edit)
-                    let color = el.fieldSelectionColor(foreground: defaultForeground, active: windowFocused)
+                    let color = elPtr.pointee.fieldSelectionColor(foreground: defaultForeground, active: windowFocused)
                     let fill = premulSIMD4(color, opacity: localOpacity, srgb: srgbBlend)
                     for box in textSystem.selectionRects(in: shaped, utf8Range: displayRange, pixelScale: inputBox.pixelScale) {
                         let rect = TextBoxGeometry.pixelRect(origin: SIMD2(textLeft, textTop),
@@ -3442,16 +3504,16 @@ extension Runtime {
                         marks.append(0)
                     }
                 }
-                let departing = (el.spellcheck || resolvedInput.showingPlaceholder) && activeTextFlights.contains {
-                    FlightSelector.selects($0.state.sourceKey, path: node.path, key: node.key)
+                let departing = (elPtr.pointee.spellcheck || resolvedInput.showingPlaceholder) && activeTextFlights.contains {
+                    FlightSelector.selects($0.state.sourceKey, path: nodePath, key: nodePtr.pointee.key)
                         && $0.state.alphas(target: $0.state.destination, now: now, reducedMotion: reducedMotion).source > 0
                 }
-                if el.spellcheck && !resolvedInput.isSecure && !isExiting && !departing {
+                if elPtr.pointee.spellcheck && !resolvedInput.isSecure && !isExiting && !departing {
                     let color = premulSIMD4(FieldSpelling.color, opacity: localOpacity, srgb: srgbBlend)
-                    fieldSpelling.paint(edit: edit, focusedPath: focused ? node.path : nil,
+                    fieldSpelling.paint(edit: edit, focusedPath: focused ? nodePath : nil,
                         now: currentTime, box: inputBox, system: textSystem,
                         origin: Vec2(textLeft, textTop), scale: sc, pixels: scale,
-                        clip: inputClipEdges, rotated: parentIsRotated || abs(el.rotate) > 1e-4) { marker, radius in
+                        clip: inputClipEdges, rotated: parentIsRotated || abs(effectiveRotate) > 1e-4) { marker, radius in
                             instances.append(RenderInstance(rect: marker, radii: SIMD4(repeating: radius), fill: color,
                                 border: .zero, params: SIMD4(0, KIND_RECT, 0, 1), uv: .zero, clip: inputClipEdges, fade: activeFade))
                             marks.append(0)
@@ -3459,7 +3521,7 @@ extension Runtime {
                 } else if focused {
                     fieldSpelling.watch = nil
                 }
-                let fieldMarks = resolvedInput.showingPlaceholder || resolvedInput.isSecure ? [] : el.textHighlights ?? []
+                let fieldMarks = resolvedInput.showingPlaceholder || resolvedInput.isSecure ? [] : elPtr.pointee.textHighlights ?? []
                 for quad in TextHighlightPainter.fieldQuads(
                     marks: fieldMarks, box: inputBox, system: textSystem,
                     origin: Vec2(textLeft, textTop), transform: sc, pixelScale: scale
@@ -3479,7 +3541,7 @@ extension Runtime {
                 } else if let paragraphs = inputBox.paragraphs {
                     let top = (inputClipEdges.y / scale - textTop) * paragraphs.scale / max(sc.y, 1e-4)
                     let bottom = (inputClipEdges.w / scale - textTop) * paragraphs.scale / max(sc.y, 1e-4)
-                    let allRows = parentIsRotated || abs(el.rotate) > 1e-4
+                    let allRows = parentIsRotated || abs(effectiveRotate) > 1e-4
                     let rows = allRows ? (-Float.infinity, Float.infinity) : (top, bottom)
                     if paragraphs.waiting { textRows[nid] = rows }
                     inputGlyphs = paragraphs.glyphs(top: rows.0, bottom: rows.1, using: textSystem, inks: inputBox.spanInks)
@@ -3493,7 +3555,7 @@ extension Runtime {
                     let gy = (textTop + gq.rect.y * sc.y) * scale
                     let gw = max(1.0, gq.rect.z * sc.x * scale)
                     let gh = max(1.0, gq.rect.w * sc.y * scale)
-                    if !parentIsRotated, abs(el.rotate) <= 1e-4, gx + gw < inputClipEdges.x || gx > inputClipEdges.z { continue }
+                    if !parentIsRotated, abs(effectiveRotate) <= 1e-4, gx + gw < inputClipEdges.x || gx > inputClipEdges.z { continue }
                     let ink = fieldMarks.last { $0.fg != nil && $0.byteRange.contains(gq.utf8Offset) }?.fg ?? gq.color ?? textCol
                     let gcol = premulSIMD4(ink, opacity: localOpacity, srgb: srgbBlend)
                     appendTextGlyph(gq, rect: SIMD4(gx, gy, gw, gh), ink: gcol,
@@ -3510,7 +3572,7 @@ extension Runtime {
                         report.info.caret = [x, y, width, height]
                     }
                     if windowFocused {
-                        let color = el.caretColor ?? defaultForeground
+                        let color = elPtr.pointee.caretColor ?? defaultForeground
                         instances.append(RenderInstance(
                             rect: SIMD4(x * scale, y * scale, max(2, width * scale), height * scale),
                             radii: SIMD4(repeating: scale), fill: premulSIMD4(color, opacity: localOpacity, srgb: srgbBlend),
@@ -3523,9 +3585,9 @@ extension Runtime {
             @inline(never)
             func paintLabel() {
                 let resolvedText = ElDisplayResolver.resolveText(
-                    el: el,
-                    rawText: el.plainText,
-                    isSecure: el.isSecure
+                    el: elPtr.pointee,
+                    rawText: elPtr.pointee.plainText,
+                    isSecure: elPtr.pointee.isSecure
                 )
                 let (outlineMode, lcdMask) = directOutlineMode(resolvedText.style.fontSmoothing, node: nid, moving: nodeScaleMotion != .still)
                 let raster = isTextFlightTarget ? nil : labelRasters.raster(scale: rasterScale, still: nodeScaleMotion == .still)
@@ -3537,30 +3599,31 @@ extension Runtime {
                 let exactOffset = restsExact ? TextBoxGeometry.leafExactOff(
                     rest: snapParent, rigid: inheritedSnap.steady * scale, containPx: inheritedSnap.contain * scale, shifted: textShifted
                 ) : .zero
-                let boxLeft = (paintedEdges.x + exactOffset.x) / scale + el.layout.padding.left * sc.x
-                let textTop = (paintedEdges.y + exactOffset.y) / scale + el.layout.padding.top * sc.y
-                let drawnInnerW = max(0, rectPx.z / scale - (el.layout.padding.left + el.layout.padding.right) * sc.x)
-                let drawnInnerH = max(0, rectPx.w / scale - (el.layout.padding.top + el.layout.padding.bottom) * sc.y)
-                let layoutInnerW = max(0, node.targetRect.width - el.layout.padding.left - el.layout.padding.right)
+                let pad = elPtr.pointee.layout.padding
+                let boxLeft = (paintedEdges.x + exactOffset.x) / scale + pad.left * sc.x
+                let textTop = (paintedEdges.y + exactOffset.y) / scale + pad.top * sc.y
+                let drawnInnerW = max(0, rectPx.z / scale - (pad.left + pad.right) * sc.x)
+                let drawnInnerH = max(0, rectPx.w / scale - (pad.top + pad.bottom) * sc.y)
+                let layoutInnerW = max(0, nodePtr.pointee.targetRect.width - pad.left - pad.right)
                 let glidingText = boxGliding && unscaled && nodeScaleMotion == .still
                 let glide = glidingText ? Vec2(PixelSnap.textGlide(paintedEdges.x), PixelSnap.textGlide(paintedEdges.y)) : .zero
                 let glideOffset = glidingText ? SIMD2<Float>(paintedEdges.x - paintedEdges.x.rounded(), paintedEdges.y - paintedEdges.y.rounded()) : .zero
                 let restY = textTop * scale - glideOffset.y
-                let defaultTextColor = applyPressColor(pressTint.color, to: liveTextColor ?? paintStore.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? defaultForeground, frac: pressTint.frac)
+                let defaultTextColor = applyPressColor(pressTint.color, to: liveTextColor ?? paintStore.get(nid, Props.TEXT_COLOR).map(Color.init) ?? elPtr.pointee.textColor ?? defaultForeground, frac: pressTint.frac)
                 let inkMode = resolvedText.style.fontSmoothing == .systemDefault ? textSystem.smoothing : resolvedText.style.fontSmoothing
                 let wrapWidth = TextBoxGeometry.wrapWidth(layoutInnerW, scale: shapeScale)
-                let isRotatedScope = parentIsRotated || abs(el.rotate) > 1e-4
+                let isRotatedScope = parentIsRotated || abs(effectiveRotate) > 1e-4
                 let inCacheScope = parentInCache || cacheEligible
                 let window = rasterWindow(clip: activeClip, originY: restY)
                 var shaped = GlyphAtlas.withBaseInk(defaultTextColor, mode: inkMode) {
                     #if os(WASI) && RUNE_BROWSER_TEXT
                     if restsExact, glide == .zero, raster == nil, motionRasterGlyphs == nil,
-                       !isExiting, !isTextFlightTarget, !isRotatedScope, !inCacheScope, el.liveText == nil,
-                       el.elRevealWordFade == nil, el.textHighlights == nil, el.elStrikes.isEmpty, !hasActiveTextLinks(el),
-                       selectableRanges[node.path] == nil, let window, let measured = nodeTextLayouts[nid], !measured.isInput,
+                       !isExiting, !isTextFlightTarget, !isRotatedScope, !inCacheScope, elPtr.pointee.liveText == nil,
+                       elPtr.pointee.elRevealWordFade == nil, elPtr.pointee.textHighlights == nil, elPtr.pointee.elStrikes.isEmpty, !hasActiveTextLinks(elPtr.pointee),
+                       selectableRanges[nodePath] == nil, let window, let measured = nodeTextLayouts[nid], !measured.isInput,
                        resolvedText.matchesMountedLabel(measured.box, using: textSystem, maxWidth: wrapWidth,
                                                         pixelScale: shapeScale, window: window) {
-                        let offset = TextBoxGeometry.inlineOffset(align: el.textStyle.align, wrap: resolvedText.style.wrap,
+                        let offset = TextBoxGeometry.inlineOffset(align: elPtr.pointee.textStyle.align, wrap: resolvedText.style.wrap,
                             shaped: measured.box.shaped, innerWidth: drawnInnerW, textScale: sc.x, pixelScale: scale)
                         let current = measured.box.applyingSpanInks(resolvedText.spans)
                         if let painted = textSystem.browserLabelPaint(current, restingXPx: (boxLeft + offset) * scale, fresh: freshRaster) {
@@ -3577,7 +3640,7 @@ extension Runtime {
                         return kept.shaped
                     }
                     if !isExiting, let byLineReq = Self.staticByLineParagraphRequest(
-                        nodeId: nid, el: el, style: resolvedText.style,
+                        nodeId: nid, el: elPtr.pointee, style: resolvedText.style,
                         spans: resolvedText.spans, pills: resolvedText.pills
                     ) {
                         let hasSpans = (resolvedText.spans?.isEmpty == false)
@@ -3600,10 +3663,10 @@ extension Runtime {
                     return resolvedText.shape(using: textSystem, maxWidth: wrapWidth, pixelScale: shapeScale,
                                               emitGlyphs: true, glidePx: glide, rasterWindow: window)
                 }
-                let labelParagraphBox: TextLayoutBox? = (!isExiting && el.isByLine)
+                let labelParagraphBox: TextLayoutBox? = (!isExiting && elPtr.pointee.isByLine)
                     ? (nodeTextLayouts[nid]?.box).flatMap { $0.paragraphs != nil ? $0 : nil }
                     : nil
-                let textLeft = boxLeft + TextBoxGeometry.inlineOffset(align: el.textStyle.align,
+                let textLeft = boxLeft + TextBoxGeometry.inlineOffset(align: elPtr.pointee.textStyle.align,
                     wrap: resolvedText.truncateFade ? .noWrap : resolvedText.style.wrap, shaped: shaped,
                     innerWidth: drawnInnerW, textScale: sc.x, pixelScale: scale)
                 let restOrigin = SIMD2<Float>(textLeft * scale - glideOffset.x, restY)
@@ -3617,10 +3680,10 @@ extension Runtime {
                     || abs(sc.y - rasterScale) > 1e-4
                 var glyphClipEdges = activeClip
                 var glyphFade = activeGlyphBaseFade
-                if resolvedText.truncateFade || el.liveText != nil {
+                if resolvedText.truncateFade || elPtr.pointee.liveText != nil {
                     let baseClipRect = SIMD4<Float>(activeClip.x, activeClip.y, max(0, activeClip.z - activeClip.x), max(0, activeClip.w - activeClip.y))
                     let fadeRes = ElDisplayResolver.truncateFadeParams(
-                        el: el,
+                        el: elPtr.pointee,
                         shaped: shaped,
                         innerW: drawnInnerW,
                         innerH: drawnInnerH,
@@ -3661,7 +3724,7 @@ extension Runtime {
                         var packed = packFade(width: widths, origin: origins, clip: glyphClipEdges)
                         packed.w = glyphFade.w
                         glyphFade = packed
-                    } else if el.liveText != nil && fadeRes.isTruncated {
+                    } else if elPtr.pointee.liveText != nil && fadeRes.isTruncated {
                         glyphClipEdges = SIMD4<Float>(
                             fadeRes.glyphClip.x,
                             fadeRes.glyphClip.y,
@@ -3680,7 +3743,7 @@ extension Runtime {
                 let visibleMinY = shownY0 - bandPadPx
                 let visibleMaxY = shownY1 + bandPadPx
                 var selectionInk: SelectablePaintInk?
-                if (!selectableRanges.isEmpty && selectableRanges[node.path] != nil) || (!markedPaths.isEmpty && markedPaths.contains(node.path)) {
+                if (!selectableRanges.isEmpty && selectableRanges[nodePath] != nil) || (!markedPaths.isEmpty && markedPaths.contains(nodePath)) {
                     func paintSelection(_ rect: SIMD4<Float>, _ straight: SIMD4<Float>, radius: Float, reach: Float?) {
                         let color = SIMD4(straight.x * straight.w, straight.y * straight.w,
                                           straight.z * straight.w, straight.w)
@@ -3700,28 +3763,30 @@ extension Runtime {
                         }
                     }
                     selectionInk = emitSelectableHighlightIfNeeded(
-                        snap: node, el: el, isExiting: isExiting, activeSelectionRanges: selectableRanges,
+                        snap: nodePtr.pointee, el: elPtr.pointee, isExiting: isExiting, activeSelectionRanges: selectableRanges,
                         textOriginX: textLeft, textOriginY: textTop, scaleVec: sc, pxScale: scale,
                         localAlpha: localOpacity, shaped: shaped,
                         emitMark: { paintSelection($0, $1, radius: 0, reach: nil) },
                         emitHighlight: { paintSelection($0, $1, radius: $2, reach: $3) }
                     )
                 }
-                let linkInks = recordAndEmitTextLinks(
-                    snap: node, el: el, text: resolvedText.displayedText, authoredText: resolvedText.authoredText,
-                    caseMap: resolvedText.caseMap, shaped: shaped, elided: shaped.elided,
-                    textOriginX: textLeft, textOriginY: textTop, scaleVec: sc, pxScale: scale, shapeScale: shapeScale,
-                    localAlpha: localOpacity, defaultTextColor: defaultTextColor, isFocused: focused,
-                    isExiting: isExiting, shouldEmit: !isTextFlightTarget, visClip: visibleClipPt, linkBoxes: &newLinkBoxes
-                ) { rect, radius, fill, border, width in
-                    instances.append(RenderInstance(
-                        rect: rect, radii: SIMD4(repeating: radius),
-                        fill: premulSIMD4(fill, opacity: localOpacity, srgb: srgbBlend),
-                        border: premulSIMD4(border, opacity: localOpacity, srgb: srgbBlend),
-                        params: SIMD4(width, KIND_RECT, 0, 1), uv: .zero, clip: glyphClipEdges, fade: glyphFade
-                    ))
-                    marks.append(0)
-                }
+                let linkInks: [TextLinkInkRange] = (hasActiveTextLinks(elPtr.pointee) && !isExiting)
+                    ? recordAndEmitTextLinks(
+                        snap: nodePtr.pointee, el: elPtr.pointee, text: resolvedText.displayedText, authoredText: resolvedText.authoredText,
+                        caseMap: resolvedText.caseMap, shaped: shaped, elided: shaped.elided,
+                        textOriginX: textLeft, textOriginY: textTop, scaleVec: sc, pxScale: scale, shapeScale: shapeScale,
+                        localAlpha: localOpacity, defaultTextColor: defaultTextColor, isFocused: focused,
+                        isExiting: isExiting, shouldEmit: !isTextFlightTarget, visClip: visibleClipPt, linkBoxes: &newLinkBoxes
+                    ) { rect, radius, fill, border, width in
+                        instances.append(RenderInstance(
+                            rect: rect, radii: SIMD4(repeating: radius),
+                            fill: premulSIMD4(fill, opacity: localOpacity, srgb: srgbBlend),
+                            border: premulSIMD4(border, opacity: localOpacity, srgb: srgbBlend),
+                            params: SIMD4(width, KIND_RECT, 0, 1), uv: .zero, clip: glyphClipEdges, fade: glyphFade
+                        ))
+                        marks.append(0)
+                    }
+                    : []
                 emitTextBackdropsAndPills(
                     nodeId: nid,
                     shaped: shaped,
@@ -3730,14 +3795,14 @@ extension Runtime {
                     sc: sc,
                     rasterScale: rasterScale,
                     localOpacity: localOpacity,
-                    spanRadius: el.elSpanRadius,
+                    spanRadius: elPtr.pointee.elSpanRadius,
                     defaultTextColor: defaultTextColor,
                     clipEdges: activeClip,
                     fade: activeFade,
-                    rotated: parentIsRotated || abs(el.rotate) > 1e-4,
+                    rotated: isRotatedScope,
                     cullY: isRotatedScope ? nil : (visibleMinY, visibleMaxY)
                 )
-                var combinedHighlights = el.textHighlights ?? []
+                var combinedHighlights = elPtr.pointee.textHighlights ?? []
                 let ringHls = ElDisplayResolver.spanRingHighlights(spanRings: resolvedText.spanRings, spans: resolvedText.spans)
                 if !ringHls.isEmpty {
                     combinedHighlights.append(contentsOf: ringHls)
@@ -3792,14 +3857,14 @@ extension Runtime {
                         }
                     }
                 }
-                if !el.elStrikes.isEmpty {
+                if !elPtr.pointee.elStrikes.isEmpty {
                     let strikeQuads = ShellSliceRenderHelpers.strikeQuads(
-                        strikes: el.elStrikes,
-                        richSpans: el.richSpans,
+                        strikes: elPtr.pointee.elStrikes,
+                        richSpans: elPtr.pointee.richSpans,
                         text: resolvedText.displayedText,
                         shaped: shaped,
                         textSystem: textSystem,
-                        styleSize: el.textStyle.size,
+                        styleSize: elPtr.pointee.textStyle.size,
                         defaultTextColor: defaultTextColor,
                         textOriginX: textLeft,
                         textOriginY: textTop,
@@ -3824,7 +3889,7 @@ extension Runtime {
                     }
                 }
                 let revealClock = paintStore.nodeTimeScale(nid) != 1.0 ? paintStore.nodeTime(nid) : lastScaledAnimNow
-                let wordFadeMask = ((el.elRevealWordFade ?? -1) >= 0)
+                let wordFadeMask = ((elPtr.pointee.elRevealWordFade ?? -1) >= 0)
                     ? wordRevealStore.mask(for: nid, text: resolvedText.displayedText, shaped: shaped, textSystem: textSystem, pixelScale: scale, now: revealClock)
                     : nil
                 let labelHasParagraphs = labelParagraphBox?.paragraphs != nil
@@ -3848,8 +3913,8 @@ extension Runtime {
                 let canRetain = !freshRaster && restsExact && !labelHasParagraphs && !forceScaled && !isRotatedScope && !inCacheScope
                     && glide == .zero && raster == nil && outlineMode == nil && !lcdMask
                     && inkMode == textSystem.smoothing && motionRasterGlyphs == nil
-                    && el.liveText == nil && pressTint.frac == 0 && selectionInk == nil
-                    && el.advanceInRun == nil && !el.isSecure && el.textHighlights == nil
+                    && elPtr.pointee.liveText == nil && pressTint.frac == 0 && selectionInk == nil
+                    && elPtr.pointee.advanceInRun == nil && !elPtr.pointee.isSecure && elPtr.pointee.textHighlights == nil
                     && wordFadeMask == nil && linkInks.isEmpty && !labelGlyphs.isEmpty
                     && shaped.lineGlyphRanges.count == 1
                 let runInk = premulSIMD4(defaultTextColor, opacity: localOpacity, srgb: srgbBlend)
@@ -3921,16 +3986,16 @@ extension Runtime {
                 }
             }
             func finishPaint() {
-                let outline = el.elOutline
-                let focusOverlay = outline != nil && !hasActiveTextLinks(el) ? resolvedFocusRingOverlay(
-                    el: el,
-                    snapIndex: node.index,
-                    snapPath: node.path,
+                let outline = elPtr.pointee.elOutline
+                let focusOverlay = outline != nil && !hasActiveTextLinks(elPtr.pointee) ? resolvedFocusRingOverlay(
+                    el: elPtr.pointee,
+                    snapIndex: nodeIndex,
+                    snapPath: nodePath,
                     isExiting: isExiting,
                     effectiveInert: effInert,
-                    isFocused: focusedPath == node.path && !isExiting,
-                    forceFocusRings: cxSettings.viewDefaults.forceFocusRings,
-                    defaultRingOutline: cxSettings.viewDefaults.focusRing ?? Outline(width: 2.0, offset: el.focusRingOffset, color: Tok.accent(0, dark: systemDark)),
+                    isFocused: focused,
+                    forceFocusRings: forceFocusRings,
+                    defaultRingOutline: cxSettings.viewDefaults.focusRing ?? Outline(width: 2.0, offset: elPtr.pointee.focusRingOffset, color: Tok.accent(0, dark: systemDark)),
                     devRect: rectPx,
                     devRadii: radiiPx,
                     pxScale: scale
@@ -3975,7 +4040,7 @@ extension Runtime {
                 paintField(value)
                 finishPaint()
                 #endif
-            } else if (el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) || el.advanceInRun != nil {
+            } else if (elPtr.pointee.plainText?.isEmpty == false) || (elPtr.pointee.richSpans?.isEmpty == false) || elPtr.pointee.advanceInRun != nil {
                 #if DEBUG
                 pendingTextPaint = {
                     paintLabel()
@@ -3989,12 +4054,15 @@ extension Runtime {
                 finishPaint()
             }
 
-            return (true, subtreeDynamic, paintEffOpacity, effBlur, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, outerLayerStarts, cacheEligible, myElementIndex, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx, nodeScaleMotion, activeClip, activeFade, effScale, nodePaintHash, elideCache)
+            return (true, subtreeDynamic, paintEffOpacity, effBlur, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, outerLayerStarts, cacheEligible, myElementIndex, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx, nodeScaleMotion, activeClip, activeFade, effScale, nodePaintHash, elideCache, needsFocusRing, effectiveRotate)
         }
 
         @inline(never)
         func paintNodeFooter(
             _ nodePtr: UnsafePointer<FlatNode>,
+            elPtr: UnsafePointer<El<State>>,
+            effectiveRotate: Float,
+            needsFocusRing: Bool,
             activeClip: SIMD4<Float>,
             activeFade: SIMD4<UInt32>,
             effOpacity: Float,
@@ -4013,42 +4081,43 @@ extension Runtime {
             nodePaintHash: UInt64,
             elideCache: (sig: UInt64, relBounds: SIMD4<Float>, k: Float)?
         ) {
-            let node = nodePtr.pointee
-            let nid = node.nodeId
-            let el = node.el
-            let localOpacity = ((needsLayer ? 1.0 : effOpacity) * el.elPaintAlpha).clamped(to: 0...1)
+            let nid = nodePtr.pointee.nodeId
+            let localOpacity = ((needsLayer ? 1.0 : effOpacity) * elPtr.pointee.elPaintAlpha).clamped(to: 0...1)
 
             // 13. Focus ring
-            if !hasActiveTextLinks(el),
-               let overlay = resolvedFocusRingOverlay(
-                el: el,
-                snapIndex: node.index,
-                snapPath: node.path,
-                isExiting: exitingIds.contains(nid),
-                effectiveInert: node.effectiveInert,
-                isFocused: focusedPath == node.path && !exitingIds.contains(nid),
-                forceFocusRings: cxSettings.viewDefaults.forceFocusRings,
-                defaultRingOutline: cxSettings.viewDefaults.focusRing ?? Outline(width: 2.0, offset: el.focusRingOffset, color: Tok.accent(0, dark: systemDark)),
-                devRect: rectPx,
-                devRadii: radiiPx,
-                pxScale: scale
-            ) {
-                instances.append(RenderInstance(
-                    rect: overlay.rect,
-                    radii: SIMD4<Float>(
-                        overlay.radii.x >= 0 ? overlay.radii.x : abs(radiiPx.x),
-                        overlay.radii.y >= 0 ? overlay.radii.y : abs(radiiPx.y),
-                        overlay.radii.z >= 0 ? overlay.radii.z : abs(radiiPx.z),
-                        overlay.radii.w >= 0 ? overlay.radii.w : abs(radiiPx.w)
-                    ),
-                    fill: .zero,
-                    border: premulSIMD4(overlay.color, opacity: localOpacity, srgb: srgbBlend),
-                    params: SIMD4<Float>(overlay.widthPx, KIND_RECT, 0, 1.0),
-                    uv: .zero,
-                    clip: activeClip,
-                    fade: activeFade
-                ))
-                marks.append(0)
+            if needsFocusRing {
+                let isExiting = !exitingIds.isEmpty && exitingIds.contains(nid)
+                let snapPath = nodePtr.pointee.path
+                if let overlay = resolvedFocusRingOverlay(
+                    el: elPtr.pointee,
+                    snapIndex: nodePtr.pointee.index,
+                    snapPath: snapPath,
+                    isExiting: isExiting,
+                    effectiveInert: nodePtr.pointee.effectiveInert,
+                    isFocused: focusedPath == snapPath && !isExiting,
+                    forceFocusRings: forceFocusRings,
+                    defaultRingOutline: cxSettings.viewDefaults.focusRing ?? Outline(width: 2.0, offset: elPtr.pointee.focusRingOffset, color: Tok.accent(0, dark: systemDark)),
+                    devRect: rectPx,
+                    devRadii: radiiPx,
+                    pxScale: scale
+                ) {
+                    instances.append(RenderInstance(
+                        rect: overlay.rect,
+                        radii: SIMD4<Float>(
+                            overlay.radii.x >= 0 ? overlay.radii.x : abs(radiiPx.x),
+                            overlay.radii.y >= 0 ? overlay.radii.y : abs(radiiPx.y),
+                            overlay.radii.z >= 0 ? overlay.radii.z : abs(radiiPx.z),
+                            overlay.radii.w >= 0 ? overlay.radii.w : abs(radiiPx.w)
+                        ),
+                        fill: .zero,
+                        border: premulSIMD4(overlay.color, opacity: localOpacity, srgb: srgbBlend),
+                        params: SIMD4<Float>(overlay.widthPx, KIND_RECT, 0, 1.0),
+                        uv: .zero,
+                        clip: activeClip,
+                        fade: activeFade
+                    ))
+                    marks.append(0)
+                }
             }
 
             if needsLayer {
@@ -4092,7 +4161,7 @@ extension Runtime {
                             srgbBlend: srgbBlend,
                             glyphAtlas: textSystem.glyphAtlas,
                             imageVersion: imagePacker.version(at:),
-                            userKey: el.runtimeExtra(RenderExtrasKey.cacheKey) as? UInt64
+                            userKey: elPtr.pointee.runtimeExtra(RenderExtrasKey.cacheKey) as? UInt64
                         )
                         var bx0 = rectPx.x
                         var by0 = rectPx.y
@@ -4117,7 +4186,7 @@ extension Runtime {
                         if cw > 4096 || ch > 4096 {
                             elSliceRenderState.nodeCaches.removeValue(forKey: nid)
                         } else {
-                            if abs(el.rotate) <= 1e-4 {
+                            if abs(effectiveRotate) <= 1e-4 {
                                 instances[innerLayerIdx].rect = SIMD4<Float>(bx0, by0, cw, ch)
                             }
                             let prev = elSliceRenderState.nodeCaches[nid]
@@ -4153,26 +4222,31 @@ extension Runtime {
         var footers: [(slot: Int, header: PaintHeader)] = []
 
         func finishNode(_ nodePtr: UnsafePointer<FlatNode>, _ h: PaintHeader, dynamic subtreeDynamic: Bool) {
-            paintNodeFooter(
-                nodePtr,
-                activeClip: h.activeClip,
-                activeFade: h.activeFade,
-                effOpacity: h.effOpacity,
-                effBlur: h.effBlur,
-                rectPx: h.rectPx,
-                radiiPx: h.radiiPx,
-                needsLayer: h.needsLayer,
-                outerLayerStarts: h.outerLayerStarts,
-                cacheEligible: h.cacheEligible,
-                subtreeDynamic: subtreeDynamic,
-                layerStartIdx: h.layerStartIdx,
-                surfaceStartIdx: h.surfaceStartIdx,
-                glyphFixupStartIdx: h.glyphFixupStartIdx,
-                imageFixupStartIdx: h.imageFixupStartIdx,
-                effScale: h.effScale,
-                nodePaintHash: h.nodePaintHash,
-                elideCache: h.elideCache
-            )
+            nodePtr.pointee.element.withValuePointer { elPtr in
+                paintNodeFooter(
+                    nodePtr,
+                    elPtr: elPtr,
+                    effectiveRotate: h.effectiveRotate,
+                    needsFocusRing: h.needsFocusRing,
+                    activeClip: h.activeClip,
+                    activeFade: h.activeFade,
+                    effOpacity: h.effOpacity,
+                    effBlur: h.effBlur,
+                    rectPx: h.rectPx,
+                    radiiPx: h.radiiPx,
+                    needsLayer: h.needsLayer,
+                    outerLayerStarts: h.outerLayerStarts,
+                    cacheEligible: h.cacheEligible,
+                    subtreeDynamic: subtreeDynamic,
+                    layerStartIdx: h.layerStartIdx,
+                    surfaceStartIdx: h.surfaceStartIdx,
+                    glyphFixupStartIdx: h.glyphFixupStartIdx,
+                    imageFixupStartIdx: h.imageFixupStartIdx,
+                    effScale: h.effScale,
+                    nodePaintHash: h.nodePaintHash,
+                    elideCache: h.elideCache
+                )
+            }
         }
 
         @discardableResult
@@ -4218,7 +4292,7 @@ extension Runtime {
                     let nodeId = nodePtr.pointee.nodeId
                     let presented = presentedSlots.isEmpty
                         ? presentedById[nodeId] : frameOut.nodes[presentedSlots[slot]]
-                    let loop = loopSamples[nodeId]
+                    let loop = loopSamples.isEmpty ? nil : loopSamples[nodeId]
                     let joinedGrowth = !slice2State.joinedRowsWithoutRevealMask.isEmpty && slice2State.joinedRowsWithoutRevealMask.contains(nodeId)
                     let didProject = canProjectGeometry && nodePtr.pointee.paintTraits.contains(.offscreenGeometry) && !joinedGrowth && loop == nil && presented != nil && nodePtr.pointee.element.withValuePointer { elPtr in
                         projectGeometry(slot, nodePtr, elPtr, presented!, &context, isLeaf: children.isEmpty)
@@ -4240,32 +4314,43 @@ extension Runtime {
                         let authoredTurn = nodePtr.pointee.el.rotate
                         let turn = (presented?.rotate ?? authoredTurn) + (loop?.rotation ?? 0)
                         let h: PaintHeader
-                        if turn == authoredTurn && !joinedGrowth {
-                            h = paintNodeHeader(
-                                slot, nodePtr, el: nodePtr.pointee.el, presented: presented, loop: loop,
-                                parentClip: context.clip, snap: &snap, stickyShift: &stickyShift, inheritedInert: context.inert, groupHover: &groupHover, parentOpacity: context.opacity,
-                                enclosingLayerOpacity: context.enclosingOpacity, inheritedTransform: context.transform,
-                                parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
-                                parentElementIndex: context.element, hitDepth: context.hitDepth + 1, parentInCache: context.inCache, parentIsRotated: context.rotated
-                            )
+                        if !joinedGrowth {
+                            h = nodePtr.pointee.element.withValuePointer { elPtr in
+                                let header = paintNodeHeader(
+                                    slot, nodePtr, elPtr: elPtr, effectiveRotate: turn, presented: presented, loop: loop,
+                                    parentClip: context.clip, snap: &snap, stickyShift: &stickyShift, inheritedInert: context.inert, groupHover: &groupHover, parentOpacity: context.opacity,
+                                    enclosingLayerOpacity: context.enclosingOpacity, inheritedTransform: context.transform,
+                                    parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
+                                    parentElementIndex: context.element, hitDepth: context.hitDepth + 1, parentInCache: context.inCache, parentIsRotated: context.rotated
+                                )
+                                #if DEBUG
+                                if let paint = pendingTextPaint {
+                                    pendingTextPaint = nil
+                                    paint()
+                                }
+                                #endif
+                                return header
+                            }
                         } else {
-                            var adjusted = presentedGrowthElement(nodePtr.pointee)
-                            adjusted.rotate = turn
-                            h = paintNodeHeader(
-                                slot, nodePtr, el: adjusted, presented: presented, loop: loop,
-                                parentClip: context.clip, snap: &snap, stickyShift: &stickyShift, inheritedInert: context.inert, groupHover: &groupHover, parentOpacity: context.opacity,
-                                enclosingLayerOpacity: context.enclosingOpacity, inheritedTransform: context.transform,
-                                parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
-                                parentElementIndex: context.element, hitDepth: context.hitDepth + 1, parentInCache: context.inCache, parentIsRotated: context.rotated
-                            )
+                            let adjusted = presentedGrowthElement(nodePtr.pointee)
+                            h = withUnsafePointer(to: adjusted) { elPtr in
+                                let header = paintNodeHeader(
+                                    slot, nodePtr, elPtr: elPtr, effectiveRotate: turn, presented: presented, loop: loop,
+                                    parentClip: context.clip, snap: &snap, stickyShift: &stickyShift, inheritedInert: context.inert, groupHover: &groupHover, parentOpacity: context.opacity,
+                                    enclosingLayerOpacity: context.enclosingOpacity, inheritedTransform: context.transform,
+                                    parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
+                                    parentElementIndex: context.element, hitDepth: context.hitDepth + 1, parentInCache: context.inCache, parentIsRotated: context.rotated
+                                )
+                                #if DEBUG
+                                if let paint = pendingTextPaint {
+                                    pendingTextPaint = nil
+                                    paint()
+                                }
+                                #endif
+                                return header
+                            }
                         }
-                        #if DEBUG
-                        if let paint = pendingTextPaint {
-                            pendingTextPaint = nil
-                            paint()
-                        }
-                        #endif
-                        let needsFooter = h.continueSubtree && (canPaintFocusRing || h.needsLayer || !h.outerLayerStarts.isEmpty)
+                        let needsFooter = h.continueSubtree && (h.needsFocusRing || h.needsLayer || !h.outerLayerStarts.isEmpty)
                         if (h.continueSubtree || publishHitGeometry), let first = children.first {
                             context = PaintContext(
                                 clip: h.nextChildClip, inert: h.nextInert, groupHover: groupHover, snap: snap, stickyShift: stickyShift,
@@ -4561,7 +4646,11 @@ extension Runtime {
                 swap(&glyphFixups, &paintGlyphFixups)
             }
         }
-        if !freshRaster { labelDraws = nextLabelDraws }
+        if !freshRaster {
+            swap(&labelDraws, &nextLabelDraws)
+            nextLabelDraws.removeAll(keepingCapacity: true)
+            swap(&nextLabelDraws, &spareLabelDraws)
+        }
         return output
     }
 }

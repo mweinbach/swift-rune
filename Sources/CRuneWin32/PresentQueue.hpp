@@ -19,15 +19,16 @@ class RunePresentQueue {
     Microsoft::WRL::ComPtr<IDCompositionTarget> target;
     Microsoft::WRL::ComPtr<ID3D11Query> firstCopy;
     HWND owner = nullptr, child = nullptr;
-    HANDLE slot = nullptr, wait = nullptr;
+    HANDLE slot = nullptr;
+    PTP_WAIT wait = nullptr;
     UINT wake = 0;
     ULONG_PTR token = 0;
-    bool owed = false, full = true, committed = false;
+    bool owed = false, full = true, committed = false, waiting = false, childVisible = false;
     UINT width = 0, height = 0;
     void cancelWait();
     HRESULT openComposition(ID3D11Device *device, IDXGIDevice *dxgi, IDXGISwapChain1 *surface);
     HRESULT reveal();
-    static VOID CALLBACK notify(PVOID arg, BOOLEAN timedOut);
+    static VOID CALLBACK notify(PTP_CALLBACK_INSTANCE instance, PVOID arg, PTP_WAIT wait, TP_WAIT_RESULT result);
 public:
     RunePresentQueue() = default;
     RunePresentQueue(const RunePresentQueue&) = delete;

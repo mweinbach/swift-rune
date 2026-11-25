@@ -81,6 +81,9 @@ HRESULT RunePresentQueue::open(HWND window, UINT wakeMessage, ID3D11Device *devi
     if (FAILED(hr = chain->SetMaximumFrameLatency(1))) return hr;
     slot = chain->GetFrameLatencyWaitableObject();
     if (!slot) return E_HANDLE;
+    wait = CreateThreadpoolWait(notify, this, nullptr);
+    if (!wait) return HRESULT_FROM_WIN32(GetLastError());
+    childVisible = false;
     device->GetImmediateContext(&context);
     width = w;
     height = h;
@@ -89,12 +92,17 @@ HRESULT RunePresentQueue::open(HWND window, UINT wakeMessage, ID3D11Device *devi
 
 void RunePresentQueue::cancelWait() {
     if (!wait) return;
-    UnregisterWaitEx(wait, INVALID_HANDLE_VALUE);
-    wait = nullptr;
+    SetThreadpoolWait(wait, nullptr, nullptr);
+    WaitForThreadpoolWaitCallbacks(wait, TRUE);
+    waiting = false;
 }
 
 RunePresentQueue::~RunePresentQueue() {
     cancelWait();
+    if (wait) {
+        CloseThreadpoolWait(wait);
+        wait = nullptr;
+    }
     if (committed) hide();
     if (slot) CloseHandle(slot);
     chain.Reset();
@@ -102,7 +110,10 @@ RunePresentQueue::~RunePresentQueue() {
 }
 
 void RunePresentQueue::hide() {
-    if (child) ShowWindow(child, SW_HIDE);
+    if (child) {
+        ShowWindow(child, SW_HIDE);
+        childVisible = false;
+    }
     if (target && committed) {
         if (SUCCEEDED(target->SetRoot(nullptr)) && SUCCEEDED(composition->Commit())) committed = false;
     }
@@ -123,18 +134,20 @@ HRESULT RunePresentQueue::resize(UINT w, UINT h) {
     return S_OK;
 }
 
-VOID CALLBACK RunePresentQueue::notify(PVOID arg, BOOLEAN) {
+VOID CALLBACK RunePresentQueue::notify(PTP_CALLBACK_INSTANCE, PVOID arg, PTP_WAIT, TP_WAIT_RESULT) {
     auto queue = static_cast<RunePresentQueue *>(arg);
     PostMessageW(queue->owner, queue->wake, queue->token, 0);
 }
 
 bool RunePresentQueue::take() {
-    if (wait) return false;
+    if (waiting) return false;
     if (!owed) return true;
-    HANDLE registered = nullptr;
-    if (WaitForSingleObject(slot, 0) == WAIT_TIMEOUT &&
-        RegisterWaitForSingleObject(&registered, slot, notify, this, 100, WT_EXECUTEONLYONCE | WT_EXECUTEINWAITTHREAD)) {
-        wait = registered;
+    if (WaitForSingleObject(slot, 0) == WAIT_TIMEOUT && wait) {
+        LARGE_INTEGER due{};
+        due.QuadPart = -100LL * 10000LL;
+        FILETIME ft{ static_cast<DWORD>(due.LowPart), static_cast<DWORD>(due.HighPart) };
+        waiting = true;
+        SetThreadpoolWait(wait, slot, &ft);
         return false;
     }
     owed = false;
@@ -142,8 +155,8 @@ bool RunePresentQueue::take() {
 }
 
 bool RunePresentQueue::awakened(ULONG_PTR messageToken) {
-    if (!wait || messageToken != token) return false;
-    cancelWait();
+    if (!waiting || messageToken != token) return false;
+    waiting = false;
     owed = false;
     return true;
 }
@@ -170,7 +183,10 @@ HRESULT RunePresentQueue::present(ID3D11Texture2D *source, const RECT *dirty, UI
         context->End(firstCopy.Get());
         context->Flush();
     }
-    if (child && !(GetWindowLongPtrW(child, GWL_STYLE) & WS_VISIBLE)) ShowWindow(child, SW_SHOWNOACTIVATE);
+    if (child && !childVisible) {
+        ShowWindow(child, SW_SHOWNOACTIVATE);
+        childVisible = true;
+    }
     hr = chain->Present1(1, 0, &parameters);
     if (composition && hr != S_OK) return hr;
     if (firstCopy && FAILED(hr = reveal())) return hr;

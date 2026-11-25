@@ -53,15 +53,15 @@ private func unionXYWH(_ a: SIMD4<Float>?, _ b: SIMD4<Float>) -> SIMD4<Float> {
 internal extension Runtime {
     /// True when this element hosts active interactive `TextLink` ranges.
     /// Text inputs and `.secure()` elements ignore `El.link(_:)`.
-    func hasActiveTextLinks(_ el: El<State>) -> Bool {
+    func hasActiveTextLinks(_ el: borrowing El<State>) -> Bool {
         !el.textLinks.isEmpty && !el.isSecure && el.handlers.editLens == nil
     }
 
     /// Computes per-link geometry, records help hits and hit boxes, and emits `LinkPaint`
     /// backgrounds, underlines, and rings in the same shaped coordinates as the glyphs.
     func recordAndEmitTextLinks(
-        snap: FlatNode,
-        el: El<State>,
+        snap: borrowing FlatNode,
+        el: borrowing El<State>,
         text: String,
         authoredText: String? = nil,
         caseMap: TextCaseMapping? = nil,

@@ -3,11 +3,12 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* Matches RenderPasses.LayerBlurKernel and BackdropBlurSchedule. All intermediate
  * textures store premultiplied values in the host's active blending space. */
 enum { PREFILTER, GAUSSIAN, RESAMPLE, DOWN, UP, RESOLVE };
-enum { MIP_COUNT = 7, MAX_TAPS = 128, BUCKET = 64 };
+enum { MIP_COUNT = 7, MAX_TAPS = 128, BUCKET = 64, BLUR_POOL_MAX = 16, BLUR_POOL_BYTES = 16 * 1024 * 1024 };
 
 typedef struct {
     GLuint texture, fbo;
@@ -20,6 +21,9 @@ struct RuneGLBlur {
     GLuint program, vao;
     GLint mode, additive, domain, dest, map, region, axis, count, taps, blend;
     BlurTarget scratch[2], down[MIP_COUNT], up[MIP_COUNT-1], output;
+    BlurTarget pool[BLUR_POOL_MAX];
+    size_t pool_count;
+    uint64_t pool_bytes;
 };
 
 static int fail(char *error, size_t capacity, const char *message) {
@@ -64,9 +68,41 @@ static uint64_t target_bytes(BlurTarget t) {
     return (uint64_t)t.width * (uint64_t)t.height * (t.format == GL_RGBA16F ? 8u : 4u);
 }
 
+static BlurTarget take_pooled(RuneGLBlur *b, size_t i) {
+    BlurTarget t = b->pool[i];
+    b->pool_bytes -= target_bytes(t);
+    b->pool_count--;
+    if (i < b->pool_count) memmove(b->pool + i, b->pool + i + 1, (b->pool_count - i) * sizeof(BlurTarget));
+    return t;
+}
+
+static void trim_pool(RuneGLBlur *b, uint64_t budget) {
+    while (b->pool_bytes > budget && b->pool_count > 0) {
+        BlurTarget oldest = take_pooled(b, 0);
+        release_target(b->gl, &oldest);
+    }
+}
+
+static void park_target(RuneGLBlur *b, BlurTarget *t) {
+    if (!t->fbo) return;
+    uint64_t bytes = target_bytes(*t);
+    if (bytes > BLUR_POOL_BYTES) {
+        release_target(b->gl, t);
+        return;
+    }
+    if (b->pool_count == BLUR_POOL_MAX) {
+        BlurTarget oldest = take_pooled(b, 0);
+        release_target(b->gl, &oldest);
+    }
+    trim_pool(b, BLUR_POOL_BYTES - bytes);
+    b->pool[b->pool_count++] = *t;
+    b->pool_bytes += bytes;
+    *t = (BlurTarget){0};
+}
+
 uint64_t rune_gl_blur_bytes(const RuneGLBlur *b) {
     if (!b) return 0;
-    uint64_t bytes = target_bytes(b->output) + target_bytes(b->scratch[0]) + target_bytes(b->scratch[1]);
+    uint64_t bytes = b->pool_bytes + target_bytes(b->output) + target_bytes(b->scratch[0]) + target_bytes(b->scratch[1]);
     for (int i = 0; i < MIP_COUNT; ++i) bytes += target_bytes(b->down[i]);
     for (int i = 0; i < MIP_COUNT - 1; ++i) bytes += target_bytes(b->up[i]);
     return bytes;
@@ -78,6 +114,7 @@ void rune_gl_blur_rest(RuneGLBlur *b) {
     for (int i = 0; i < MIP_COUNT; ++i) release_target(b->gl, &b->down[i]);
     for (int i = 0; i < MIP_COUNT-1; ++i) release_target(b->gl, &b->up[i]);
     release_target(b->gl, &b->output);
+    trim_pool(b, 0);
 }
 
 void rune_gl_blur_destroy(RuneGLBlur *b) {
@@ -91,8 +128,17 @@ void rune_gl_blur_destroy(RuneGLBlur *b) {
 static int resize_target(RuneGLBlur *b, BlurTarget *t, int width, int height, GLenum format,
                          char *error, size_t capacity) {
     if (t->width == width && t->height == height && t->format == format) return 1;
+    for (size_t i = b->pool_count; i > 0; --i) {
+        BlurTarget *p = &b->pool[i - 1];
+        if (p->width == width && p->height == height && p->format == format) {
+            BlurTarget found = take_pooled(b, i - 1);
+            park_target(b, t);
+            *t = found;
+            return 1;
+        }
+    }
     const RuneGLAPI *gl = b->gl;
-    release_target(gl, t);
+    park_target(b, t);
     gl->GenTextures(1, &t->texture);
     gl->BindTexture(GL_TEXTURE_2D, t->texture);
     gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);

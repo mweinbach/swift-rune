@@ -115,6 +115,10 @@ struct RuneWinWindow {
     UINT32 touch_id;
     POINT touch_point;
     int ime_enabled;
+    int32_t ime_caret_x, ime_caret_y;
+    int ime_caret_valid;
+    UINT wheel_lines, wheel_chars;
+    int wheel_cached;
     HCURSOR cursor, custom_cursor;
 };
 
@@ -137,6 +141,7 @@ static void ask_redraw(RuneWinWindow *w) {
         w->redraw = redraw_asked;
         break;
     case redraw_asked:
+        return;
     case redraw_system:
         break;
     }
@@ -493,8 +498,13 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 w->running = 0;
                 PostMessageW(hwnd, WM_NULL, 0, 0);
             } else if (next == RUNE_WIN_CONTINUE_MOTION) {
-                if (rune_win_present_paced(w)) ask_redraw(w);
-                else SetTimer(hwnd, frame_timer, 16, NULL);
+                if (w->dxgi && (!w->cpu_first || w->handed)) {
+                    if (rune_dxgi_arm_next(w->dxgi)) ask_redraw(w);
+                } else if (rune_win_present_paced(w)) {
+                    ask_redraw(w);
+                } else {
+                    SetTimer(hwnd, frame_timer, 16, NULL);
+                }
             } else if (next >= 0) {
                 SetTimer(hwnd, frame_timer, (UINT)next, NULL);
             }
@@ -545,11 +555,13 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_SETTINGCHANGE: case WM_SYSCOLORCHANGE: case WM_THEMECHANGED: case WM_DWMCOLORIZATIONCOLORCHANGED:
+        if (msg == WM_SETTINGCHANGE) w->wheel_cached = 0;
         emit(w, (RuneWinEvent){.kind = RUNE_WIN_SETTINGS});
         ask_redraw(w);
         break;
     case WM_SETFOCUS:
     case WM_KILLFOCUS:
+        w->ime_caret_valid = 0;
         if (msg == WM_KILLFOCUS && w->touching) touch_event(w, RUNE_WIN_TOUCH_CANCEL);
         emit(w, (RuneWinEvent){.kind = RUNE_WIN_FOCUS, .value = msg == WM_SETFOCUS});
         ask_redraw(w);
@@ -612,8 +624,15 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         POINT p = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         ScreenToClient(hwnd, &p);
         int horizontal = msg == WM_MOUSEHWHEEL;
-        UINT count = horizontal ? 1 : 3;
-        SystemParametersInfoW(horizontal ? SPI_GETWHEELSCROLLCHARS : SPI_GETWHEELSCROLLLINES, 0, &count, 0);
+        if (!w->wheel_cached) {
+            UINT lines = 3, chars = 1;
+            SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+            SystemParametersInfoW(SPI_GETWHEELSCROLLCHARS, 0, &chars, 0);
+            w->wheel_lines = lines;
+            w->wheel_chars = chars;
+            w->wheel_cached = 1;
+        }
+        UINT count = horizontal ? w->wheel_chars : w->wheel_lines;
         float ticks = (float)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
         emit(w, (RuneWinEvent){.kind = RUNE_WIN_WHEEL, .x = p.x, .y = p.y, .horizontal = horizontal,
                                .ticks = horizontal ? -ticks : ticks, .count = count, .mods = modifiers()});
@@ -662,6 +681,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_IME_ENDCOMPOSITION:
+        w->ime_caret_valid = 0;
         if (w->composing) {
             emit(w, (RuneWinEvent){.kind = RUNE_WIN_IME_PREEDIT});
             w->composing = 0;
@@ -1460,6 +1480,7 @@ void rune_win_titlebar(RuneWinWindow *w, int32_t double_click) {
 }
 
 void rune_win_ime_state(RuneWinWindow *w, int32_t enabled, int32_t reset) {
+    if (reset || !enabled || w->ime_enabled != enabled) w->ime_caret_valid = 0;
     if (w->ime_enabled && (reset || !enabled)) {
         HIMC imc = ImmGetContext(w->hwnd);
         if (imc) {
@@ -1473,10 +1494,15 @@ void rune_win_ime_state(RuneWinWindow *w, int32_t enabled, int32_t reset) {
 }
 
 void rune_win_ime_caret(RuneWinWindow *w, int32_t x, int32_t y) {
+    if (w->ime_caret_valid && w->ime_caret_x == x && w->ime_caret_y == y) return;
     HIMC imc = ImmGetContext(w->hwnd);
     if (!imc) return;
     CANDIDATEFORM form = {.dwStyle = CFS_CANDIDATEPOS, .ptCurrentPos = {x,y}};
-    ImmSetCandidateWindow(imc, &form);
+    if (ImmSetCandidateWindow(imc, &form)) {
+        w->ime_caret_x = x;
+        w->ime_caret_y = y;
+        w->ime_caret_valid = 1;
+    }
     ImmReleaseContext(w->hwnd, imc);
 }
 

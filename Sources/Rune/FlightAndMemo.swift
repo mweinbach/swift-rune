@@ -252,11 +252,29 @@ public final class MemoCache: @unchecked Sendable {
 
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
+    private var entriesWithReadsCount: Int = 0
     private var generation: UInt64 = 0
     private var passCounter: UInt64 = 1
     private var viewReads: [MemoRead] = []
     private var viewReadsPass: UInt64 = 0
     private var buildCount: UInt64 = 0
+
+    @inline(__always)
+    private func setEntryLocked(_ key: String, _ entry: Entry) {
+        if let old = entries.updateValue(entry, forKey: key), !old.reads.isEmpty {
+            entriesWithReadsCount -= 1
+        }
+        if !entry.reads.isEmpty {
+            entriesWithReadsCount += 1
+        }
+    }
+
+    @inline(__always)
+    private func removeEntryLocked(_ key: String) {
+        if let old = entries.removeValue(forKey: key), !old.reads.isEmpty {
+            entriesWithReadsCount -= 1
+        }
+    }
 
     /// Number of entries currently retained in the cache (`MemoCache::len`).
     public var len: Int {
@@ -306,7 +324,13 @@ public final class MemoCache: @unchecked Sendable {
     public func keepSince(_ minPass: UInt64) {
         lock.lock()
         defer { lock.unlock() }
-        entries = entries.filter { $0.value.passBuilt >= minPass }
+        var evicted: [String] = []
+        for (key, value) in entries where value.passBuilt < minPass {
+            evicted.append(key)
+        }
+        for key in evicted {
+            removeEntryLocked(key)
+        }
     }
 
     /// Removes specific scoped cache entries by key.
@@ -314,7 +338,7 @@ public final class MemoCache: @unchecked Sendable {
         guard !ids.isEmpty else { return }
         lock.lock()
         for id in ids {
-            entries.removeValue(forKey: id)
+            removeEntryLocked(id)
         }
         lock.unlock()
     }
@@ -456,7 +480,7 @@ public final class MemoCache: @unchecked Sendable {
         let pass = scope?.pass ?? passCounter
         lock.lock()
         buildCount &+= 1
-        entries[scopedId] = Entry(
+        setEntryLocked(scopedId, Entry(
             deps: deps,
             equals: { other in (other as? Deps) == deps },
             srgbBlend: srgb,
@@ -465,7 +489,7 @@ public final class MemoCache: @unchecked Sendable {
             nestedIds: capturedNested,
             passBuilt: pass,
             element: built
-        )
+        ))
         lock.unlock()
         for r in capturedReads { scope?.record(r) }
         scope?.recordNested(scopedId)
@@ -494,27 +518,34 @@ public final class MemoCache: @unchecked Sendable {
         }
 
         lock.lock()
-        if var existing = entries[scopedId],
-           existing.srgbBlend == srgb,
-           existing.envHash == env,
-           existing.equals(inputs),
-           existing.reads.allSatisfy({ $0.matches(curGeometry) }),
-           let cached = existing.element as? El<State> {
+        if let entryIndex = entries.index(forKey: scopedId),
+           entries.values[entryIndex].srgbBlend == srgb,
+           entries.values[entryIndex].envHash == env,
+           entries.values[entryIndex].equals(inputs),
+           entries.values[entryIndex].reads.allSatisfy({ $0.matches(curGeometry) }),
+           let cached = entries.values[entryIndex].element as? El<State> {
             let dryRun = scope?.isVerificationDryRun ?? false
-            let recordedReads = existing.reads
+            let recordedReads = entries.values[entryIndex].reads
             var touchedNested: Set<String> = []
             if !dryRun {
                 let pass = scope?.pass ?? passCounter
-                existing.passBuilt = pass
-                entries[scopedId] = existing
-                touchedNested = markNestedTouchedLocked(existing.nestedIds, pass: pass)
+                entries.values[entryIndex].passBuilt = pass
+                let nested = entries.values[entryIndex].nestedIds
+                if !nested.isEmpty {
+                    touchedNested = markNestedTouchedLocked(nested, pass: pass)
+                }
             }
             lock.unlock()
             if !dryRun {
-                for r in recordedReads { scope?.record(r) }
+                if !recordedReads.isEmpty {
+                    for r in recordedReads { scope?.record(r) }
+                }
                 scope?.recordNested(scopedId)
                 scope?.allTouchedScopedIds.insert(scopedId)
-                scope?.allTouchedScopedIds.formUnion(touchedNested)
+                if !touchedNested.isEmpty {
+                    scope?.allTouchedScopedIds.formUnion(touchedNested)
+                }
+                #if DEBUG
                 let savedTracked = TrackedRecorder.pause()
                 let prevDry = scope?.isVerificationDryRun ?? false
                 scope?.isVerificationDryRun = true
@@ -527,6 +558,7 @@ public final class MemoCache: @unchecked Sendable {
                 _ = scope?.prefixStack.popLast()
                 scope?.isVerificationDryRun = prevDry
                 TrackedRecorder.resume(savedTracked)
+                #endif
             }
             var reused = cached
             reused.memoRegionReused = true
@@ -556,7 +588,7 @@ public final class MemoCache: @unchecked Sendable {
         let pass = scope?.pass ?? passCounter
         lock.lock()
         buildCount &+= 1
-        entries[scopedId] = Entry(
+        setEntryLocked(scopedId, Entry(
             deps: inputs,
             equals: { other in (other as? Inputs) == inputs },
             srgbBlend: srgb,
@@ -565,7 +597,7 @@ public final class MemoCache: @unchecked Sendable {
             nestedIds: capturedNested,
             passBuilt: pass,
             element: built
-        )
+        ))
         lock.unlock()
         for r in capturedReads { scope?.record(r) }
         scope?.recordNested(scopedId)
@@ -611,7 +643,7 @@ public final class MemoCache: @unchecked Sendable {
     internal func hasInvalidatedReads(computing geometry: () -> MemoGeometry) -> Bool {
         let hasReads = lock.withLock {
             (viewReadsPass == passCounter && !viewReads.isEmpty)
-                || entries.values.contains { $0.passBuilt == passCounter && !$0.reads.isEmpty }
+                || (entriesWithReadsCount > 0 && entries.values.contains { $0.passBuilt == passCounter && !$0.reads.isEmpty })
         }
         return hasReads && hasInvalidatedReads(against: geometry())
     }
@@ -628,9 +660,11 @@ public final class MemoCache: @unchecked Sendable {
                 return true
             }
         }
-        for (_, entry) in entries where entry.passBuilt == passCounter {
-            for r in entry.reads where !r.matches(geometry) {
-                return true
+        if entriesWithReadsCount > 0 {
+            for (_, entry) in entries where entry.passBuilt == passCounter && !entry.reads.isEmpty {
+                for r in entry.reads where !r.matches(geometry) {
+                    return true
+                }
             }
         }
         return false
@@ -645,9 +679,10 @@ public final class MemoCache: @unchecked Sendable {
         }
         lock.lock()
         defer { lock.unlock() }
-        return (viewReadsPass == passCounter && readsCell(viewReads)) || entries.values.contains {
-            $0.passBuilt == passCounter && readsCell($0.reads)
-        }
+        return (viewReadsPass == passCounter && readsCell(viewReads))
+            || (entriesWithReadsCount > 0 && entries.values.contains {
+                $0.passBuilt == passCounter && readsCell($0.reads)
+            })
     }
 
     /// Drops all cached subtrees (e.g. on hot reload or theme change).
@@ -655,6 +690,7 @@ public final class MemoCache: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         entries.removeAll()
+        entriesWithReadsCount = 0
         viewReads.removeAll()
         generation &+= 1
     }
@@ -667,23 +703,29 @@ public final class MemoCache: @unchecked Sendable {
     public func invalidate(id: String) {
         lock.lock()
         defer { lock.unlock() }
-        entries.removeValue(forKey: id)
+        removeEntryLocked(id)
     }
 
     /// Removes all cached entries where the full key or any `/`-delimited segment starts with `prefix` (including `region:` segments).
     public func evictPrefix(_ prefix: String) {
         lock.lock()
         defer { lock.unlock() }
-        entries = entries.filter { key, _ in
+        var evicted: [String] = []
+        for key in entries.keys {
             let matchesWhole = key.hasPrefix(prefix) || key.hasPrefix("region:\(prefix)")
-            let matchesSegment = key.split(separator: "/").contains { seg in
+            let matchesSegment = !matchesWhole && key.split(separator: "/").contains { seg in
                 if seg.hasPrefix(prefix) { return true }
                 if seg.hasPrefix("region:") {
                     return seg.dropFirst(7).hasPrefix(prefix)
                 }
                 return false
             }
-            return !(matchesWhole || matchesSegment)
+            if matchesWhole || matchesSegment {
+                evicted.append(key)
+            }
+        }
+        for key in evicted {
+            removeEntryLocked(key)
         }
         generation &+= 1
     }
@@ -858,6 +900,11 @@ extension MemoCache {
                 hitSlot = active
                 if !dryRun {
                     entries.values[entryIndex].passBuilt = pass
+                    let hadReads = !entries.values[entryIndex].reads.isEmpty
+                    let hasReads = !active.reads.isEmpty
+                    if hadReads != hasReads {
+                        entriesWithReadsCount += hasReads ? 1 : -1
+                    }
                     entries.values[entryIndex].reads = active.reads
                     touchNestedLocked(active.nestedIds)
                     if let alt = useSecondary ? box.primary : box.secondary,
@@ -926,7 +973,7 @@ extension MemoCache {
             allNested = capturedNested
         }
         buildCount &+= 1
-        entries[scopedId] = Entry(
+        setEntryLocked(scopedId, Entry(
             deps: deps,
             equals: { other in (other as? Inputs) == deps },
             srgbBlend: srgb,
@@ -936,7 +983,7 @@ extension MemoCache {
             passBuilt: pass,
             element: built,
             virtualRowBox: box
-        )
+        ))
         lock.unlock()
 
         for r in capturedReads { scope.record(r) }

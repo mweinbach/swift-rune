@@ -138,7 +138,7 @@ static int diff(RuneDamageHistory *h, const unsigned char *old, size_t old_n, co
     } else if (old_n == new_n && sparse_edits(old, new_items, old_n, w, height, rects, &n)) {
         if (n < 0) return -1;
     } else {
-        if (new_n > old_n && new_n - old_n > many) return -1;
+        if ((new_n > old_n && new_n - old_n > many) || (old_n > new_n && old_n - new_n > many)) return -1;
         size_t cap = 8;
         if (old_n > SIZE_MAX / 4 - new_n) return -1;
         while (cap < 2 * (old_n + new_n)) cap *= 2;
@@ -160,6 +160,11 @@ static int diff(RuneDamageHistory *h, const unsigned char *old, size_t old_n, co
          * counts differ are safe to remove from both order sequences: their bounds are dirty. */
         size_t i = 0, j = 0;
         while (i < old_n || j < new_n) {
+            if (i < old_n && j < new_n && memcmp(item(old, i), item(new_items, j), stride) == 0) {
+                i++;
+                j++;
+                continue;
+            }
             while (i < old_n && entry(table, cap, item(old, i))->difference) i++;
             while (j < new_n && entry(table, cap, item(new_items, j))->difference) j++;
             if (i == old_n || j == new_n) {

@@ -2,6 +2,21 @@ import RuneMotion
 
 private let noReportedScroll: [Float] = [0, 0]
 
+internal struct RefElementTextDraw {
+    var drawnText: String?
+    var elision: TextElision?
+}
+
+internal struct RefElementReportContext {
+    var defaultForeground: Color?
+    var pixelScale: Float
+    var webFocus: Bool
+    var activeModalPath: String?
+    var modalAncestorPaths: Set<String>
+    var modalMemberPaths: Set<String>
+    var hasTraceNamespace: Bool
+}
+
 /// Trivial POD geometry and visual state from one native paint. Authored element fields
 /// (`FlatElement`, `path`, `key`, `targetRect`, `committedLayoutTarget`) stay in the frame's
 /// retained `FlatNode` arrays and are addressed by `slot` (`>= 0` mounted, `< 0` exit),
@@ -42,19 +57,26 @@ internal struct PaintedElement {
 
     func report<State>(
         node: borrowing Runtime<State>.FlatNode,
+        mounted: [Runtime<State>.FlatNode] = [],
         pose: RawPoseNodeData?,
         edit: TextEdit? = nil,
-        carriedPair: [Float]? = nil
+        carriedPair: [Float]? = nil,
+        refContext: RefElementReportContext? = nil,
+        refTextDraw: RefElementTextDraw? = nil
     ) -> ElementInfo {
         report(
             el: node.element.value,
             path: node.path,
             key: node.key,
+            nodeParentIndex: node.parentIndex,
+            mounted: mounted,
             target: node.targetRect,
             committedLayoutTarget: node.committedLayoutTarget,
             pose: pose,
             edit: edit,
-            carriedPair: carriedPair ?? (carried == .zero ? noReportedScroll : [carried.x, carried.y])
+            carriedPair: carriedPair ?? (carried == .zero ? noReportedScroll : [carried.x, carried.y]),
+            refContext: refContext,
+            refTextDraw: refTextDraw
         )
     }
 
@@ -62,14 +84,76 @@ internal struct PaintedElement {
         el: borrowing El<State>,
         path: String,
         key: String?,
+        nodeParentIndex: Int?,
+        mounted: [Runtime<State>.FlatNode],
         target: MotionRect,
         committedLayoutTarget: MotionRect,
         pose: RawPoseNodeData?,
         edit: TextEdit?,
-        carriedPair: [Float]
+        carriedPair: [Float],
+        refContext: RefElementReportContext?,
+        refTextDraw: RefElementTextDraw?
     ) -> ElementInfo {
         let secure = el.isSecure || edit?.isSecure == true
         let words = secure ? nil : edit?.text ?? el.plainText
+        let effectiveMoving = (pose?.ownMoving ?? false) || moving
+        if let ref = refContext {
+            let traceNs: TraceNamespace? = {
+                if let own = el.traceNamespaceValue {
+                    return TraceNamespace(className: own.className, host: own.host)
+                }
+                guard ref.hasTraceNamespace else { return nil }
+                var cur = nodeParentIndex
+                while let pIdx = cur, mounted.indices.contains(pIdx) {
+                    if let anc = mounted[pIdx].el.traceNamespaceValue {
+                        return TraceNamespace(className: anc.className, host: anc.host)
+                    }
+                    cur = mounted[pIdx].parentIndex
+                }
+                return nil
+            }()
+            let helpText: String? = el.a11yHelp.flatMap { $0.isEmpty ? nil : runeHelpWords($0) }
+            let shapeKey: UInt64? = (!secure && (el.plainText != nil || el.richSpans != nil))
+                ? TextShapeKey.compute(
+                    text: el.plainText ?? "",
+                    spans: el.richSpans,
+                    pills: el.pillChips,
+                    style: el.textStyle,
+                    pixelScale: ref.pixelScale,
+                    wrapAnywhere: (el.runtimeExtra("htmlWrapAnywhere") as? Bool) ?? false
+                )
+                : nil
+            var info = ElementInfo(
+                path: path, key: key, parentIndex: parentIndex, role: el.role,
+                geometry: .boxes(rect: rect, target: target, visible: visible), committedLayoutTarget: committedLayoutTarget,
+                opacity: opacity, scale: scale, blur: blur, radius: radius, fill: fill,
+                textColor: liveTextColor ?? el.textColor ?? (words != nil ? ref.defaultForeground : nil),
+                text: words, label: el.a11yLabel,
+                help: helpText, selected: secure ? nil : el.a11ySelected, expanded: el.a11yExpanded, level: el.a11yLevel,
+                itemSelected: el.itemSelected, focusable: Runtime<State>.nodeTakesFocusStatic(el, webFocus: ref.webFocus), focused: focused,
+                focusVisible: focusVisible, inert: inert,
+                modalAncestor: ref.activeModalPath != nil && ref.modalAncestorPaths.contains(path),
+                moving: effectiveMoving, exiting: exiting,
+                hover: hover, press: press, scrolled: scrolled == carried ? carriedPair : [scrolled.x, scrolled.y],
+                carriedScrolled: carriedPair, caret: nil, secure: secure, disabled: el.a11yDisabled,
+                checked: el.a11yChecked, a11yValue: el.a11yValue, a11yDescription: el.a11yDescription,
+                a11yHidden: el.isA11yHidden, stuck: stuck, traceName: el.traceNameValue, traceNamespace: traceNs,
+                virtualExtent: pose?.virtualExtent ?? false,
+                editRange: nil,
+                loopPhase: pose?.loopPhase, revealing: pose?.revealing ?? false,
+                inGrowingRow: pose?.ownGrowingRow ?? false, scrolling: false,
+                liveIntent: pose?.ownLiveIntent ?? 0,
+                shapeKey: shapeKey,
+                drawnText: refTextDraw?.drawnText,
+                elision: refTextDraw?.elision
+            )
+            info.a11yInput = ElementA11yInput(
+                copy el,
+                edit: edit,
+                modalMember: ref.activeModalPath == nil ? nil : ref.modalMemberPaths.contains(path)
+            )
+            return info
+        }
         return ElementInfo(
             path: path, key: key, parentIndex: parentIndex, role: el.role,
             geometry: .boxes(rect: rect, target: target, visible: visible), committedLayoutTarget: committedLayoutTarget,
@@ -77,7 +161,7 @@ internal struct PaintedElement {
             textColor: liveTextColor ?? el.textColor, text: words, label: el.a11yLabel ?? words,
             help: el.a11yHelp, selected: secure ? nil : el.a11ySelected, expanded: el.a11yExpanded, level: el.a11yLevel,
             itemSelected: el.itemSelected, focusable: el.focusable && focusAllowed, focused: focused,
-            focusVisible: focusVisible, inert: inert, moving: pose?.ownMoving ?? moving, exiting: exiting,
+            focusVisible: focusVisible, inert: inert, moving: effectiveMoving, exiting: exiting,
             hover: hover, press: press, scrolled: scrolled == carried ? carriedPair : [scrolled.x, scrolled.y],
             carriedScrolled: carriedPair, caret: nil, secure: secure, disabled: el.a11yDisabled,
             checked: el.a11yChecked, a11yValue: el.a11yValue, a11yDescription: el.a11yDescription,
@@ -103,6 +187,10 @@ internal struct NativeFrameReports<State> {
     var captured: [Int: CapturedElementReport]
     /// Trailing synthetic link records appended after painted nodes.
     var trailing: [CapturedElementReport]
+    /// Present when published from `buildRefScene` so lazy materialization preserves ref-scene fields.
+    var refContext: RefElementReportContext? = nil
+    /// Sparse painted-text details (`drawnText`, `elision`) for onscreen labels in `buildRefScene`.
+    var refTextDraws: [Int: RefElementTextDraw] = [:]
 
     var count: Int { painted.count + trailing.count }
 
@@ -164,12 +252,25 @@ internal struct NativeFrameReports<State> {
         }
         let element = painted[index]
         let slot = element.slot
+        let textDraw = refTextDraws.isEmpty ? nil : refTextDraws[index]
         if slot >= 0 {
             let path = mounted[slot].path
-            return element.report(node: mounted[slot], pose: poses.isEmpty ? nil : poses[path])
+            return element.report(
+                node: mounted[slot],
+                mounted: mounted,
+                pose: poses.isEmpty ? nil : poses[path],
+                refContext: refContext,
+                refTextDraw: textDraw
+            )
         }
         let path = exits[~slot].path
-        return element.report(node: exits[~slot], pose: poses.isEmpty ? nil : poses[path])
+        return element.report(
+            node: exits[~slot],
+            mounted: mounted,
+            pose: poses.isEmpty ? nil : poses[path],
+            refContext: refContext,
+            refTextDraw: textDraw
+        )
     }
 
     mutating func updateOpacity(_ opacity: Float, at index: Int) {
@@ -188,6 +289,7 @@ internal struct NativeFrameReports<State> {
         result.reserveCapacity(count)
         var carried = Vec2.zero
         var pair = noReportedScroll
+        let hasTextDraws = !refTextDraws.isEmpty
         for i in painted.indices {
             if !captured.isEmpty, let report = captured[i] {
                 result.append(report.info)
@@ -198,13 +300,28 @@ internal struct NativeFrameReports<State> {
                 carried = element.carried
                 pair = carried == .zero ? noReportedScroll : [carried.x, carried.y]
             }
+            let textDraw = hasTextDraws ? refTextDraws[i] : nil
             let slot = element.slot
             if slot >= 0 {
                 let path = mounted[slot].path
-                result.append(element.report(node: mounted[slot], pose: poses.isEmpty ? nil : poses[path], carriedPair: pair))
+                result.append(element.report(
+                    node: mounted[slot],
+                    mounted: mounted,
+                    pose: poses.isEmpty ? nil : poses[path],
+                    carriedPair: pair,
+                    refContext: refContext,
+                    refTextDraw: textDraw
+                ))
             } else {
                 let path = exits[~slot].path
-                result.append(element.report(node: exits[~slot], pose: poses.isEmpty ? nil : poses[path], carriedPair: pair))
+                result.append(element.report(
+                    node: exits[~slot],
+                    mounted: mounted,
+                    pose: poses.isEmpty ? nil : poses[path],
+                    carriedPair: pair,
+                    refContext: refContext,
+                    refTextDraw: textDraw
+                ))
             }
         }
         for report in trailing {

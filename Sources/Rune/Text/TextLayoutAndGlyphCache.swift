@@ -126,11 +126,20 @@ extension TextSpan {
     }
 
     static func layoutSpans(_ spans: [TextSpan]?) -> [TextSpan]? {
-        guard let spans, spans.contains(where: \.affectsLayout) else { return nil }
+        guard let spans else { return nil }
+        var hasLayoutEffect = false
+        var hasInlineMono = false
+        for i in spans.indices {
+            if spans[i].text.isEmpty { continue }
+            if spans[i].affectsLayout { hasLayoutEffect = true }
+            if spans[i].monospace { hasInlineMono = true }
+        }
+        guard hasLayoutEffect else { return nil }
         var result: [TextSpan] = []
         var plain = ""
-        lazy var hasInlineMono = spans.contains { $0.monospace && !$0.text.isEmpty }
-        for span in spans where !span.text.isEmpty {
+        for i in spans.indices {
+            let span = spans[i]
+            if span.text.isEmpty { continue }
             if span.affectsLayout {
                 if !plain.isEmpty {
                     result.append(TextSpan(plain))
@@ -138,7 +147,10 @@ extension TextSpan {
                 }
                 // Flattened rich text splits even the enclosing font range at syntax-color edges.
                 // Keep decoration edges and smaller padding spans next to inline code intact.
-                if result.last?.sharesFont(with: span) == true && (span.size == nil || span.monospace || !hasInlineMono) {
+                let canMerge = !result.isEmpty
+                    && result[result.count - 1].sharesFont(with: span)
+                    && (span.size == nil || span.monospace || !hasInlineMono)
+                if canMerge {
                     result[result.count - 1].text.append(span.text)
                 } else {
                     var layout = span
@@ -153,6 +165,7 @@ extension TextSpan {
         return result
     }
 
+    @inline(never)
     private func sharesFont(with other: TextSpan) -> Bool {
         background == nil && other.background == nil && !underline && !other.underline
             && !strikethrough && !other.strikethrough && weight == other.weight && size == other.size

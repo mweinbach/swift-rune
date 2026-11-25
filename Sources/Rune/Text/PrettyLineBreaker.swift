@@ -176,6 +176,177 @@ public enum PrettyLineBreaker {
         return caps.isEmpty ? nil : caps
     }
 
+    #if !canImport(CoreText) && canImport(_FoundationICU)
+    private final class ICULineBreakPool: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pool: [OpaquePointer] = []
+
+        func withIterator<R>(_ body: (OpaquePointer) -> R) -> R? {
+            let iterator: OpaquePointer
+            if let reused = lock.withLock({ pool.popLast() }) {
+                iterator = reused
+            } else {
+                var status = U_ZERO_ERROR
+                guard let created = swift_ubrk_open(UBRK_LINE, "und", nil, 0, &status),
+                      status.rawValue <= U_ZERO_ERROR.rawValue else { return nil }
+                iterator = created
+            }
+            let result = body(iterator)
+            var resetStatus = U_ZERO_ERROR
+            var zero: UInt16 = 0
+            swift_ubrk_setText(iterator, &zero, 0, &resetStatus)
+            if resetStatus.rawValue <= U_ZERO_ERROR.rawValue {
+                let kept = lock.withLock { () -> Bool in
+                    guard pool.count < 4 else { return false }
+                    pool.append(iterator)
+                    return true
+                }
+                if !kept { swift_ubrk_close(iterator) }
+            } else {
+                swift_ubrk_close(iterator)
+            }
+            return result
+        }
+    }
+
+    private static let icuLineBreakPool = ICULineBreakPool()
+
+    internal static func lineBreakOpportunities(inUTF16 units: [UInt16], offset start: Int = 0) -> [Int] {
+        guard !units.isEmpty, let count = Int32(exactly: units.count) else { return [] }
+        return units.withUnsafeBufferPointer { buffer in
+            icuLineBreakPool.withIterator { iterator -> [Int] in
+                var status = U_ZERO_ERROR
+                swift_ubrk_setText(iterator, buffer.baseAddress, count, &status)
+                guard status.rawValue <= U_ZERO_ERROR.rawValue else { return [] }
+                var breaks: [Int] = []
+                breaks.reserveCapacity(max(8, units.count / 5))
+                var boundary = swift_ubrk_next(iterator)
+                while boundary != UBRK_DONE && boundary < count {
+                    breaks.append(start + Int(boundary))
+                    boundary = swift_ubrk_next(iterator)
+                }
+                return breaks
+            } ?? []
+        }
+    }
+
+    private static func utf16Units(of text: String) -> [UInt16] {
+        if let ascii = text.utf8.withContiguousStorageIfAvailable({ buf -> [UInt16]? in
+            let n = buf.count
+            for i in 0..<n {
+                if buf[i] >= 0x80 { return nil }
+            }
+            return [UInt16](unsafeUninitializedCapacity: n) { out, outCount in
+                let dst = out.baseAddress!
+                let src = buf.baseAddress!
+                for i in 0..<n { dst[i] = UInt16(src[i]) }
+                outCount = n
+            }
+        }), let ascii {
+            return ascii
+        }
+        return Array(text.utf16)
+    }
+    #endif
+
+    #if !canImport(CoreText) && canImport(_FoundationICU)
+    /// UTF-16 overload of `prettyLineCaps` that reuses `wrap()`'s UTF-16 units and
+    /// precomputed ICU line break opportunities without bridging to `NSString`.
+    private static func prettyLineCapsUTF16(
+        lines: [GreedyLineInfo],
+        units: [UInt16],
+        allBreaks: [Int],
+        fontSizePt: Float,
+        maxWidthPx: Float,
+        advanceAtUTF16: (Int) -> Float
+    ) -> [Int: CGFloat]? {
+        let n = lines.count
+        guard n >= 2, !lines.contains(where: { $0.hasRTLRun || $0.isEmergency }), maxWidthPx > 0 else { return nil }
+        for line in lines {
+            guard line.u16Start >= 0, line.u16Start <= line.u16End, line.u16End <= units.count else { return nil }
+        }
+        let last = lines[n - 1]
+        guard (last.widthPx - last.trailingWsPx) < (maxWidthPx / 3.0) else { return nil }
+        if last.u16End > last.u16Start {
+            for i in last.u16Start..<last.u16End {
+                let ch = units[i]
+                if ch >= 0x2066 && ch <= 0x2069 { return nil }
+            }
+        }
+
+        func trimmedEnd(start: Int, end: Int) -> Int {
+            var cursor = end
+            while cursor > start {
+                let ch = units[cursor - 1]
+                if ch == 0x20 || ch == 0x09 || ch == 0x0A || ch == 0x0D || ch == 0xA0 || ch == 0x0B || ch == 0x0C {
+                    cursor -= 1
+                } else {
+                    break
+                }
+            }
+            return cursor
+        }
+
+        let first = max(0, n - maxLines)
+        let windowCount = n - first
+        let spanStart = lines[first].u16Start
+        let spanEnd = trimmedEnd(start: spanStart, end: last.u16End)
+        guard spanEnd > spanStart else { return nil }
+
+        let lastWordsEnd = trimmedEnd(start: last.u16Start, end: last.u16End)
+        let loIdx = partitionPoint(allBreaks) { $0 <= spanStart }
+        let hiIdx = partitionPoint(allBreaks) { $0 < spanEnd }
+        let breaks = allBreaks[loIdx..<hiIdx]
+        for b in breaks {
+            if b > last.u16Start && b < lastWordsEnd { return nil }
+        }
+
+        let origin = advanceAtUTF16(spanStart)
+        func xAt(_ pos: Int) -> Float { advanceAtUTF16(pos) - origin }
+        func endBeforePx(atU16 pos: Int) -> Float {
+            let trimmed = trimmedEnd(start: spanStart, end: pos)
+            guard trimmed > spanStart else { return 0 }
+            return xAt(trimmed)
+        }
+
+        var cands: [Candidate] = []
+        cands.reserveCapacity(breaks.count + 2)
+        cands.append(Candidate(atU16: spanStart, noBreakCss: 0, ifBreakCss: 0, penalty: 0))
+        for b in breaks {
+            cands.append(Candidate(atU16: b, noBreakCss: xAt(b), ifBreakCss: endBeforePx(atU16: b), penalty: 0))
+        }
+        let endCss = endBeforePx(atU16: spanEnd)
+        cands.append(Candidate(atU16: spanEnd, noBreakCss: endCss, ifBreakCss: endCss, penalty: 0))
+
+        guard cands.count >= 5 else { return nil }
+        cands[cands.count - 2].penalty += orphansPenalty
+
+        let fitCss = maxWidthPx + epsilon
+        let linePenalty = maxWidthPx * fontSizePt * 4.0
+        let chosen = optimal(cands: cands, fit: fitCss, linePenalty: linePenalty)
+        guard chosen.count == windowCount else { return nil }
+
+        var changed = false
+        for k in 0..<(windowCount - 1) {
+            if cands[chosen[k]].atU16 != lines[first + 1 + k].u16Start {
+                changed = true
+                break
+            }
+        }
+        guard changed else { return nil }
+
+        var caps: [Int: CGFloat] = Dictionary(minimumCapacity: windowCount - 1)
+        var from = 0
+        for k in 0..<(windowCount - 1) {
+            let bIdx = chosen[k]
+            let roomPx = (cands[bIdx].ifBreakCss - cands[from].noBreakCss) + 0.5
+            caps[first + k] = CGFloat(max(1.0, roomPx))
+            from = bIdx
+        }
+        return caps.isEmpty ? nil : caps
+    }
+    #endif
+
     /// Wraps one portable shaped paragraph at Unicode break opportunities. Advances and inline
     /// boxes are in logical points. Emergency breaks may only fall between graphemes.
     internal static func wrap(
@@ -191,15 +362,13 @@ public enum PrettyLineBreaker {
             let inkEnd: Float
             let hangs: Bool
         }
-        let ns = text as NSString
-        let standard = Set(lineBreakOpportunities(in: ns, from: 0, to: ns.length))
-        #if os(WASI) && RUNE_BROWSER_TEXT
-        let natural = BrowserSegmentation.dictionaryBreaks(standard, in: text, words: false)
-        #else
-        let natural = standard
-        #endif
-        var edges = [Edge(index: text.startIndex, utf8: 0, utf16: 0, x: 0, inkEnd: 0, hangs: false)]
-        for index in text.indices {
+        var edges: [Edge] = []
+        edges.reserveCapacity(text.utf8.count + 1)
+        edges.append(Edge(index: text.startIndex, utf8: 0, utf16: 0, x: 0, inkEnd: 0, hangs: false))
+        var maxInkEnd: Float = 0
+        var index = text.startIndex
+        while index < text.endIndex {
+            let nextIndex = text.index(after: index)
             let character = text[index]
             let start = edges[edges.count - 1]
             let cell = measure(character, start.utf8)
@@ -208,15 +377,54 @@ public enum PrettyLineBreaker {
             let hangs = hangingSpace && cell.trailingBox == 0
             let fullyHangs = hangs && cell.leadingBox == 0
             let visibleEdge = hangs ? start.x + cell.leadingBox : x
-            edges.append(Edge(index: text.index(after: index), utf8: start.utf8 + character.utf8.count,
+            let inkEnd = fullyHangs ? start.inkEnd : visibleEdge
+            if !fullyHangs && inkEnd > maxInkEnd { maxInkEnd = inkEnd }
+            edges.append(Edge(index: nextIndex, utf8: start.utf8 + character.utf8.count,
                               utf16: start.utf16 + character.utf16.count, x: x,
-                              inkEnd: fullyHangs ? start.inkEnd : visibleEdge, hangs: fullyHangs))
+                              inkEnd: inkEnd, hangs: fullyHangs))
+            index = nextIndex
         }
 
         let end = edges.count - 1
+        if end == 0 { return [(0, text, 0)] }
+        if maxInkEnd <= width + epsilon {
+            if pillRanges.isEmpty {
+                return [(0, text, edges[end].x)]
+            }
+            let proposed = utf8Start + edges[end].utf8
+            let pIdx = partitionPoint(pillRanges) { $0.upperBound <= proposed }
+            if !(pIdx < pillRanges.count && pillRanges[pIdx].lowerBound > utf8Start && pillRanges[pIdx].lowerBound < proposed) {
+                return [(0, text, edges[end].x)]
+            }
+        }
+
+        #if os(WASI) && RUNE_BROWSER_TEXT
+        let ns = text as NSString
+        let standard = Set(lineBreakOpportunities(in: ns, from: 0, to: ns.length))
+        let natural = BrowserSegmentation.dictionaryBreaks(standard, in: text, words: false)
         func canBreak(_ boundary: Int) -> Bool {
             boundary == end || natural.contains(edges[boundary].utf16)
         }
+        #elseif !canImport(CoreText) && canImport(_FoundationICU)
+        let utf16 = utf16Units(of: text)
+        let sortedBreaks = lineBreakOpportunities(inUTF16: utf16)
+        func canBreak(_ boundary: Int) -> Bool {
+            if boundary == end { return true }
+            let target = edges[boundary].utf16
+            let idx = partitionPoint(sortedBreaks) { $0 < target }
+            return idx < sortedBreaks.count && sortedBreaks[idx] == target
+        }
+        #else
+        let ns = text as NSString
+        let sortedBreaks = lineBreakOpportunities(in: ns, from: 0, to: ns.length)
+        func canBreak(_ boundary: Int) -> Bool {
+            if boundary == end { return true }
+            let target = edges[boundary].utf16
+            let idx = partitionPoint(sortedBreaks) { $0 < target }
+            return idx < sortedBreaks.count && sortedBreaks[idx] == target
+        }
+        #endif
+
         func wrapLines(caps: [Int: CGFloat] = [:]) -> [Range<Int>] {
             var ranges: [Range<Int>] = []
             var lo = 0
@@ -225,11 +433,24 @@ public enum PrettyLineBreaker {
                 var hi = lo
                 var regularBreak: Int?
                 var emergencyBreak: Int?
+                #if !(os(WASI) && RUNE_BROWSER_TEXT)
+                let loU16 = edges[lo].utf16
+                var breakCursor = partitionPoint(sortedBreaks) { $0 < loU16 }
+                #endif
                 while hi < end {
                     // Parley records a break before this grapheme only after some
                     // advance. A zero-width prefix stays with the following text.
                     if edges[hi].x != edges[lo].x {
-                        if canBreak(hi) { regularBreak = hi }
+                        #if os(WASI) && RUNE_BROWSER_TEXT
+                        let isNatural = canBreak(hi)
+                        #else
+                        let u16 = edges[hi].utf16
+                        while breakCursor < sortedBreaks.count && sortedBreaks[breakCursor] < u16 {
+                            breakCursor += 1
+                        }
+                        let isNatural = breakCursor < sortedBreaks.count && sortedBreaks[breakCursor] == u16
+                        #endif
+                        if isNatural { regularBreak = hi }
                         else if wrapAnywhere { emergencyBreak = hi }
                     }
                     let next = edges[hi + 1]
@@ -242,12 +463,14 @@ public enum PrettyLineBreaker {
                 }
                 // Start the chip on a fresh line when the proposed break splits its label.
                 // A label already at the start can wrap across lines at the normal breaks.
-                let proposed = utf8Start + edges[hi].utf8
-                let index = partitionPoint(pillRanges) { $0.upperBound <= proposed }
-                if index < pillRanges.count {
-                    let start = pillRanges[index].lowerBound - utf8Start
-                    if edges[lo].utf8 < start && start < edges[hi].utf8 {
-                        hi = partitionPoint(edges) { $0.utf8 < start }
+                if !pillRanges.isEmpty {
+                    let proposed = utf8Start + edges[hi].utf8
+                    let index = partitionPoint(pillRanges) { $0.upperBound <= proposed }
+                    if index < pillRanges.count {
+                        let start = pillRanges[index].lowerBound - utf8Start
+                        if edges[lo].utf8 < start && start < edges[hi].utf8 {
+                            hi = partitionPoint(edges) { $0.utf8 < start }
+                        }
                     }
                 }
                 ranges.append(lo..<hi)
@@ -264,12 +487,28 @@ public enum PrettyLineBreaker {
                                       trailingWsPx: b.x - max(a.x, b.inkEnd), hasRTLRun: false,
                                       isEmergency: !canBreak(range.upperBound))
             }
-            let offsets = Dictionary(uniqueKeysWithValues: edges.map { ($0.utf16, $0.x) })
-            if let caps = prettyLineCaps(lines: info, in: ns, fontSizePt: fontSize, scale: 1,
-                                         maxWidthPx: width, advanceAtUTF16: { offsets[$0] ?? 0 }) {
+            let oneToOneU16 = edges[end].utf16 == end
+            func xForU16(_ u16: Int) -> Float {
+                if oneToOneU16 {
+                    return (u16 >= 0 && u16 <= end) ? edges[u16].x : 0
+                }
+                let idx = partitionPoint(edges) { $0.utf16 < u16 }
+                return (idx <= end && edges[idx].utf16 == u16) ? edges[idx].x : 0
+            }
+            #if !canImport(CoreText) && canImport(_FoundationICU)
+            if let caps = prettyLineCapsUTF16(lines: info, units: utf16, allBreaks: sortedBreaks,
+                                              fontSizePt: fontSize, maxWidthPx: width,
+                                              advanceAtUTF16: xForU16) {
                 let revised = wrapLines(caps: caps)
                 if revised.count == ranges.count { ranges = revised }
             }
+            #else
+            if let caps = prettyLineCaps(lines: info, in: ns, fontSizePt: fontSize, scale: 1,
+                                         maxWidthPx: width, advanceAtUTF16: xForU16) {
+                let revised = wrapLines(caps: caps)
+                if revised.count == ranges.count { ranges = revised }
+            }
+            #endif
         }
         return ranges.map {
             let a = edges[$0.lowerBound], b = edges[$0.upperBound]
@@ -377,8 +616,8 @@ public enum PrettyLineBreaker {
                 return (at > start && at < end) ? at : nil
             }
         }
-        let slice = nsStr.substring(with: NSRange(location: start, length: end - start))
         #if canImport(CoreText)
+        let slice = nsStr.substring(with: NSRange(location: start, length: end - start))
         let sliceNS = slice as NSString
         guard sliceNS.length > 0 else { return [] }
         let tok = CFStringTokenizerCreate(
@@ -403,23 +642,17 @@ public enum PrettyLineBreaker {
         return breaks
         #elseif canImport(_FoundationICU)
         // Swift Foundation ships the same Unicode line break iterator on its non-Darwin SDKs.
-        let units = Array(slice.utf16)
-        guard let count = Int32(exactly: units.count) else { return [] }
-        return units.withUnsafeBufferPointer { buffer in
-            var status = U_ZERO_ERROR
-            guard let iterator = swift_ubrk_open(UBRK_LINE, "und", buffer.baseAddress, count, &status) else { return [] }
-            defer { swift_ubrk_close(iterator) }
-            var breaks: [Int] = []
-            var boundary = swift_ubrk_next(iterator)
-            while boundary != UBRK_DONE && boundary < count {
-                breaks.append(start + Int(boundary))
-                boundary = swift_ubrk_next(iterator)
-            }
-            return breaks
+        let length = end - start
+        guard length > 0 else { return [] }
+        let units = [UInt16](unsafeUninitializedCapacity: length) { buffer, initializedCount in
+            nsStr.getCharacters(buffer.baseAddress!, range: NSRange(location: start, length: length))
+            initializedCount = length
         }
+        return lineBreakOpportunities(inUTF16: units, offset: start)
         #else
         // Minimal SDKs without Unicode segmentation can wrap after space, tab, zero-width
         // space or a discretionary hyphen. Keep nonbreaking spaces and graphemes intact.
+        let slice = nsStr.substring(with: NSRange(location: start, length: end - start))
         var breaks: [Int] = []
         var position = start
         var mayBreak = false

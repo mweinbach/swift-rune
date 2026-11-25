@@ -4,7 +4,7 @@
 /// parent-space positions so adjacent siblings never leave 1px hairline gaps.
 ///
 /// Matches Taffy's `round_layout` algorithm.
-internal func roundLayout(tree: any LayoutTree, root: NodeId) {
+internal func roundLayout<Tree: LayoutTree>(tree: Tree, root: NodeId) {
     tree.visitSubtree(root, inheriting: Point<Float>.zero) { node, parent in
         let unrounded = tree.unroundedLayout(node)
         let cumX = parent.x + unrounded.location.x

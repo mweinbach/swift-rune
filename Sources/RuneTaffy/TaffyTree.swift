@@ -56,8 +56,7 @@ public struct TaffyTree: Sendable {
     private func validIndex(_ id: NodeId) -> Int? {
         let idx = id.index
         guard idx >= 0 && idx < nodes.count else { return nil }
-        let slot = nodes[idx]
-        guard slot.occupied && slot.generation == id.generation else { return nil }
+        guard nodes[idx].occupied && nodes[idx].generation == id.generation else { return nil }
         return idx
     }
 
@@ -400,48 +399,58 @@ private final class TaffyTreeAdapter: LayoutTree {
         self.measureLeaf = measureLeaf
     }
 
+    @inline(__always)
     func childCount(_ node: NodeId) -> Int {
         nodes[node.index].children.count
     }
 
+    @inline(__always)
     func childId(_ node: NodeId, at index: Int) -> NodeId {
         nodes[node.index].children[index]
     }
 
+    @inline(__always)
     func style(_ node: NodeId) -> TaffyStyle {
         nodes[node.index].style
     }
 
+    @inline(__always)
     func unroundedLayout(_ node: NodeId) -> Layout {
         nodes[node.index].unroundedLayout
     }
 
+    @inline(__always)
     func setUnroundedLayout(_ node: NodeId, _ layout: Layout) {
         nodes[node.index].unroundedLayout = layout
     }
 
+    @inline(__always)
     func setFinalLayout(_ node: NodeId, _ layout: Layout) {
         if nodes[node.index].roundedLayout == nil { roundedCount += 1 }
         nodes[node.index].roundedLayout = layout
     }
 
+    @inline(__always)
     func cacheClear(_ node: NodeId) {
         nodes[node.index].cache.clear()
     }
 
+    @inline(__always)
     func cacheGet(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput? {
         nodes[node.index].cache.get(input)
     }
 
+    @inline(__always)
     func cacheStore(_ node: NodeId, _ input: LayoutInput, _ output: LayoutOutput) {
         nodes[node.index].cache.store(input, output: output)
     }
 
-    func measureLeafNode(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput {
-        let slot = nodes[node.index]
-        if let measureLeaf { return measureLeaf(node, input, slot.style) }
-        if let measure = slot.measure {
-            let size = measure(input.knownDimensions, input.availableSpace, slot.style)
+    @inline(__always)
+    func measureLeafNode(_ node: NodeId, _ style: TaffyStyle, _ input: LayoutInput) -> LayoutOutput {
+        let idx = node.index
+        if let measureLeaf { return measureLeaf(node, input, style) }
+        if let measure = nodes[idx].measure {
+            let size = measure(input.knownDimensions, input.availableSpace, style)
             return LayoutOutput.fromOuterSize(size)
         }
         return LayoutOutput.fromOuterSize(.zero)

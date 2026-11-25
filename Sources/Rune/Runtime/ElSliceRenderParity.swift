@@ -330,13 +330,25 @@ internal extension Runtime {
 
     func pruneScaleSettles() {
         if !elSliceRenderState.scaleSettles.isEmpty {
-            elSliceRenderState.scaleSettles = elSliceRenderState.scaleSettles.filter {
-                scene.contains($0.key) || nodeIndexById[$0.key] != nil || exitingSnapshots[$0.key] != nil
+            var evicted: [NodeId] = []
+            for key in elSliceRenderState.scaleSettles.keys {
+                if !scene.contains(key) && nodeIndexById[key] == nil && exitingSnapshots[key] == nil {
+                    evicted.append(key)
+                }
+            }
+            for key in evicted {
+                elSliceRenderState.scaleSettles.removeValue(forKey: key)
             }
         }
         if !elSliceRenderState.nodeCaches.isEmpty {
-            elSliceRenderState.nodeCaches = elSliceRenderState.nodeCaches.filter {
-                scene.contains($0.key) || nodeIndexById[$0.key] != nil || exitingSnapshots[$0.key] != nil
+            var evicted: [NodeId] = []
+            for key in elSliceRenderState.nodeCaches.keys {
+                if !scene.contains(key) && nodeIndexById[key] == nil && exitingSnapshots[key] == nil {
+                    evicted.append(key)
+                }
+            }
+            for key in evicted {
+                elSliceRenderState.nodeCaches.removeValue(forKey: key)
             }
         }
     }

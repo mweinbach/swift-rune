@@ -80,6 +80,19 @@ typedef struct {
     // cap_height is zero when unavailable.
     float font_ascent, font_descent, cap_height;
 } RuneDesktopLineMetrics;
+#if defined(_WIN32)
+typedef struct {
+    int32_t start, end;
+    float left, advance, caret, end_caret;
+    int32_t direction;
+} RuneWindowsCell;
+void rune_windows_line_cells(const RuneDesktopLine *line, RuneWindowsCell *cells, int32_t count);
+// Layout metrics (advance, ascent, descent, font_ascent, font_descent, cap_height) without
+// forcing glyph-run raster analysis. ink_* fields are left zero.
+RuneDesktopLineMetrics rune_windows_line_layout_metrics(const RuneDesktopLine *line);
+// Nonzero when every shaped cluster in the line is a single UTF-16 code unit.
+int32_t rune_windows_line_is_unit_clusters(const RuneDesktopLine *line);
+#endif
 // direction: 0 = auto, 1 = LTR, 2 = RTL. An empty family selects the system UI font.
 RuneDesktopLine *rune_desktop_line_create(const char *utf8, int32_t length,
     const char *family, float size_px, int32_t weight, int32_t italic,

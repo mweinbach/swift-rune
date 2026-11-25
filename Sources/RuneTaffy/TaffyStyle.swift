@@ -5,20 +5,25 @@
 private struct ExactBFloat: Sendable, Hashable {
     var bits: UInt16 = 0
 
+    @inline(__always)
     init(bits: UInt16 = 0) { self.bits = bits }
 
+    @inline(__always)
     init?(_ value: Float) {
         guard value.bitPattern & 0xFFFF == 0 else { return nil }
         bits = UInt16(value.bitPattern >> 16)
     }
 
+    @inline(__always)
     var value: Float { Float(bitPattern: UInt32(bits) << 16) }
 
+    @inline(__always)
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.value == rhs.value }
     func hash(into hasher: inout Hasher) { hasher.combine(value) }
 }
 
 private extension Dimension {
+    @inline(__always)
     var packedHot: (Float, UInt8)? {
         switch self {
         case .length(let n): (n, 0)
@@ -29,6 +34,7 @@ private extension Dimension {
         }
     }
 
+    @inline(__always)
     init(_ value: Float, hotTag: UInt8) {
         switch hotTag {
         case 0: self = .length(value)
@@ -40,6 +46,7 @@ private extension Dimension {
 }
 
 private extension LengthPercentage {
+    @inline(__always)
     var packed: (Float, UInt8) {
         switch self {
         case .length(let n): (n, 0)
@@ -47,6 +54,7 @@ private extension LengthPercentage {
         }
     }
 
+    @inline(__always)
     init(_ value: Float, tag: UInt8) {
         self = tag == 0 ? .length(value) : .percent(value)
     }
@@ -124,8 +132,8 @@ private struct StyleTags: Sendable, Hashable {
     private var bits: UInt64 = StyleTags.defaultBits
 
     subscript(_ field: StyleField) -> UInt8 {
-        get { UInt8((bits >> field.shift) & field.mask) }
-        set {
+        @inline(__always) get { UInt8((bits >> field.shift) & field.mask) }
+        @inline(__always) set {
             bits = (bits & ~(field.mask << field.shift)) | (UInt64(newValue) << field.shift)
         }
     }
@@ -159,7 +167,9 @@ private struct StyleTags: Sendable, Hashable {
     var hasPercentPadding: Bool { bits & (0xF << 12) != 0 }
 
     // Preserve signed zero when reading a flex basis, and Float's equality/hash for the style.
+    @inline(__always)
     private var equalityBits: UInt64 { bits & ~(UInt64(1) << StyleField.basisNegative.shift) }
+    @inline(__always)
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.equalityBits == rhs.equalityBits }
     func hash(into hasher: inout Hasher) { hasher.combine(equalityBits) }
 }
@@ -225,50 +235,80 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
     private var extra: [ExtendedStyle] = []
 
     @inline(__always)
-    private mutating func setExtended<T: Equatable>(_ key: WritableKeyPath<ExtendedStyle, T>, _ value: T) {
-        let normal = ExtendedStyle.defaults[keyPath: key]
+    public static func == (lhs: TaffyStyle, rhs: TaffyStyle) -> Bool {
+        guard lhs.tags == rhs.tags,
+              lhs.sizeValues == rhs.sizeValues,
+              lhs.minValues == rhs.minValues,
+              lhs.maxValues == rhs.maxValues,
+              lhs.paddingValues == rhs.paddingValues,
+              lhs.gapWidth == rhs.gapWidth,
+              lhs.gapHeight == rhs.gapHeight,
+              lhs.grow == rhs.grow,
+              lhs.shrink == rhs.shrink
+        else { return false }
+        if lhs.extra.isEmpty && rhs.extra.isEmpty { return true }
+        return lhs.extra == rhs.extra
+    }
+
+    @inline(__always)
+    private mutating func setExtendedValue<T: Equatable>(
+        _ value: T,
+        default normal: T,
+        get: (ExtendedStyle) -> T,
+        set: (inout ExtendedStyle, T) -> Void
+    ) {
         if value == normal {
-            guard !extra.isEmpty, extra[0][keyPath: key] != normal else { return }
-            extra[0][keyPath: key] = value
+            guard !extra.isEmpty, get(extra[0]) != normal else { return }
+            set(&extra[0], value)
             if extra[0] == ExtendedStyle.defaults { extra = [] }
         } else {
             if extra.isEmpty { extra = [.defaults] }
-            extra[0][keyPath: key] = value
+            set(&extra[0], value)
         }
     }
 
-    private mutating func setGrid<T: Equatable>(_ key: WritableKeyPath<GridFields, T>, _ value: T) {
-        let normal = GridFields.defaults[keyPath: key]
+    @inline(__always)
+    private mutating func setGridValue<T: Equatable>(
+        _ value: T,
+        default normal: T,
+        get: (GridFields) -> T,
+        set: (inout GridFields, T) -> Void
+    ) {
         if value == normal {
-            guard !extra.isEmpty, !extra[0].grid.isEmpty, extra[0].grid[0][keyPath: key] != normal else { return }
-            extra[0].grid[0][keyPath: key] = value
-            if extra[0].grid[0] == .defaults { setExtended(\.grid, []) }
+            guard !extra.isEmpty, !extra[0].grid.isEmpty, get(extra[0].grid[0]) != normal else { return }
+            set(&extra[0].grid[0], value)
+            if extra[0].grid[0] == .defaults {
+                extra[0].grid = []
+                if extra[0] == ExtendedStyle.defaults { extra = [] }
+            }
         } else {
             if extra.isEmpty { extra = [.defaults] }
             if extra[0].grid.isEmpty { extra[0].grid = [.defaults] }
-            extra[0].grid[0][keyPath: key] = value
+            set(&extra[0].grid[0], value)
         }
     }
 
-    private mutating func setDimension(
+    @inline(__always)
+    private mutating func setDimensionSlot(
         _ newValue: Size<Dimension>,
-        values: WritableKeyPath<TaffyStyle, Size<Float>>,
         shift: Int,
-        extendedKey: WritableKeyPath<ExtendedStyle, Size<Dimension>?>
+        setInline: (inout TaffyStyle, Size<Float>) -> Void,
+        getExtended: (ExtendedStyle) -> Size<Dimension>?,
+        setExtended: (inout ExtendedStyle, Size<Dimension>?) -> Void
     ) {
         if let (w, wt) = newValue.width.packedHot, let (h, ht) = newValue.height.packedHot {
-            self[keyPath: values] = Size(width: w, height: h)
+            setInline(&self, Size(width: w, height: h))
             tags[StyleField(shift, 4)] = wt | (ht << 2)
             if tags[.extendedDims] != 0 {
-                setExtended(extendedKey, nil)
+                setExtendedValue(nil, default: nil, get: getExtended, set: setExtended)
                 let stillExtended = !extra.isEmpty
                     && (extra[0].size != nil || extra[0].minSize != nil || extra[0].maxSize != nil)
                 tags[.extendedDims] = stillExtended ? 1 : 0
             }
         } else {
-            self[keyPath: values] = .zero
+            setInline(&self, .zero)
             tags[StyleField(shift, 4)] = 0b10_10
-            setExtended(extendedKey, newValue)
+            setExtendedValue(newValue, default: nil, get: getExtended, set: setExtended)
             tags[.extendedDims] = 1
         }
     }
@@ -276,8 +316,8 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
     // MARK: - Core Layout Properties
 
     public var display: Display {
-        get { Display(rawValue: tags[.display])! }
-        set { tags[.display] = newValue.rawValue }
+        @inline(__always) get { Display(rawValue: tags[.display])! }
+        @inline(__always) set { tags[.display] = newValue.rawValue }
     }
     public var position: Position {
         get {
@@ -291,23 +331,29 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
         set {
             switch newValue {
             case .static:
-                if tags[.position] == 3 { setExtended(\.position, nil) }
+                if tags[.position] == 3 {
+                    setExtendedValue(nil, default: nil, get: { $0.position }, set: { $0.position = $1 })
+                }
                 tags[.position] = 0
             case .relative:
-                if tags[.position] == 3 { setExtended(\.position, nil) }
+                if tags[.position] == 3 {
+                    setExtendedValue(nil, default: nil, get: { $0.position }, set: { $0.position = $1 })
+                }
                 tags[.position] = 1
             case .absolute:
-                if tags[.position] == 3 { setExtended(\.position, nil) }
+                if tags[.position] == 3 {
+                    setExtendedValue(nil, default: nil, get: { $0.position }, set: { $0.position = $1 })
+                }
                 tags[.position] = 2
             case .fixed, .sticky:
-                setExtended(\.position, newValue)
+                setExtendedValue(newValue, default: nil, get: { $0.position }, set: { $0.position = $1 })
                 tags[.position] = 3
             }
         }
     }
     public var overflow: Point<Overflow> {
-        get { Point(x: Overflow(rawValue: tags[.overflowX])!, y: Overflow(rawValue: tags[.overflowY])!) }
-        set {
+        @inline(__always) get { Point(x: Overflow(rawValue: tags[.overflowX])!, y: Overflow(rawValue: tags[.overflowY])!) }
+        @inline(__always) set {
             tags[.overflowX] = newValue.x.rawValue
             tags[.overflowY] = newValue.y.rawValue
         }
@@ -320,21 +366,42 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
             if tags[.extendedDims] != 0, let extended = extra[0].size { return extended }
             return tags.dimensions(sizeValues, at: 0)
         }
-        set { setDimension(newValue, values: \.sizeValues, shift: 0, extendedKey: \.size) }
+        set {
+            setDimensionSlot(
+                newValue, shift: 0,
+                setInline: { $0.sizeValues = $1 },
+                getExtended: { $0.size },
+                setExtended: { $0.size = $1 }
+            )
+        }
     }
     public var minSize: Size<Dimension> {
         get {
             if tags[.extendedDims] != 0, let extended = extra[0].minSize { return extended }
             return tags.dimensions(minValues, at: 4)
         }
-        set { setDimension(newValue, values: \.minValues, shift: 4, extendedKey: \.minSize) }
+        set {
+            setDimensionSlot(
+                newValue, shift: 4,
+                setInline: { $0.minValues = $1 },
+                getExtended: { $0.minSize },
+                setExtended: { $0.minSize = $1 }
+            )
+        }
     }
     public var maxSize: Size<Dimension> {
         get {
             if tags[.extendedDims] != 0, let extended = extra[0].maxSize { return extended }
             return tags.dimensions(maxValues, at: 8)
         }
-        set { setDimension(newValue, values: \.maxValues, shift: 8, extendedKey: \.maxSize) }
+        set {
+            setDimensionSlot(
+                newValue, shift: 8,
+                setInline: { $0.maxValues = $1 },
+                getExtended: { $0.maxSize },
+                setExtended: { $0.maxSize = $1 }
+            )
+        }
     }
     public var padding: Rect<LengthPercentage> {
         get {
@@ -365,7 +432,7 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
                 tags[.gapWidth] = widthTag
                 tags[.gapHeight] = heightTag
                 if tags[.extendedGap] != 0 {
-                    setExtended(\.gap, nil)
+                    setExtendedValue(nil, default: nil, get: { $0.gap }, set: { $0.gap = $1 })
                     tags[.extendedGap] = 0
                 }
             } else {
@@ -373,7 +440,7 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
                 gapHeight = ExactBFloat()
                 tags[.gapWidth] = 0
                 tags[.gapHeight] = 0
-                setExtended(\.gap, newValue)
+                setExtendedValue(newValue, default: nil, get: { $0.gap }, set: { $0.gap = $1 })
                 tags[.extendedGap] = 1
             }
         }
@@ -382,17 +449,17 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
     // MARK: - Flexbox and alignment
 
     public var flexDirection: FlexDirection {
-        get { FlexDirection(rawValue: tags[.direction])! }
-        set { tags[.direction] = newValue.rawValue }
+        @inline(__always) get { FlexDirection(rawValue: tags[.direction])! }
+        @inline(__always) set { tags[.direction] = newValue.rawValue }
     }
     public var flexWrap: FlexWrap {
-        get { FlexWrap(rawValue: tags[.wrap])! }
-        set { tags[.wrap] = newValue.rawValue }
+        @inline(__always) get { FlexWrap(rawValue: tags[.wrap])! }
+        @inline(__always) set { tags[.wrap] = newValue.rawValue }
     }
     /// Stack content- and length-sized children on whole points in a non-wrapping flex column.
     public var wholeRows: Bool {
-        get { tags[.wholeRows] != 0 }
-        set { tags[.wholeRows] = newValue ? 1 : 0 }
+        @inline(__always) get { tags[.wholeRows] != 0 }
+        @inline(__always) set { tags[.wholeRows] = newValue ? 1 : 0 }
     }
     public var isWholeRowsColumn: Bool {
         wholeRows && display == .flex && flexDirection == .column && flexWrap == .noWrap
@@ -403,12 +470,12 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
             if let packed = ExactBFloat(newValue) {
                 grow = packed
                 if tags[.extendedGrow] != 0 {
-                    setExtended(\.flexGrow, nil)
+                    setExtendedValue(nil, default: nil, get: { $0.flexGrow }, set: { $0.flexGrow = $1 })
                     tags[.extendedGrow] = 0
                 }
             } else {
                 grow = ExactBFloat()
-                setExtended(\.flexGrow, newValue)
+                setExtendedValue(newValue, default: nil, get: { $0.flexGrow }, set: { $0.flexGrow = $1 })
                 tags[.extendedGrow] = 1
             }
         }
@@ -419,12 +486,12 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
             if let packed = ExactBFloat(newValue) {
                 shrink = packed
                 if tags[.extendedShrink] != 0 {
-                    setExtended(\.flexShrink, nil)
+                    setExtendedValue(nil, default: nil, get: { $0.flexShrink }, set: { $0.flexShrink = $1 })
                     tags[.extendedShrink] = 0
                 }
             } else {
                 shrink = ExactBFloat()
-                setExtended(\.flexShrink, newValue)
+                setExtendedValue(newValue, default: nil, get: { $0.flexShrink }, set: { $0.flexShrink = $1 })
                 tags[.extendedShrink] = 1
             }
         }
@@ -446,127 +513,127 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
             default:
                 tags[.basisZero] = 0
                 tags[.basisNegative] = 0
-                setExtended(\.flexBasis, newValue)
+                setExtendedValue(newValue, default: nil, get: { $0.flexBasis }, set: { $0.flexBasis = $1 })
                 tags[.extendedBasis] = 1
                 return
             }
             if tags[.extendedBasis] != 0 {
-                setExtended(\.flexBasis, nil)
+                setExtendedValue(nil, default: nil, get: { $0.flexBasis }, set: { $0.flexBasis = $1 })
                 tags[.extendedBasis] = 0
             }
         }
     }
     public var alignItems: AlignItems? {
-        get { unpackAlignItems(tags[.alignItems]) }
-        set { tags[.alignItems] = packAlignItems(newValue) }
+        @inline(__always) get { unpackAlignItems(tags[.alignItems]) }
+        @inline(__always) set { tags[.alignItems] = packAlignItems(newValue) }
     }
     public var alignSelf: AlignSelf? {
-        get { unpackAlignItems(tags[.alignSelf]) }
-        set { tags[.alignSelf] = packAlignItems(newValue) }
+        @inline(__always) get { unpackAlignItems(tags[.alignSelf]) }
+        @inline(__always) set { tags[.alignSelf] = packAlignItems(newValue) }
     }
     public var alignContent: AlignContent? {
-        get { unpackAlignContent(tags[.alignContent]) }
-        set { tags[.alignContent] = packAlignContent(newValue) }
+        @inline(__always) get { unpackAlignContent(tags[.alignContent]) }
+        @inline(__always) set { tags[.alignContent] = packAlignContent(newValue) }
     }
     public var justifyContent: JustifyContent? {
-        get { unpackAlignContent(tags[.justifyContent]) }
-        set { tags[.justifyContent] = packAlignContent(newValue) }
+        @inline(__always) get { unpackAlignContent(tags[.justifyContent]) }
+        @inline(__always) set { tags[.justifyContent] = packAlignContent(newValue) }
     }
 
     // MARK: - Extended CSS properties
 
     public var boxSizing: BoxSizing {
         get { extra.isEmpty ? .borderBox : extra[0].boxSizing }
-        set { setExtended(\.boxSizing, newValue) }
+        set { setExtendedValue(newValue, default: .borderBox, get: { $0.boxSizing }, set: { $0.boxSizing = $1 }) }
     }
     public var scrollbarWidth: Float {
         get { extra.isEmpty ? 0 : extra[0].scrollbarWidth }
-        set { setExtended(\.scrollbarWidth, newValue) }
+        set { setExtendedValue(newValue, default: 0, get: { $0.scrollbarWidth }, set: { $0.scrollbarWidth = $1 }) }
     }
     public var direction: Direction {
         get { extra.isEmpty ? .ltr : extra[0].direction }
-        set { setExtended(\.direction, newValue) }
+        set { setExtendedValue(newValue, default: .ltr, get: { $0.direction }, set: { $0.direction = $1 }) }
     }
     public var textAlign: TextAlign {
         get { extra.isEmpty ? .auto : extra[0].textAlign }
-        set { setExtended(\.textAlign, newValue) }
+        set { setExtendedValue(newValue, default: .auto, get: { $0.textAlign }, set: { $0.textAlign = $1 }) }
     }
     public var aspectRatio: Float? {
         get { extra.isEmpty ? nil : extra[0].aspectRatio }
-        set { setExtended(\.aspectRatio, newValue) }
+        set { setExtendedValue(newValue, default: nil, get: { $0.aspectRatio }, set: { $0.aspectRatio = $1 }) }
     }
     public var margin: Rect<LengthPercentageAuto> {
         get { extra.isEmpty ? Rect(all: .zero) : extra[0].margin }
-        set { setExtended(\.margin, newValue) }
+        set { setExtendedValue(newValue, default: Rect(all: .zero), get: { $0.margin }, set: { $0.margin = $1 }) }
     }
     public var border: Rect<LengthPercentage> {
         get { extra.isEmpty ? Rect(all: .zero) : extra[0].border }
-        set { setExtended(\.border, newValue) }
+        set { setExtendedValue(newValue, default: Rect(all: .zero), get: { $0.border }, set: { $0.border = $1 }) }
     }
     public var inset: Rect<LengthPercentageAuto> {
         get { extra.isEmpty ? Rect(all: .auto) : extra[0].inset }
-        set { setExtended(\.inset, newValue) }
+        set { setExtendedValue(newValue, default: Rect(all: .auto), get: { $0.inset }, set: { $0.inset = $1 }) }
     }
     public var justifyItems: JustifyItems? {
         get { extra.isEmpty ? nil : extra[0].justifyItems }
-        set { setExtended(\.justifyItems, newValue) }
+        set { setExtendedValue(newValue, default: nil, get: { $0.justifyItems }, set: { $0.justifyItems = $1 }) }
     }
     public var justifySelf: JustifySelf? {
         get { extra.isEmpty ? nil : extra[0].justifySelf }
-        set { setExtended(\.justifySelf, newValue) }
+        set { setExtendedValue(newValue, default: nil, get: { $0.justifySelf }, set: { $0.justifySelf = $1 }) }
     }
     public var gridTemplateRows: [GridTemplateComponent] {
         get { extra.isEmpty || extra[0].grid.isEmpty ? [] : extra[0].grid[0].gridTemplateRows }
-        set { setGrid(\.gridTemplateRows, newValue) }
+        set { setGridValue(newValue, default: [], get: { $0.gridTemplateRows }, set: { $0.gridTemplateRows = $1 }) }
     }
     public var gridTemplateColumns: [GridTemplateComponent] {
         get { extra.isEmpty || extra[0].grid.isEmpty ? [] : extra[0].grid[0].gridTemplateColumns }
-        set { setGrid(\.gridTemplateColumns, newValue) }
+        set { setGridValue(newValue, default: [], get: { $0.gridTemplateColumns }, set: { $0.gridTemplateColumns = $1 }) }
     }
     public var gridAutoRows: [TrackSizingFunction] {
         get { extra.isEmpty || extra[0].grid.isEmpty ? [] : extra[0].grid[0].gridAutoRows }
-        set { setGrid(\.gridAutoRows, newValue) }
+        set { setGridValue(newValue, default: [], get: { $0.gridAutoRows }, set: { $0.gridAutoRows = $1 }) }
     }
     public var gridAutoColumns: [TrackSizingFunction] {
         get { extra.isEmpty || extra[0].grid.isEmpty ? [] : extra[0].grid[0].gridAutoColumns }
-        set { setGrid(\.gridAutoColumns, newValue) }
+        set { setGridValue(newValue, default: [], get: { $0.gridAutoColumns }, set: { $0.gridAutoColumns = $1 }) }
     }
     public var gridAutoFlow: GridAutoFlow {
         get { extra.isEmpty || extra[0].grid.isEmpty ? .row : extra[0].grid[0].gridAutoFlow }
-        set { setGrid(\.gridAutoFlow, newValue) }
+        set { setGridValue(newValue, default: .row, get: { $0.gridAutoFlow }, set: { $0.gridAutoFlow = $1 }) }
     }
     public var gridTemplateAreas: [GridTemplateArea] {
         get { extra.isEmpty || extra[0].grid.isEmpty ? [] : extra[0].grid[0].gridTemplateAreas }
-        set { setGrid(\.gridTemplateAreas, newValue) }
+        set { setGridValue(newValue, default: [], get: { $0.gridTemplateAreas }, set: { $0.gridTemplateAreas = $1 }) }
     }
     public var gridTemplateRowNames: [[String]] {
         get { extra.isEmpty || extra[0].grid.isEmpty ? [] : extra[0].grid[0].gridTemplateRowNames }
-        set { setGrid(\.gridTemplateRowNames, newValue) }
+        set { setGridValue(newValue, default: [], get: { $0.gridTemplateRowNames }, set: { $0.gridTemplateRowNames = $1 }) }
     }
     public var gridTemplateColumnNames: [[String]] {
         get { extra.isEmpty || extra[0].grid.isEmpty ? [] : extra[0].grid[0].gridTemplateColumnNames }
-        set { setGrid(\.gridTemplateColumnNames, newValue) }
+        set { setGridValue(newValue, default: [], get: { $0.gridTemplateColumnNames }, set: { $0.gridTemplateColumnNames = $1 }) }
     }
     public var gridRow: Line<GridPlacement> {
         get { extra.isEmpty || extra[0].grid.isEmpty ? Line(start: .auto, end: .auto) : extra[0].grid[0].gridRow }
-        set { setGrid(\.gridRow, newValue) }
+        set { setGridValue(newValue, default: Line(start: .auto, end: .auto), get: { $0.gridRow }, set: { $0.gridRow = $1 }) }
     }
     public var gridColumn: Line<GridPlacement> {
         get { extra.isEmpty || extra[0].grid.isEmpty ? Line(start: .auto, end: .auto) : extra[0].grid[0].gridColumn }
-        set { setGrid(\.gridColumn, newValue) }
+        set { setGridValue(newValue, default: Line(start: .auto, end: .auto), get: { $0.gridColumn }, set: { $0.gridColumn = $1 }) }
     }
     public var itemIsTable: Bool {
         get { extra.isEmpty ? false : extra[0].itemIsTable }
-        set { setExtended(\.itemIsTable, newValue) }
+        set { setExtendedValue(newValue, default: false, get: { $0.itemIsTable }, set: { $0.itemIsTable = $1 }) }
     }
     public var itemIsReplaced: Bool {
         get { extra.isEmpty ? false : extra[0].itemIsReplaced }
-        set { setExtended(\.itemIsReplaced, newValue) }
+        set { setExtendedValue(newValue, default: false, get: { $0.itemIsReplaced }, set: { $0.itemIsReplaced = $1 }) }
     }
     /// Matches Taffy's `Style::item_is_compressible_replaced`.
     public var itemIsCompressibleReplaced: Bool {
         get { extra.isEmpty ? false : extra[0].itemIsCompressibleReplaced }
-        set { setExtended(\.itemIsCompressibleReplaced, newValue) }
+        set { setExtendedValue(newValue, default: false, get: { $0.itemIsCompressibleReplaced }, set: { $0.itemIsCompressibleReplaced = $1 }) }
     }
     /// Box generation mode matching `CoreStyle::box_generation_mode`.
     public var boxGenerationMode: BoxGenerationMode {
@@ -593,7 +660,7 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
     }
     public var contain: Contain {
         get { extra.isEmpty ? .none : extra[0].contain }
-        set { setExtended(\.contain, newValue) }
+        set { setExtendedValue(newValue, default: .none, get: { $0.contain }, set: { $0.contain = $1 }) }
     }
 
     public static let `default` = TaffyStyle()
@@ -1020,6 +1087,16 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
             )
         }
         return tags.resolve(maxValues, at: 8, parent: parent, adjustment: adjustment)
+    }
+
+    @inline(__always)
+    internal var hasPercentPadding: Bool {
+        tags.hasPercentPadding
+    }
+
+    @inline(__always)
+    internal var inlinePaddingValues: Rect<Float> {
+        paddingValues
     }
 
     internal func resolvedPadding(parentWidth: Float?) -> Rect<Float> {

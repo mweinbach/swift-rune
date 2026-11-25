@@ -854,6 +854,9 @@ extension Runtime {
         ctx: inout VirtualExpansionContext
     ) {
         let path = source.listPath
+        if focusedKey == nil {
+            guard let fp = focusedPath, fp.hasPrefix(path + "/") else { return }
+        }
         let places = source.places
         let mounted = source.mounted
         let keys = places.keys
@@ -3184,7 +3187,7 @@ extension Runtime {
     }
 
     internal func dispatchScrollOffsetObserverIfChanged(
-        for node: FlatNode,
+        for node: borrowing FlatNode,
         at now: Double = 0.0,
         instant: Bool = false,
         drawnOverride: Vec2? = nil
@@ -3292,8 +3295,17 @@ extension Runtime {
         rectOf: (FlatNode) -> MotionRect,
         ownLiveOffset: Vec2 = .zero
     ) -> (shift: Vec2, parentShiftMag: Float) {
+        let isSticky = nodes.withUnsafeBufferPointer { $0[idx].isSticky }
+        let held = scrollRequestsState.keeps.isEmpty
+            ? nil
+            : nodes.withUnsafeBufferPointer { buf in
+                let path = buf[idx].path
+                return scrollRequestsState.keeps.first(where: { $0.hold?.path == path })?.hold
+            }
+        guard held != nil || isSticky else {
+            return (parentStickyShift, max(abs(parentStickyShift.x), abs(parentStickyShift.y)))
+        }
         let node = nodes[idx]
-        let held = scrollRequestsState.keeps.first(where: { $0.hold?.path == node.path })?.hold
         let effEdge: StickyEdge
         let effInset: Float
         let effTail: Bool

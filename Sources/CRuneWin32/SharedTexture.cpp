@@ -292,50 +292,103 @@ int rune_win_shared_copy_gl(void *opaque, uint32_t destination) {
                                     frame->desc.Width, frame->desc.Height, destination);
 }
 
-bool rune_win_blit_d3d_texture(ID3D11Device *device, ID3D11Texture2D *texture,
-                               UINT width, UINT height, GLuint destination) {
-    if (!device || !texture || !destination) return false;
-    auto open = glProc<HANDLE (WINAPI *)(void *)>("wglDXOpenDeviceNV");
-    auto close = glProc<BOOL (WINAPI *)(HANDLE)>("wglDXCloseDeviceNV");
-    auto reg = glProc<HANDLE (WINAPI *)(HANDLE, void *, GLuint, GLenum, GLenum)>("wglDXRegisterObjectNV");
-    auto unreg = glProc<BOOL (WINAPI *)(HANDLE, HANDLE)>("wglDXUnregisterObjectNV");
-    auto lock = glProc<BOOL (WINAPI *)(HANDLE, GLint, HANDLE *)>("wglDXLockObjectsNV");
-    auto unlock = glProc<BOOL (WINAPI *)(HANDLE, GLint, HANDLE *)>("wglDXUnlockObjectsNV");
-    auto genFb = glProc<void (APIENTRY *)(GLsizei, GLuint *)>("glGenFramebuffers");
-    auto bindFb = glProc<void (APIENTRY *)(GLenum, GLuint)>("glBindFramebuffer");
-    auto attach = glProc<void (APIENTRY *)(GLenum, GLenum, GLenum, GLuint, GLint)>("glFramebufferTexture2D");
-    auto status = glProc<GLenum (APIENTRY *)(GLenum)>("glCheckFramebufferStatus");
-    auto deleteFb = glProc<void (APIENTRY *)(GLsizei, const GLuint *)>("glDeleteFramebuffers");
-    if (!open || !close || !reg || !unreg || !lock || !unlock || !genFb || !bindFb || !attach || !status || !deleteFb) return 0;
-    HANDLE interop = open(device);
-    if (!interop) return 0;
-    GLuint source = 0;
-    rune_lazy_glGenTextures(1, &source);
-    HANDLE object = reg(interop, texture, source, GL_TEXTURE_2D, 0 /* WGL_ACCESS_READ_ONLY_NV */);
+namespace {
+struct BlitGLProcs {
+    HGLRC context = nullptr;
+    HANDLE (WINAPI *open)(void *) = nullptr;
+    BOOL (WINAPI *close)(HANDLE) = nullptr;
+    HANDLE (WINAPI *reg)(HANDLE, void *, GLuint, GLenum, GLenum) = nullptr;
+    BOOL (WINAPI *unreg)(HANDLE, HANDLE) = nullptr;
+    BOOL (WINAPI *lock)(HANDLE, GLint, HANDLE *) = nullptr;
+    BOOL (WINAPI *unlock)(HANDLE, GLint, HANDLE *) = nullptr;
+    void (APIENTRY *genFb)(GLsizei, GLuint *) = nullptr;
+    void (APIENTRY *bindFb)(GLenum, GLuint) = nullptr;
+    void (APIENTRY *attach)(GLenum, GLenum, GLenum, GLuint, GLint) = nullptr;
+    GLenum (APIENTRY *status)(GLenum) = nullptr;
+    void (APIENTRY *deleteFb)(GLsizei, const GLuint *) = nullptr;
+
+    bool resolveForCurrent() {
+        HGLRC current = rune_lazy_wglGetCurrentContext();
+        if (!current) return false;
+        if (current != context) {
+            context = current;
+            open = glProc<HANDLE (WINAPI *)(void *)>("wglDXOpenDeviceNV");
+            close = glProc<BOOL (WINAPI *)(HANDLE)>("wglDXCloseDeviceNV");
+            reg = glProc<HANDLE (WINAPI *)(HANDLE, void *, GLuint, GLenum, GLenum)>("wglDXRegisterObjectNV");
+            unreg = glProc<BOOL (WINAPI *)(HANDLE, HANDLE)>("wglDXUnregisterObjectNV");
+            lock = glProc<BOOL (WINAPI *)(HANDLE, GLint, HANDLE *)>("wglDXLockObjectsNV");
+            unlock = glProc<BOOL (WINAPI *)(HANDLE, GLint, HANDLE *)>("wglDXUnlockObjectsNV");
+            genFb = glProc<void (APIENTRY *)(GLsizei, GLuint *)>("glGenFramebuffers");
+            bindFb = glProc<void (APIENTRY *)(GLenum, GLuint)>("glBindFramebuffer");
+            attach = glProc<void (APIENTRY *)(GLenum, GLenum, GLenum, GLuint, GLint)>("glFramebufferTexture2D");
+            status = glProc<GLenum (APIENTRY *)(GLenum)>("glCheckFramebufferStatus");
+            deleteFb = glProc<void (APIENTRY *)(GLsizei, const GLuint *)>("glDeleteFramebuffers");
+        }
+        return open && close && reg && unreg && lock && unlock && genFb && bindFb && attach && status && deleteFb;
+    }
+};
+} // namespace
+
+bool rune_win_blit_d3d_textures(ID3D11Device *device, const RuneWinD3DBlit *blits, size_t count) {
+    constexpr size_t maxBatch = 4;
+    if (!device || !blits || count == 0 || count > maxBatch) return false;
+    for (size_t i = 0; i < count; ++i) {
+        if (!blits[i].texture || !blits[i].destination || !blits[i].width || !blits[i].height) return false;
+    }
+    thread_local BlitGLProcs procs;
+    if (!procs.resolveForCurrent()) return false;
+    HANDLE interop = procs.open(device);
+    if (!interop) return false;
+
+    GLuint sources[maxBatch]{};
+    HANDLE objects[maxBatch]{};
+    rune_lazy_glGenTextures(static_cast<GLsizei>(count), sources);
+    size_t registered = 0;
+    for (; registered < count; ++registered) {
+        objects[registered] = procs.reg(interop, blits[registered].texture, sources[registered],
+                                        GL_TEXTURE_2D, 0 /* WGL_ACCESS_READ_ONLY_NV */);
+        if (!objects[registered]) break;
+    }
+
     bool copied = false;
-    if (object && lock(interop, 1, &object)) {
+    if (registered == count && procs.lock(interop, static_cast<GLint>(count), objects)) {
         constexpr GLenum readFB = 0x8CA8, readBinding = 0x8CAA, color0 = 0x8CE0, complete = 0x8CD5;
         GLint previousFB = 0, previousTexture = 0;
         rune_lazy_glGetIntegerv(readBinding, &previousFB);
         rune_lazy_glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
         GLuint fb = 0;
-        genFb(1, &fb);
-        bindFb(readFB, fb);
-        attach(readFB, color0, GL_TEXTURE_2D, source, 0);
-        if (fb && status(readFB) == complete) {
-            rune_lazy_glReadBuffer(color0);
-            rune_lazy_glBindTexture(GL_TEXTURE_2D, destination);
-            rune_lazy_glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
-            copied = rune_lazy_glGetError() == GL_NO_ERROR;
+        procs.genFb(1, &fb);
+        procs.bindFb(readFB, fb);
+        if (fb) {
+            copied = true;
+            for (size_t i = 0; i < count; ++i) {
+                procs.attach(readFB, color0, GL_TEXTURE_2D, sources[i], 0);
+                if (procs.status(readFB) != complete) {
+                    copied = false;
+                    break;
+                }
+                rune_lazy_glReadBuffer(color0);
+                rune_lazy_glBindTexture(GL_TEXTURE_2D, blits[i].destination);
+                rune_lazy_glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, blits[i].width, blits[i].height);
+            }
+            if (copied) copied = rune_lazy_glGetError() == GL_NO_ERROR;
         }
         rune_lazy_glBindTexture(GL_TEXTURE_2D, previousTexture);
-        bindFb(readFB, previousFB);
-        deleteFb(1, &fb);
-        if (!unlock(interop, 1, &object)) copied = false;
+        procs.bindFb(readFB, previousFB);
+        procs.deleteFb(1, &fb);
+        if (!procs.unlock(interop, static_cast<GLint>(count), objects)) copied = false;
     }
-    if (object && !unreg(interop, object)) copied = false;
-    rune_lazy_glDeleteTextures(1, &source);
-    close(interop);
+    for (size_t i = 0; i < registered; ++i) {
+        if (!procs.unreg(interop, objects[i])) copied = false;
+    }
+    rune_lazy_glDeleteTextures(static_cast<GLsizei>(count), sources);
+    procs.close(interop);
     return copied;
+}
+
+bool rune_win_blit_d3d_texture(ID3D11Device *device, ID3D11Texture2D *texture,
+                               UINT width, UINT height, GLuint destination) {
+    RuneWinD3DBlit blit{texture, width, height, destination};
+    return rune_win_blit_d3d_textures(device, &blit, 1);
 }
 #endif

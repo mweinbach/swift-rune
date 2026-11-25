@@ -33,7 +33,7 @@ struct DesktopFont: Hashable {
     // A newly registered font can change the fallback and its palette for the same family name.
     let settingsEpoch: UInt64
 
-    #if os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
+    #if os(Linux) || os(Windows) || (os(WASI) && RUNE_BROWSER_TEXT)
     /// Family resolution and CSS/HarfBuzz normalization are shared by many independent lines.
     /// The key contains only descriptor inputs, so syntax colors and the text itself can vary.
     private struct Request: Hashable {
@@ -45,6 +45,10 @@ struct DesktopFont: Hashable {
         let language, features, variations: TextUTF8Key
         let opticalSize: OpticalSize
         let epoch: UInt64
+        #if os(Windows)
+        let clearType: Bool
+        let chromiumMask: Bool
+        #endif
     }
 
     private final class ResolvedFonts: @unchecked Sendable {
@@ -71,17 +75,30 @@ struct DesktopFont: Hashable {
         let requestedWeight = span?.weight ?? style.weight
         let size = (span?.size ?? style.size) * scale
         let slanted = span?.italic == true || style.italic
-        #if os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
+        #if os(Windows)
+        let wantsClearType = style.fontSmoothing == .clearType
+        let wantsChromiumMask = style.fontSmoothing == .directWrite || style.fontSmoothing == .clearType || style.fontSmoothing == .systemDefault
+        #endif
+        #if os(Linux) || os(Windows) || (os(WASI) && RUNE_BROWSER_TEXT)
+        #if os(Windows)
+        let key = Request(stack: TextUTF8Key(stack), monospace: requested.isMonospace,
+                          sizePx: size, weight: requestedWeight, italic: slanted,
+                          direction: style.direction, language: TextUTF8Key(language ?? ""),
+                          features: TextUTF8Key(style.features), variations: TextUTF8Key(style.variations),
+                          opticalSize: style.opticalSize, epoch: epoch,
+                          clearType: wantsClearType, chromiumMask: wantsChromiumMask)
+        #else
         let key = Request(stack: TextUTF8Key(stack), monospace: requested.isMonospace,
                           sizePx: size, weight: requestedWeight, italic: slanted,
                           direction: style.direction, language: TextUTF8Key(language ?? ""),
                           features: TextUTF8Key(style.features), variations: TextUTF8Key(style.variations),
                           opticalSize: style.opticalSize, epoch: epoch)
+        #endif
         if let cached = Self.resolved.get(key) { self = cached; return }
         #endif
         #if os(Windows)
-        clearType = style.fontSmoothing == .clearType
-        chromiumMask = style.fontSmoothing == .directWrite || style.fontSmoothing == .clearType || style.fontSmoothing == .systemDefault
+        clearType = wantsClearType
+        chromiumMask = wantsChromiumMask
         #endif
         settingsEpoch = epoch
         mono = requested.isMonospace
@@ -113,7 +130,8 @@ struct DesktopFont: Hashable {
         self.language = language ?? ""
         // Both CSS ('kern' 0) and HarfBuzz (kern=0) spellings are accepted by Rune.
         func settings(_ raw: String) -> [String] {
-            raw.split(separator: ",").compactMap { item in
+            guard !raw.isEmpty else { return [] }
+            return raw.split(separator: ",").compactMap { item in
                 let parts = item.split { $0.isWhitespace || $0 == "=" || $0 == "'" || $0 == "\"" }
                 guard let tag = parts.first, tag.utf8.count == 4 else { return nil }
                 let raw = parts.count > 1 ? String(parts[1]) : "1"
@@ -122,8 +140,9 @@ struct DesktopFont: Hashable {
                 return "\(tag)=\(value)"
             }
         }
-        features = settings(style.shapingFeatures(monospace: mono)).joined(separator: ",")
-        var axes = settings(style.variations)
+        let rawFeatures = style.shapingFeatures(monospace: mono)
+        features = rawFeatures.isEmpty ? "" : settings(rawFeatures).joined(separator: ",")
+        var axes = style.variations.isEmpty ? [] : settings(style.variations)
         #if os(Linux)
         // A variable face can represent the exact weight; an authored axis wins.
         if !axes.contains(where: { $0.hasPrefix("wght=") }) {
@@ -132,8 +151,8 @@ struct DesktopFont: Hashable {
         #endif
         if case .fixed(let points) = style.opticalSize, points.isFinite,
            !axes.contains(where: { $0.hasPrefix("opsz=") }) { axes.append("opsz=\(points)") }
-        variations = axes.joined(separator: ",")
-        #if os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
+        variations = axes.isEmpty ? "" : axes.joined(separator: ",")
+        #if os(Linux) || os(Windows) || (os(WASI) && RUNE_BROWSER_TEXT)
         Self.resolved.put(self, for: key)
         #endif
     }
@@ -214,6 +233,7 @@ private struct DesktopGlyphGlide {
 /// Tab stops are counted in the authored paragraph, before wrapping or inserting pill markers.
 struct DesktopTabStops {
     fileprivate let columns: [Int: Int]
+    var isEmpty: Bool { columns.isEmpty }
 
     init(_ text: String, start: Int = 0, monospace: (Int) -> Bool) {
         var widths: [Int: Int] = [:]
@@ -317,7 +337,7 @@ private final class DesktopOutlineIndex {
         let byte = region.bytes.lowerBound
         if let source = lock.withLock({ sources[byte] }) { return source }
         let fallback = Source(key: OutlineStore.Key(font: id, index: UInt32.max, glyph: UInt32(byte)),
-                              anchor: SIMD2(region.left, run.metrics.ascent), intrinsic: false, cjk: false)
+                              anchor: SIMD2(region.left, run.layoutMetrics.ascent), intrinsic: false, cjk: false)
         // Intrinsic curves are shared even when virtualized rows have different pens.
         let result = run.singleOutline(at: byte) ?? fallback
         lock.withLock { sources[byte] = result }
@@ -432,8 +452,25 @@ private final class DesktopTextRun {
     let font: DesktopFont
     private let renderLock: NSLock
     let native: OpaquePointer
-    let metrics: RuneDesktopLineMetrics
+    let layoutMetrics: RuneDesktopLineMetrics
+    #if os(Windows)
+    let allUnitClusters: Bool
+    private var inkState: (metrics: RuneDesktopLineMetrics, hasColor: Bool)?
+    var metrics: RuneDesktopLineMetrics { resolvedInk().metrics }
+    var hasColor: Bool { resolvedInk().hasColor }
+
+    private func resolvedInk() -> (metrics: RuneDesktopLineMetrics, hasColor: Bool) {
+        renderLock.withLock {
+            if let inkState { return inkState }
+            let state = (rune_desktop_line_metrics(native), rune_desktop_line_has_color(native) != 0)
+            inkState = state
+            return state
+        }
+    }
+    #else
+    var metrics: RuneDesktopLineMetrics { layoutMetrics }
     let hasColor: Bool
+    #endif
     #if os(WASI)
     static let singleCell = TextUTF8Key("")
     private(set) var fixedPitchBytes: [UInt8]?
@@ -452,8 +489,8 @@ private final class DesktopTextRun {
     private var previousColorTile: ColorTile?
 
     var boxMetrics: (ascentPx: Float, descentPx: Float) {
-        if metrics.font_ascent > 0 { return (metrics.font_ascent, metrics.font_descent) }
-        return (metrics.ascent, metrics.descent)
+        if layoutMetrics.font_ascent > 0 { return (layoutMetrics.font_ascent, layoutMetrics.font_descent) }
+        return (layoutMetrics.ascent, layoutMetrics.descent)
     }
 
     init?(text authored: String, font: DesktopFont, start: Int = 0,
@@ -510,8 +547,13 @@ private final class DesktopTextRun {
             rune_desktop_line_configure(line, font.language, font.features, font.variations)
         }
         #endif
-        metrics = rune_desktop_line_metrics(line)
+        #if os(Windows)
+        layoutMetrics = rune_windows_line_layout_metrics(line)
+        allUnitClusters = rune_windows_line_is_unit_clusters(line) != 0
+        #else
+        layoutMetrics = rune_desktop_line_metrics(line)
         hasColor = rune_desktop_line_has_color(line) != 0
+        #endif
         #if os(WASI)
         if FontSmoothing.classic == .on, !hasColor, tabPadding.isEmpty,
            (10...128).contains(font.sizePx) {
@@ -531,8 +573,14 @@ private final class DesktopTextRun {
         font = source.font
         tabPadding = []
         inkOwner = owner
-        metrics = rune_desktop_line_metrics(native)
+        let m = rune_desktop_line_metrics(native)
+        layoutMetrics = m
+        #if os(Windows)
+        allUnitClusters = false
+        inkState = (m, rune_desktop_line_has_color(native) != 0)
+        #else
         hasColor = rune_desktop_line_has_color(native) != 0
+        #endif
     }
 
     func ownedInk(_ bytes: Range<Int32>) -> DesktopTextRun? {
@@ -795,6 +843,57 @@ private final class DesktopTextRun {
         let count = partitionPoint(tabPadding) { $0.offset < byte }
         return Int32(byte + (count == 0 ? 0 : tabPadding[count - 1].cumulative))
     }
+
+    #if os(Windows)
+    func windowsCells(for text: String, startingAt first: Int, marked: TextSystem.MarkedPillText?, isPureASCII: Bool = false) -> [RuneWindowsCell] {
+        let hasMarked = marked != nil
+        let hasTabs = !tabPadding.isEmpty
+        if isPureASCII && !hasMarked && !hasTabs {
+            let n = text.utf8.count
+            guard n > 0 else { return [] }
+            var cells = [RuneWindowsCell](unsafeUninitializedCapacity: n) { buf, count in
+                let ptr = buf.baseAddress!
+                let base = Int32(first)
+                for i in 0..<n {
+                    let s = base &+ Int32(i)
+                    ptr[i] = RuneWindowsCell(start: s, end: s &+ 1, left: 0, advance: 0, caret: 0, end_caret: 0, direction: 0)
+                }
+                count = n
+            }
+            cells.withUnsafeMutableBufferPointer { buf in
+                rune_windows_line_cells(native, buf.baseAddress, Int32(n))
+            }
+            return cells
+        }
+        var cells: [RuneWindowsCell] = []
+        cells.reserveCapacity(text.utf8.count)
+        var byte = first
+        if !hasMarked && !hasTabs {
+            for character in text {
+                let length = character.utf8.count
+                let start = Int32(byte)
+                byte += length
+                cells.append(RuneWindowsCell(start: start, end: Int32(byte),
+                                             left: 0, advance: 0, caret: 0, end_caret: 0, direction: 0))
+            }
+        } else {
+            for character in text {
+                let length = character.utf8.count
+                let start = marked?.byteOffset(byte) ?? byte
+                byte += length
+                cells.append(RuneWindowsCell(start: nativeByte(start), end: nativeByte(start + length),
+                                             left: 0, advance: 0, caret: 0, end_caret: 0, direction: 0))
+            }
+        }
+        if !cells.isEmpty {
+            let count = Int32(cells.count)
+            cells.withUnsafeMutableBufferPointer { buf in
+                rune_windows_line_cells(native, buf.baseAddress, count)
+            }
+        }
+        return cells
+    }
+    #endif
 
     #if os(WASI)
     func browserCells(for text: String, startingAt first: Int, marked: TextSystem.MarkedPillText?,
@@ -1068,7 +1167,7 @@ final class DesktopTextLine {
         fileprivate let localLeft, localRight: Float
         #if os(Linux) || os(Windows)
         var qualityGlyphSource: (handle: OpaquePointer, bytes: Range<Int32>, ascent: Float) {
-            (run.native, nativeBytes, run.metrics.ascent)
+            (run.native, nativeBytes, run.layoutMetrics.ascent)
         }
         #endif
     }
@@ -1146,6 +1245,7 @@ final class DesktopTextLine {
             stored = []
             start = compact.start
             indexByByte = nil
+            hasRTL = false
         }
         #endif
         #if os(WASI)
@@ -1161,12 +1261,8 @@ final class DesktopTextLine {
         #else
         var values: [Cell] { stored }
         #endif
-        var hasRTL: Bool {
-            #if os(WASI)
-            if compact != nil { return false }
-            #endif
-            return stored.contains(where: \.isRTL)
-        }
+        let hasRTL: Bool
+        var isUnitByte: Bool { indexByByte == nil }
         private let start: Int
         private let indexByByte: [Int: Int]?
 
@@ -1176,6 +1272,7 @@ final class DesktopTextLine {
             compact = nil
             #endif
             self.start = start
+            self.hasRTL = values.contains(where: \.isRTL)
             if values.indices.allSatisfy({ values[$0].byte == start + $0 }) {
                 indexByByte = nil
             } else {
@@ -1204,7 +1301,32 @@ final class DesktopTextLine {
     let strutBaselinePx: Float
     /// Vertical extents relative to the baseline, taken from the native rasterizer's
     /// run metrics without allocating a mask. A line of spaces has an empty interval.
+    #if os(Windows)
+    private let runs: [DesktopTextRun]
+    private let inkBoundsLock = NSLock()
+    private var cachedInkBoundsPx: (top: Float, bottom: Float)?
+    fileprivate var inkBoundsPx: (top: Float, bottom: Float) {
+        inkBoundsLock.withLock {
+            if let cached = cachedInkBoundsPx { return cached }
+            var top = Float.infinity, bottom = -Float.infinity
+            for run in runs {
+                let m = run.metrics
+                if m.ink_height > 0, m.ink_width > 0 {
+                    let t = Float(m.ink_y) - m.ascent
+                    top = min(top, t)
+                    bottom = max(bottom, t + Float(m.ink_height))
+                }
+            }
+            let result = (top, bottom)
+            cachedInkBoundsPx = result
+            return result
+        }
+    }
+    fileprivate var inkTopPx: Float { inkBoundsPx.top }
+    fileprivate var inkBottomPx: Float { inkBoundsPx.bottom }
+    #else
     fileprivate let inkTopPx, inkBottomPx: Float
+    #endif
     let strutAscentPt: Float
     let strutFontHeightPt: Float
     let glyphEndPt: Float
@@ -1239,7 +1361,14 @@ final class DesktopTextLine {
             var lastSpan: TextSpan?
             var font = baseFont
             var inlineHeightPx: Float?
-            for ch in text {
+            var groupStartIdx = text.startIndex
+            var groupStartByte = start
+            var groupFont: DesktopFont?
+            var groupInlineHeightPx: Float?
+            var idx = text.startIndex
+            while idx < text.endIndex {
+                let nextIdx = text.index(after: idx)
+                let ch = text[idx]
                 let nextSpan = span(byte)
                 if nextSpan != lastSpan {
                     font = DesktopFont(style: style, span: nextSpan, families: families, language: language, scale: scale)
@@ -1256,13 +1385,27 @@ final class DesktopTextLine {
                     }
                     lastSpan = nextSpan
                 }
-                if groups.last?.font == font {
-                    groups[groups.count - 1].text.append(ch)
-                    if let inlineHeightPx { groups[groups.count - 1].inlineHeightPx = inlineHeightPx }
+                if let currentFont = groupFont {
+                    if currentFont == font {
+                        if let inlineHeightPx { groupInlineHeightPx = inlineHeightPx }
+                    } else {
+                        groups.append((groupStartByte, currentFont, String(text[groupStartIdx..<idx]), groupInlineHeightPx))
+                        groupStartIdx = idx
+                        groupStartByte = byte
+                        groupFont = font
+                        groupInlineHeightPx = inlineHeightPx
+                    }
                 } else {
-                    groups.append((byte, font, String(ch), inlineHeightPx))
+                    groupStartIdx = idx
+                    groupStartByte = byte
+                    groupFont = font
+                    groupInlineHeightPx = inlineHeightPx
                 }
                 byte += ch.utf8.count
+                idx = nextIdx
+            }
+            if let currentFont = groupFont {
+                groups.append((groupStartByte, currentFont, String(text[groupStartIdx..<text.endIndex]), groupInlineHeightPx))
             }
         } else {
             groups.append((start, baseFont, text, nil))
@@ -1270,10 +1413,14 @@ final class DesktopTextLine {
         // Resolve the paragraph's visual order before dividing it into font runs.
         // A change of weight or family in the middle of Hebrew in an English sentence
         // must not turn those two styled runs into independent LTR paragraphs.
+        // Pure-ASCII LTR text without pill markers never reorders across font groups,
+        // so it skips the extra whole-line bidi DirectWrite layout and O(N log N) sort.
         let isolateLabels = style.byParagraphStart != nil
         let marked = TextSystem.MarkedPillText(text, start: start, ranges: pillRanges, isolateLabels: isolateLabels, padding: extra ?? { _, _ in (0, 0) })
         let hasMarkers = !(marked?.markers.isEmpty ?? true)
-        let bidi = groups.count > 1 || hasMarkers ? DesktopTextRun(text: text, font: baseFont, start: start, marked: marked, tabs: tabs) : nil
+        let isPureASCII = text.utf8.allSatisfy { $0 < 0x80 && $0 != 13 }
+        let needsBidi = hasMarkers || (groups.count > 1 && (style.direction == .rtl || !isPureASCII))
+        let bidi = needsBidi ? DesktopTextRun(text: text, font: baseFont, start: start, marked: marked, tabs: tabs) : nil
         if hasMarkers && bidi == nil { return nil }
         struct PlacedCell {
             let character: Character
@@ -1288,8 +1435,15 @@ final class DesktopTextLine {
         let reportInkSource = FontSmoothing.classic == .on && (style.fontSmoothing == .on || style.fontSmoothing == .systemDefault)
         #endif
         var visual: [PlacedCell] = []
+        visual.reserveCapacity(text.utf8.count)
+        #if os(Windows)
+        var collectedRuns: [DesktopTextRun] = []
+        collectedRuns.reserveCapacity(groups.count)
+        #else
         var inkTop = Float.infinity, inkBottom = -Float.infinity
+        #endif
         var boxes: [(ascentPx: Float, descentPx: Float, lineHeightPx: Float)] = []
+        var ltrGroupOffset: Float = 0
         for group in groups {
             let groupIsolates: TextSystem.MarkedPillText?
             if isolateLabels {
@@ -1299,12 +1453,16 @@ final class DesktopTextLine {
                 groupIsolates = nil
             }
             guard let run = DesktopTextRun(text: group.text, font: group.font, start: group.start, marked: groupIsolates, tabs: tabs) else { return nil }
+            #if os(Windows)
+            collectedRuns.append(run)
+            #else
             let m = run.metrics
             if m.ink_height > 0, m.ink_width > 0 {
                 let top = Float(m.ink_y) - m.ascent
                 inkTop = min(inkTop, top)
                 inkBottom = max(inkBottom, top + Float(m.ink_height))
             }
+            #endif
             if let inlineHeightPx = group.inlineHeightPx {
                 let metrics = faceBoxes.box(for: group.font) ?? run.boxMetrics
                 boxes.append((metrics.ascentPx, metrics.descentPx, inlineHeightPx))
@@ -1331,6 +1489,34 @@ final class DesktopTextLine {
                 compact = geometry
                 continue
             }
+            #elseif os(Windows)
+            let samples = run.windowsCells(for: group.text, startingAt: 0, marked: groupIsolates, isPureASCII: isPureASCII)
+            let referenceSamples = bidi?.windowsCells(for: group.text, startingAt: group.start - start, marked: marked, isPureASCII: isPureASCII)
+            #endif
+            let offsetShift = bidi == nil ? ltrGroupOffset : 0
+            var lastGroupEndCaret: Float = 0
+            #if os(Windows)
+            if isPureASCII && groupIsolates == nil && tabs.columns.isEmpty {
+                let utf8Bytes = Array(group.text.utf8)
+                for index in 0..<utf8Bytes.count {
+                    let b = utf8Bytes[index]
+                    let ch = Character(Unicode.Scalar(b))
+                    let byte = group.start + index
+                    let sample = samples[index], reference = referenceSamples?[index] ?? sample
+                    let nativeBytes = sample.start..<sample.end
+                    let left = sample.left, right = left + sample.advance
+                    let advance = sample.advance
+                    let direction = reference.direction
+                    let refLeft = reference.left + offsetShift, refWidth = reference.advance
+                    let caret = reference.caret + offsetShift, endCaret = reference.end_caret + offsetShift
+                    lastGroupEndCaret = reference.end_caret
+                    visual.append(PlacedCell(character: ch, byte: byte, end: byte + 1, nativeBytes: nativeBytes,
+                        left: left, right: right, advance: advance, refLeft: refLeft, refWidth: refWidth,
+                        caret: caret, endCaret: endCaret, run: run, direction: direction < 0 ? -1 : 1))
+                }
+                if bidi == nil { ltrGroupOffset += lastGroupEndCaret }
+                continue
+            }
             #endif
             var local = 0
             for (index, ch) in group.text.enumerated() {
@@ -1343,8 +1529,19 @@ final class DesktopTextLine {
                 var advance = sample.advance
                 let direction = reference.direction
                 let magnitude: Int8 = abs(sample.direction) == 2 ? 2 : 1
-                let refLeft = reference.left, refWidth = reference.advance
-                let caret = reference.caret, endCaret = reference.end_caret
+                let refLeft = reference.left + offsetShift, refWidth = reference.advance
+                let caret = reference.caret + offsetShift, endCaret = reference.end_caret + offsetShift
+                lastGroupEndCaret = reference.end_caret
+                #elseif os(Windows)
+                let sample = samples[index], reference = referenceSamples?[index] ?? sample
+                let nativeBytes = sample.start..<sample.end
+                let left = sample.left, right = left + sample.advance
+                var advance = sample.advance
+                let direction = reference.direction
+                let magnitude: Int8 = 1
+                let refLeft = reference.left + offsetShift, refWidth = reference.advance
+                let caret = reference.caret + offsetShift, endCaret = reference.end_caret + offsetShift
+                lastGroupEndCaret = reference.end_caret
                 #else
                 var left: Float = 0, advance: Float = 0
                 let localByte = groupIsolates?.byteOffset(local) ?? local
@@ -1352,15 +1549,18 @@ final class DesktopTextLine {
                 var direction = rune_desktop_line_cell(run.native, nativeBytes.lowerBound, nativeBytes.upperBound, &left, &advance)
                 let magnitude: Int8 = 1
                 let right = left + advance
-                var refLeft = left, refWidth = advance
+                var refLeft = left + offsetShift, refWidth = advance
                 let reference = bidi ?? run
                 let refByte = bidi == nil ? localByte : marked?.byteOffset(byte - start) ?? (byte - start)
                 let refStart = reference.nativeByte(refByte), refEnd = reference.nativeByte(refByte + ch.utf8.count)
                 if bidi != nil {
                     direction = rune_desktop_line_cell(reference.native, refStart, refEnd, &refLeft, &refWidth)
                 }
-                let caret = rune_desktop_line_caret(reference.native, refStart)
-                let endCaret = rune_desktop_line_caret(reference.native, refEnd)
+                let rawCaret = rune_desktop_line_caret(reference.native, refStart)
+                let rawEndCaret = rune_desktop_line_caret(reference.native, refEnd)
+                let caret = rawCaret + offsetShift
+                let endCaret = rawEndCaret + offsetShift
+                lastGroupEndCaret = rawEndCaret
                 #endif
                 if ch == "\t", let count = tabs.columns[byte] {
                     advance += Float(count - 1) * style.letterSpacing * scale
@@ -1370,9 +1570,14 @@ final class DesktopTextLine {
                     caret: caret, endCaret: endCaret, run: run, direction: direction < 0 ? -magnitude : magnitude))
                 local = end
             }
+            if bidi == nil { ltrGroupOffset += lastGroupEndCaret }
         }
+        #if os(Windows)
+        runs = collectedRuns
+        #else
         inkTopPx = inkTop
         inkBottomPx = inkBottom
+        #endif
         guard let strut = faceBoxes.box(for: baseFont) else { return nil }
         strutAscentPt = strut.ascentPx / scale
         strutFontHeightPt = (strut.ascentPx + strut.descentPx) / scale
@@ -1489,6 +1694,73 @@ final class DesktopTextLine {
         glyphEndPt = lastGlyphEdge
     }
 
+    /// Computes exact `InlineCodeBox.lineGrowth` for a wrapped LTR subrange of this paragraph
+    /// without creating a per-line native DirectWrite layout during layout-only measurement.
+    func inlineGrowth(for byteRange: Range<Int>, spans: [(utf8Range: Range<Int>, span: TextSpan)],
+                      cutsCodePadding: Bool, style: TextStyle, faceBoxes: DesktopFaceBoxes) -> (over: Float, under: Float) {
+        guard !spans.isEmpty, !byteRange.isEmpty else { return (0, 0) }
+        let lineHeightPx = style.resolvedLineHeight * scale
+        let first = partitionPoint(spans) { $0.utf8Range.upperBound <= byteRange.lowerBound }
+        var boxes: [(ascentPx: Float, descentPx: Float, lineHeightPx: Float)] = []
+        var i = first
+        while i < spans.count && spans[i].utf8Range.lowerBound < byteRange.upperBound {
+            let entry = spans[i]
+            let span = entry.span
+            if span.monospace || span.size != nil {
+                let isPadding = cutsCodePadding && !span.monospace
+                    && (span.size ?? style.size) < style.size
+                    && span.text.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
+                if !isPadding {
+                    let overlapStart = max(byteRange.lowerBound, entry.utf8Range.lowerBound)
+                    if let cell = cells[overlapStart] {
+                        let inlineHeightPx = span.size.map { lineHeightPx / style.size * $0 } ?? lineHeightPx
+                        let metrics = faceBoxes.box(for: cell.run.font) ?? cell.run.boxMetrics
+                        boxes.append((metrics.ascentPx, metrics.descentPx, inlineHeightPx))
+                    }
+                }
+            }
+            i += 1
+        }
+        guard !boxes.isEmpty else { return (0, 0) }
+        let strutAscentPx = strutAscentPt * scale
+        let strutDescentPx = (strutFontHeightPt - strutAscentPt) * scale
+        return InlineCodeBox.lineGrowth(strut: (strutAscentPx, strutDescentPx), code: boxes, lineHeightPx: lineHeightPx)
+    }
+
+    /// Projects relative UTF-8 caret offsets for an LTR wrapped slice of this paragraph.
+    func sliceCharOffsets(for text: String, utf8Start: Int) -> [Float] {
+        let len = text.utf8.count
+        guard len > 0 else { return [0] }
+        let originCaret = cells[utf8Start]?.caret ?? 0
+        if cells.isUnitByte, let firstCell = cells[utf8Start] {
+            let values = cells.values
+            let base = utf8Start - (values.first?.byte ?? utf8Start)
+            if base >= 0, base + len <= values.count, values[base].byte == firstCell.byte {
+                return Array<Float>(unsafeUninitializedCapacity: len + 1) { buf, count in
+                    for i in 0..<len {
+                        buf[i] = values[base + i].caret - originCaret
+                    }
+                    buf[len] = values[base + len - 1].endCaret - originCaret
+                    count = len + 1
+                }
+            }
+        }
+        var offsets = Array(repeating: Float.zero, count: len + 1)
+        let lineEnd = utf8Start + len
+        var byte = utf8Start
+        for ch in text {
+            let chLen = ch.utf8.count
+            if let cell = cells[byte] {
+                let rel = cell.caret - originCaret
+                let first = byte - utf8Start
+                for b in first..<(first + chLen) { offsets[b] = rel }
+                if byte + chLen == lineEnd { offsets[first + chLen] = cell.endCaret - originCaret }
+            }
+            byte += chLen
+        }
+        return offsets
+    }
+
     /// Join the visual cells of each decorated run before adding its CSS padding. This keeps
     /// decorations aligned to native clusters and lets the widest run determine the merged box.
     func appendDecorations(spans: [(utf8Range: Range<Int>, span: TextSpan)], index: (Int) -> Int?,
@@ -1528,7 +1800,7 @@ final class DesktopTextLine {
                 strikethroughs.append(SIMD4(originX + f.left, y, f.right - f.left, thickness))
             }
             guard let color = span.background else { continue }
-            let cap = f.run.metrics.cap_height
+            let cap = f.run.layoutMetrics.cap_height
             let v = InlineCodeBox.backgroundVertical(baselinePx: baselinePx, mono: span.monospace,
                 ascentPx: metrics.ascentPx, descentPx: metrics.descentPx, capHeightPx: cap > 0 ? cap : nil,
                 fontSizePx: f.run.font.sizePx)
@@ -1624,9 +1896,14 @@ final class DesktopTextLine {
     func hasVisibleInk(in window: TextRasterWindow?, baselinePx: Float, glide: Vec2) -> Bool {
         guard let window else { return true }
         let phase = DesktopGlyphGlide(glide)
-        let top = (baselinePx + inkTopPx + Float(phase.whole.y)) / scale
-        let bottom = (baselinePx + inkBottomPx + Float(phase.whole.y + (phase.phase.y == 0 ? 0 : 1))) / scale
-        return inkTopPx < inkBottomPx && window.intersects(top, bottom)
+        #if os(Windows)
+        let (topPx, bottomPx) = inkBoundsPx
+        #else
+        let topPx = inkTopPx, bottomPx = inkBottomPx
+        #endif
+        let top = (baselinePx + topPx + Float(phase.whole.y)) / scale
+        let bottom = (baselinePx + bottomPx + Float(phase.whole.y + (phase.phase.y == 0 ? 0 : 1))) / scale
+        return topPx < bottomPx && window.intersects(top, bottom)
     }
 
     func runOriginPx(for cell: Cell, originX: Float) -> Float {
@@ -1640,6 +1917,8 @@ final class DesktopTextLine {
         guard start > 0 else { return cell.byte }
         #if os(WASI)
         if cell.run.fixedPitchBytes != nil { return cell.byte }
+        #elseif os(Windows)
+        if cell.run.allUnitClusters { return cell.byte }
         #endif
         let owner = rune_desktop_line_cluster_owner(cell.run.native, start)
         guard owner >= 0, owner < start else { return cell.byte }
@@ -1658,20 +1937,61 @@ final class DesktopTextLine {
         let rect = glyph.rect * scale
         let run = cell.run
         let tile = SIMD4(rect.x - runOriginPx(for: cell, originX: originX) - glide.x,
-            rect.y - baselineY * scale + run.metrics.ascent - glide.y, rect.z, rect.w)
+            rect.y - baselineY * scale + run.layoutMetrics.ascent - glide.y, rect.z, rect.w)
         return run.outlines(in: tile, only: isolated ? cell.nativeBytes : nil, smoothing: smoothing, atlas: atlas)
     }
     #endif
+
+    /// Per-line scratch cache so adjacent characters sharing a 256px desktop tile reuse its
+    /// atlas lookup, column row bounds, and Windows mask wrapper without locking per character.
+    struct LineTileCache {
+        fileprivate var run: DesktopTextRun?
+        fileprivate var x: Int = 0
+        fileprivate var y: Int = 0
+        fileprivate var width: Int = 0
+        fileprivate var height: Int = 0
+        fileprivate var phase: SIMD2<Int> = .zero
+        fileprivate var sourceColumns: Range<Int>? = nil
+        fileprivate var inkOwner: Range<Int32>? = nil
+        fileprivate var outlineMode: FontSmoothing? = nil
+        #if os(WASI)
+        fileprivate var browserRGB: UInt32 = 0xffffff
+        fileprivate var browserCell: SIMD4<Int32>? = nil
+        #endif
+        fileprivate var entry: GlyphAtlas.Entry? = nil
+        #if os(Windows)
+        fileprivate var windowsMask: WindowsGlyphMask? = nil
+        #endif
+        fileprivate var colMinRow: [UInt16] = []
+        fileprivate var colMaxRow: [UInt16] = []
+        fileprivate var hasColBounds: Bool = false
+
+        init() {}
+    }
 
     @inline(__always)
     func glyphs(for cell: Cell, through endCell: Cell? = nil, originX: Float, baselineY: Float, color: Color?,
                 atlas: GlyphAtlas, cache: Bool, glidePx: Vec2 = .zero,
                 restingXPx: Float? = nil, utf8Offset: Int? = nil, isolateCell: Bool = false,
                 rasterWindow: TextRasterWindow? = nil) -> [PositionedGlyph] {
+        var quads: [PositionedGlyph] = []
+        appendGlyphs(for: cell, through: endCell, originX: originX, baselineY: baselineY,
+                     color: color, atlas: atlas, cache: cache, glidePx: glidePx, restingXPx: restingXPx,
+                     utf8Offset: utf8Offset, isolateCell: isolateCell, rasterWindow: rasterWindow, into: &quads)
+        return quads
+    }
+
+    @inline(__always)
+    func appendGlyphs(for cell: Cell, through endCell: Cell? = nil, originX: Float, baselineY: Float, color: Color?,
+                      atlas: GlyphAtlas, cache: Bool, glidePx: Vec2 = .zero,
+                      restingXPx: Float? = nil, utf8Offset: Int? = nil, isolateCell: Bool = false,
+                      rasterWindow: TextRasterWindow? = nil, tileCache: UnsafeMutablePointer<LineTileCache>? = nil,
+                      into quads: inout [PositionedGlyph]) {
         let owned = isolateCell ? cell.run.ownedInk(cell.nativeBytes) : nil
-        return glyphs(for: cell, through: endCell, owned: owned, originX: originX, baselineY: baselineY,
-                      color: color, atlas: atlas, cache: cache, glidePx: glidePx, restingXPx: restingXPx,
-                      utf8Offset: utf8Offset, isolateCell: isolateCell, rasterWindow: rasterWindow)
+        appendGlyphs(for: cell, through: endCell, owned: owned, originX: originX, baselineY: baselineY,
+                     color: color, atlas: atlas, cache: cache, glidePx: glidePx, restingXPx: restingXPx,
+                     utf8Offset: utf8Offset, isolateCell: isolateCell, rasterWindow: rasterWindow,
+                     tileCache: tileCache, into: &quads)
     }
 
     #if os(Linux)
@@ -1683,21 +2003,22 @@ final class DesktopTextLine {
         for cell in cells.values {
             guard let owned = cell.run.ownedInk(cell.nativeBytes) else { return nil }
             guard owned.metrics.ink_width > 0, owned.metrics.ink_height > 0 else { continue }
-            result += glyphs(for: cell, through: nil, owned: owned, originX: originX, baselineY: baselineY,
-                             color: nil, atlas: atlas, cache: cache, glidePx: glide, restingXPx: restingXPx,
-                             utf8Offset: cell.byte, isolateCell: true, rasterWindow: rasterWindow)
+            appendGlyphs(for: cell, through: nil, owned: owned, originX: originX, baselineY: baselineY,
+                         color: nil, atlas: atlas, cache: cache, glidePx: glide, restingXPx: restingXPx,
+                         utf8Offset: cell.byte, isolateCell: true, rasterWindow: rasterWindow,
+                         tileCache: nil, into: &result)
         }
         return result
     }
     #endif
 
-    private func glyphs(for cell: Cell, through endCell: Cell?, owned: DesktopTextRun?, originX: Float,
-                        baselineY: Float, color: Color?, atlas: GlyphAtlas, cache: Bool, glidePx: Vec2,
-                        restingXPx: Float?, utf8Offset: Int?, isolateCell: Bool,
-                        rasterWindow: TextRasterWindow?) -> [PositionedGlyph] {
+    private func appendGlyphs(for cell: Cell, through endCell: Cell?, owned: DesktopTextRun?, originX: Float,
+                              baselineY: Float, color: Color?, atlas: GlyphAtlas, cache: Bool, glidePx: Vec2,
+                              restingXPx: Float?, utf8Offset: Int?, isolateCell: Bool,
+                              rasterWindow: TextRasterWindow?, tileCache: UnsafeMutablePointer<LineTileCache>?,
+                              into quads: inout [PositionedGlyph]) {
         let run = owned ?? cell.run
         let cluster = utf8Offset ?? (isolateCell ? cell.byte : clusterByte(for: cell))
-        var quads: [PositionedGlyph] = []
         let localX = runOriginPx(for: cell, originX: originX)
         var maskX = localX, colorX = localX
         let colorGlide = DesktopGlyphGlide(glidePx)
@@ -1722,6 +2043,7 @@ final class DesktopTextLine {
         #else
         let usesBrowserInk = false
         #endif
+        let runAscent = run.layoutMetrics.ascent
         func emit(_ glide: DesktopGlyphGlide, x: Float, mask: Bool, colorInk: Bool) {
             visitTiles(for: cell, through: endCell, size: atlas.desktopTileSize, phase: glide.phase, owned: owned, isolateCell: isolateCell, cropBrowserCell: usesBrowserInk) { tile in
                 var key = tile.key
@@ -1733,81 +2055,174 @@ final class DesktopTextLine {
                 key.browserRGB = baseRGB
                 #endif
                 let rect = SIMD4((x + Float(tile.left + glide.whole.x)) / scale,
-                    baselineY + (Float(key.y + glide.whole.y) - run.metrics.ascent) / scale,
+                    baselineY + (Float(key.y + glide.whole.y) - runAscent) / scale,
                     Float(tile.right - tile.left) / scale, Float(tile.height) / scale)
                 if let rasterWindow, !rasterWindow.intersects(rect.y, rect.y + rect.w) { return }
                 let planes = run.inkPlanes(x: key.x, y: key.y, width: tile.width, height: tile.height,
                                                 phase: glide.phase, sourceColumns: key.sourceColumns)
                 let columns = (tile.left - key.x)..<(tile.right - key.x)
                 let drawMask = mask && (planes?.hasMask(in: columns) ?? true)
-                let existing = cache ? nil : transientTiles[key]
                 let dimensions = SIMD2(tile.width, tile.height)
-                if drawMask, let entry = existing ?? cell.run.maskEntry(key: key, size: dimensions, owner: owned?.inkOwner,
-                                                                        cache: cache, atlas: atlas, shareBrowserCoverage: usesBrowserInk, fallback: {
-                        #if os(WASI)
-                        return planes?.mask ?? run.mask(x: key.x, y: key.y, width: tile.width, height: tile.height,
-                                                       phase: glide.phase, sourceColumns: key.sourceColumns, browserRGB: baseRGB)
-                        #else
-                        return planes?.mask ?? run.mask(x: key.x, y: key.y, width: tile.width, height: tile.height,
-                                                      phase: glide.phase, sourceColumns: key.sourceColumns)
-                        #endif
-                    }) {
-                    if !cache { transientTiles[key] = entry }
-                    #if os(WASI)
-                    let browser = usesBrowserInk ? run.browserMask(key: key, entry: entry) : nil
-                    let covered: Range<Int>?
-                    if let browser, baseRGB != 0xffffff, key.browserCell != nil {
-                        var white = key
-                        white.browserRGB = 0xffffff
-                        let rows = atlas.browserWhiteBounds(of: browser, key: white, columns: columns)
-                        if rows > 1 {
-                            let packed = Int(rows - 2)
-                            covered = (packed >> 8)..<(packed & 255)
-                        } else if rows == 1 {
-                            covered = atlas.desktopCoveredRows(of: entry, columns: columns)
-                        } else {
-                            let whiteEntry = run.maskEntry(key: white, size: dimensions, owner: nil, cache: true,
-                                                           atlas: atlas, shareBrowserCoverage: true, fallback: browser.whiteMask)
-                            covered = whiteEntry.flatMap { atlas.desktopCoveredRows(of: $0, columns: columns) }
-                                ?? atlas.desktopCoveredRows(of: entry, columns: columns)
-                        }
-                    } else if let browser, baseRGB != 0xffffff {
-                        covered = atlas.browserCoveredRows(of: browser, columns: columns) ?? atlas.desktopCoveredRows(of: entry, columns: columns)
-                    } else {
-                        covered = atlas.desktopCoveredRows(of: entry, columns: columns)
-                    }
-                    #else
-                    let covered = atlas.desktopCoveredRows(of: entry, columns: columns)
+                if drawMask {
+                    var hitCache = false
+                    var resolvedEntry: GlyphAtlas.Entry?
+                    #if os(Windows)
+                    var cachedWinMask: WindowsGlyphMask?
                     #endif
-                    if let rows = covered {
-                        let du = (entry.uv.z - entry.uv.x) / Float(tile.width)
-                        let dv = (entry.uv.w - entry.uv.y) / Float(tile.height)
-                        let uv = SIMD4(entry.uv.x + Float(columns.lowerBound) * du, entry.uv.y + Float(rows.lowerBound) * dv,
-                                       entry.uv.x + Float(columns.upperBound) * du, entry.uv.y + Float(rows.upperBound) * dv)
-                        var ink = rect
-                        ink.y += Float(rows.lowerBound) / scale
-                        ink.w = Float(rows.count) / scale
-                        var glyph = PositionedGlyph(rect: ink, uv: uv, color: color, atlasPage: entry.page, utf8Offset: cluster)
-                        glyph.maskShiftY = Float(glide.phase.y) / Float(GlyphAtlas.glidePhases)
-                        #if os(Linux) || os(Windows) || os(Android)
-                        if !isolateCell { glyph.desktopCellOffset = Int32(cell.byte - cluster) }
-                        if key.outlineMode == .windfoil {
-                            glyph.desktopInk = DesktopGlyphInk(run: cell.run, key: key, size: dimensions, owner: owned?.inkOwner,
-                                                               columns: columns, rows: rows)
-                        }
-                        #endif
+                    if let tc = tileCache {
+                        let c = tc.pointee
                         #if os(WASI)
-                        glyph.browserMask = browser
+                        let sameWasi = c.browserRGB == key.browserRGB && c.browserCell == key.browserCell
+                        #else
+                        let sameWasi = true
                         #endif
-                        #if os(Windows)
-                        if run.font.chromiumMask {
-                            let bounds = SIMD4(Int32(entry.pixelOrigin.x), Int32(entry.pixelOrigin.y), Int32(tile.width), Int32(tile.height))
-                            glyph.windowsMask = run.windowsMask(bounds: bounds, rect: SIMD4(key.x, key.y, tile.width, tile.height),
+                        if let cachedEntry = c.entry, c.run === run, c.x == key.x, c.y == key.y,
+                           c.width == tile.width, c.height == tile.height, c.phase == glide.phase,
+                           c.sourceColumns == key.sourceColumns, c.inkOwner == key.inkOwner,
+                           c.outlineMode == key.outlineMode, sameWasi {
+                            hitCache = true
+                            resolvedEntry = cachedEntry
+                            #if os(Windows)
+                            cachedWinMask = c.windowsMask
+                            #endif
+                        }
+                    }
+                    if !hitCache {
+                        let existing = cache ? nil : transientTiles[key]
+                        resolvedEntry = existing ?? cell.run.maskEntry(key: key, size: dimensions, owner: owned?.inkOwner,
+                                                                       cache: cache, atlas: atlas, shareBrowserCoverage: usesBrowserInk, fallback: {
+                            #if os(WASI)
+                            return planes?.mask ?? run.mask(x: key.x, y: key.y, width: tile.width, height: tile.height,
+                                                           phase: glide.phase, sourceColumns: key.sourceColumns, browserRGB: baseRGB)
+                            #else
+                            return planes?.mask ?? run.mask(x: key.x, y: key.y, width: tile.width, height: tile.height,
+                                                          phase: glide.phase, sourceColumns: key.sourceColumns)
+                            #endif
+                        })
+                        if let entry = resolvedEntry {
+                            if !cache { transientTiles[key] = entry }
+                            #if os(Windows)
+                            if run.font.chromiumMask {
+                                let bounds = SIMD4(Int32(entry.pixelOrigin.x), Int32(entry.pixelOrigin.y), Int32(tile.width), Int32(tile.height))
+                                cachedWinMask = run.windowsMask(bounds: bounds, rect: SIMD4(key.x, key.y, tile.width, tile.height),
                                                                 phase: glide.phase, columns: key.sourceColumns)
+                            }
+                            #endif
+                            if let tc = tileCache {
+                                tc.pointee.run = run
+                                tc.pointee.x = key.x
+                                tc.pointee.y = key.y
+                                tc.pointee.width = tile.width
+                                tc.pointee.height = tile.height
+                                tc.pointee.phase = glide.phase
+                                tc.pointee.sourceColumns = key.sourceColumns
+                                tc.pointee.inkOwner = key.inkOwner
+                                tc.pointee.outlineMode = key.outlineMode
+                                #if os(WASI)
+                                tc.pointee.browserRGB = key.browserRGB
+                                tc.pointee.browserCell = key.browserCell
+                                #endif
+                                tc.pointee.entry = entry
+                                #if os(Windows)
+                                tc.pointee.windowsMask = cachedWinMask
+                                #endif
+                                if entry.desktopTile == nil && !usesBrowserInk {
+                                    tc.pointee.hasColBounds = atlas.desktopTileColumnBounds(
+                                        of: entry, minRows: &tc.pointee.colMinRow, maxRows: &tc.pointee.colMaxRow)
+                                } else {
+                                    tc.pointee.hasColBounds = false
+                                }
+                            }
+                        }
+                    }
+                    if let entry = resolvedEntry {
+                        #if os(WASI)
+                        let browser = usesBrowserInk ? run.browserMask(key: key, entry: entry) : nil
+                        let covered: Range<Int>?
+                        if let browser, baseRGB != 0xffffff, key.browserCell != nil {
+                            var white = key
+                            white.browserRGB = 0xffffff
+                            let rows = atlas.browserWhiteBounds(of: browser, key: white, columns: columns)
+                            if rows > 1 {
+                                let packed = Int(rows - 2)
+                                covered = (packed >> 8)..<(packed & 255)
+                            } else if rows == 1 {
+                                covered = atlas.desktopCoveredRows(of: entry, columns: columns)
+                            } else {
+                                let whiteEntry = run.maskEntry(key: white, size: dimensions, owner: nil, cache: true,
+                                                               atlas: atlas, shareBrowserCoverage: true, fallback: browser.whiteMask)
+                                covered = whiteEntry.flatMap { atlas.desktopCoveredRows(of: $0, columns: columns) }
+                                    ?? atlas.desktopCoveredRows(of: entry, columns: columns)
+                            }
+                        } else if let browser, baseRGB != 0xffffff {
+                            covered = atlas.browserCoveredRows(of: browser, columns: columns) ?? atlas.desktopCoveredRows(of: entry, columns: columns)
+                        } else if let tc = tileCache, tc.pointee.hasColBounds {
+                            var lo: UInt16 = .max
+                            var hi: UInt16 = 0
+                            for col in columns {
+                                let rLo = tc.pointee.colMinRow[col]
+                                if rLo < lo { lo = rLo }
+                                if rLo != .max {
+                                    let rHi = tc.pointee.colMaxRow[col]
+                                    if rHi > hi { hi = rHi }
+                                }
+                            }
+                            covered = lo == .max ? nil : Int(lo)..<(Int(hi) + 1)
+                        } else {
+                            covered = atlas.desktopCoveredRows(of: entry, columns: columns)
+                        }
+                        #else
+                        let covered: Range<Int>?
+                        if let tc = tileCache, tc.pointee.hasColBounds {
+                            var lo: UInt16 = .max
+                            var hi: UInt16 = 0
+                            for col in columns {
+                                let rLo = tc.pointee.colMinRow[col]
+                                if rLo < lo { lo = rLo }
+                                if rLo != .max {
+                                    let rHi = tc.pointee.colMaxRow[col]
+                                    if rHi > hi { hi = rHi }
+                                }
+                            }
+                            covered = lo == .max ? nil : Int(lo)..<(Int(hi) + 1)
+                        } else {
+                            covered = atlas.desktopCoveredRows(of: entry, columns: columns)
                         }
                         #endif
-                        if rasterWindow?.intersects(ink.y, ink.y + ink.w) ?? true {
-                            quads.append(glyph)
+                        if let rows = covered {
+                            let du = (entry.uv.z - entry.uv.x) / Float(tile.width)
+                            let dv = (entry.uv.w - entry.uv.y) / Float(tile.height)
+                            let uv = SIMD4(entry.uv.x + Float(columns.lowerBound) * du, entry.uv.y + Float(rows.lowerBound) * dv,
+                                           entry.uv.x + Float(columns.upperBound) * du, entry.uv.y + Float(rows.upperBound) * dv)
+                            var ink = rect
+                            ink.y += Float(rows.lowerBound) / scale
+                            ink.w = Float(rows.count) / scale
+                            var glyph = PositionedGlyph(rect: ink, uv: uv, color: color, atlasPage: entry.page, utf8Offset: cluster)
+                            glyph.maskShiftY = Float(glide.phase.y) / Float(GlyphAtlas.glidePhases)
+                            #if os(Linux) || os(Windows) || os(Android)
+                            if !isolateCell { glyph.desktopCellOffset = Int32(cell.byte - cluster) }
+                            if key.outlineMode == .windfoil {
+                                glyph.desktopInk = DesktopGlyphInk(run: cell.run, key: key, size: dimensions, owner: owned?.inkOwner,
+                                                                   columns: columns, rows: rows)
+                            }
+                            #endif
+                            #if os(WASI)
+                            glyph.browserMask = browser
+                            #endif
+                            #if os(Windows)
+                            if run.font.chromiumMask {
+                                if let cachedWinMask {
+                                    glyph.windowsMask = cachedWinMask
+                                } else {
+                                    let bounds = SIMD4(Int32(entry.pixelOrigin.x), Int32(entry.pixelOrigin.y), Int32(tile.width), Int32(tile.height))
+                                    glyph.windowsMask = run.windowsMask(bounds: bounds, rect: SIMD4(key.x, key.y, tile.width, tile.height),
+                                                                        phase: glide.phase, columns: key.sourceColumns)
+                                }
+                            }
+                            #endif
+                            if rasterWindow?.intersects(ink.y, ink.y + ink.w) ?? true {
+                                quads.append(glyph)
+                            }
                         }
                     }
                 }
@@ -1824,7 +2239,6 @@ final class DesktopTextLine {
         let split = run.hasColor && (maskX != colorX || maskGlide.phase != colorGlide.phase || maskGlide.whole != colorGlide.whole)
         emit(maskGlide, x: maskX, mask: true, colorInk: !split)
         if split { emit(colorGlide, x: colorX, mask: false, colorInk: true) }
-        return quads
     }
 
     #if os(WASI) && RUNE_BROWSER_TEXT
@@ -1926,7 +2340,7 @@ final class DesktopTextLine {
                 }
                 guard !coverage.isEmpty else { return }
                 let xOrigin = cell.left * scale - cell.localLeft
-                let yOrigin = originYPx + baseline * scale - cell.run.metrics.ascent + Float(key.y)
+                let yOrigin = originYPx + baseline * scale - cell.run.layoutMetrics.ascent + Float(key.y)
                 for y in 0..<tile.height {
                     for x in tile.left..<tile.right {
                         let index = y * tile.width + (x - key.x)
@@ -1987,15 +2401,28 @@ final class DesktopRasterLayout {
             let baseline = measured.lineBaselinesPx[i]
             if let line = fragments[i], line.hasVisibleInk(in: window, baselinePx: baseline, glide: glide) {
                 let record = measured.portableLines[i]
-                var byte = record.utf8Start
-                for ch in record.text {
-                    if let cell = line.cells[byte] {
-                        glyphs += line.glyphs(for: cell, originX: record.originX, baselineY: baseline / scale,
-                                              color: nil, atlas: atlas, cache: true, glidePx: glide, rasterWindow: window)
+                var tileCache = DesktopTextLine.LineTileCache()
+                let baselineY = baseline / scale
+                withUnsafeMutablePointer(to: &tileCache) { cachePtr in
+                    if !line.cells.hasRTL {
+                        for cell in line.cells.values {
+                            line.appendGlyphs(for: cell, originX: record.originX, baselineY: baselineY,
+                                              color: nil, atlas: atlas, cache: true, glidePx: glide,
+                                              rasterWindow: window, tileCache: cachePtr, into: &glyphs)
+                        }
+                    } else {
+                        var byte = record.utf8Start
+                        for ch in record.text {
+                            if let cell = line.cells[byte] {
+                                line.appendGlyphs(for: cell, originX: record.originX, baselineY: baselineY,
+                                                  color: nil, atlas: atlas, cache: true, glidePx: glide,
+                                                  rasterWindow: window, tileCache: cachePtr, into: &glyphs)
+                            }
+                            byte += ch.utf8.count
+                        }
                     }
-                    byte += ch.utf8.count
                 }
-                resting.add(.init(native: line, originX: record.originX, baselineY: baseline / scale, colors: [:]), at: i)
+                resting.add(.init(native: line, originX: record.originX, baselineY: baselineY, colors: [:]), at: i)
             }
             ranges[i] = start..<glyphs.count
         }
@@ -2183,18 +2610,21 @@ final class DesktopRestingText {
                     #endif
                     let record = shaped.portableLines[index]
                     var byte = record.utf8Start
-                    for character in record.text {
-                        let sourceByte = byte + (line.sourceByteOffset ?? 0)
-                        if let cell = line.native.cells[sourceByte] {
-                            let cluster = line.sourceByteOffset == nil ? line.native.clusterByte(for: cell) : byte
-                            let color: Color?
-                            if let inkAtByte { color = inkAtByte(cluster) } else { color = line.colors[cluster] }
-                            glyphs += line.native.glyphs(for: cell, originX: line.originX, baselineY: line.baselineY,
-                                color: color, atlas: atlas, cache: cache, glidePx: glide,
-                                restingXPx: x, utf8Offset: cluster, isolateCell: line.sourceByteOffset != nil,
-                                rasterWindow: rasterWindow)
+                    var tileCache = DesktopTextLine.LineTileCache()
+                    withUnsafeMutablePointer(to: &tileCache) { cachePtr in
+                        for character in record.text {
+                            let sourceByte = byte + (line.sourceByteOffset ?? 0)
+                            if let cell = line.native.cells[sourceByte] {
+                                let cluster = line.sourceByteOffset == nil ? line.native.clusterByte(for: cell) : byte
+                                let color: Color?
+                                if let inkAtByte { color = inkAtByte(cluster) } else { color = line.colors[cluster] }
+                                line.native.appendGlyphs(for: cell, originX: line.originX, baselineY: line.baselineY,
+                                    color: color, atlas: atlas, cache: cache, glidePx: glide,
+                                    restingXPx: x, utf8Offset: cluster, isolateCell: line.sourceByteOffset != nil,
+                                    rasterWindow: rasterWindow, tileCache: cachePtr, into: &glyphs)
+                            }
+                            byte += character.utf8.count
                         }
-                        byte += character.utf8.count
                     }
                 } else {
                     glyphs += shaped.glyphs[original]

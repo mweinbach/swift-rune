@@ -11,7 +11,6 @@ import CoreText
 /// The node and inherited layout state produced before a subtree is visited.
 fileprivate struct SyncPrepared {
     var myIndex: Int
-    var path: String
     var storePathId: RuneMotion.NodeId
     var runtimePathId: RuneMotion.NodeId
     var keyHash: UInt64
@@ -51,9 +50,20 @@ final class RetainedLayoutCoordinator {
         var paragraphs: ParagraphRequest? = nil
     }
 
-    // Supply the current pass's collector and node identity to transferred text measures.
+    /// Flat storage for label text measurement avoiding a per-leaf heap closure allocation.
+    private struct LabelMeasure: @unchecked Sendable {
+        var resolved: ElResolvedText
+        var labelKey: TextShapeKey?
+        var byLineReq: ParagraphRequest?
+        var isClampedOrEllipsis: Bool
+        var widthIndependent: Bool
+    }
+
+    // Supply the current pass's collector and node identity to transferred input measures.
     private typealias Measure = (Float?, Bool, TextLayoutCollector?, RuneMotion.NodeId) -> Vec2
     private enum MeasureBox: @unchecked Sendable {
+        case label(Int32)
+        case fixed(Vec2)
         case content(Measure)
         case picture(ratio: Float)
     }
@@ -78,6 +88,7 @@ final class RetainedLayoutCoordinator {
         var nodes: Range<Int>
         var leaves: Range<Int>
         var overflow: Range<Int>
+        var labelMeasures: Range<Int>
         var nestedStart: Int
     }
 
@@ -117,23 +128,30 @@ final class RetainedLayoutCoordinator {
         let record: MemoRecord
         var root: SyncPrepared { record.root }
         let nodes: ArraySlice<PreparedNode>
+        let childOffsets: ArraySlice<Int>
+        let childOffsetBase: Int32
         let slotKeys: ArraySlice<RetainedLayoutKey>
         let leaves: ArraySlice<TextLeafFallback>
         let overflow: ArraySlice<OverflowLeaf>
+        let labelMeasures: ArraySlice<LabelMeasure>
         let nested: ArraySlice<MemoRecord>
         let isGroupRoot: Bool
         let geometry: MemoGeometry?
         var virtualRoot: VirtualRowRoot?
 
-        init(record: MemoRecord, nodes: ArraySlice<PreparedNode>, slotKeys: ArraySlice<RetainedLayoutKey>,
-             leaves: ArraySlice<TextLeafFallback>,
-             overflow: ArraySlice<OverflowLeaf>, nested: ArraySlice<MemoRecord>, isGroupRoot: Bool,
-             geometry: MemoGeometry?) {
+        init(record: MemoRecord, nodes: ArraySlice<PreparedNode>, childOffsets: ArraySlice<Int>,
+             childOffsetBase: Int32, slotKeys: ArraySlice<RetainedLayoutKey>,
+             leaves: ArraySlice<TextLeafFallback>, overflow: ArraySlice<OverflowLeaf>,
+             labelMeasures: ArraySlice<LabelMeasure>, nested: ArraySlice<MemoRecord>,
+             isGroupRoot: Bool, geometry: MemoGeometry?) {
             self.record = record
             self.nodes = nodes
+            self.childOffsets = childOffsets
+            self.childOffsetBase = childOffsetBase
             self.slotKeys = slotKeys
             self.leaves = leaves
             self.overflow = overflow
+            self.labelMeasures = labelMeasures
             self.nested = nested
             self.isGroupRoot = isGroupRoot
             self.geometry = geometry
@@ -153,6 +171,7 @@ final class RetainedLayoutCoordinator {
         let wasRecording: Bool
         let firstLeaf: Int
         let firstOverflow: Int
+        let firstLabelMeasure: Int
         let firstRecord: Int
         let virtualRoot: VirtualRowRoot?
     }
@@ -160,10 +179,11 @@ final class RetainedLayoutCoordinator {
     private struct SyncVisit<State> {
         let prepared: SyncPrepared
         let childMark: Int
+        let childOffsetMark: Int
         let children: [El<State>]
         let virtualRows: [String: Runtime<State>.CachedVirtualRow]?
         var childKeys: [String: Int] = [:]
-        var childOffsets: [Int] = []
+        var childCountSoFar: Int = 0
         var childrenDirty = false
         let memo: MemoMark?
     }
@@ -175,7 +195,8 @@ final class RetainedLayoutCoordinator {
 
     /// Preorder edges are relative to this node, so sibling insertions preserve an entire memo slice.
     private struct PreparedNode: Sendable {
-        var path: String
+        var segmentKey: String?
+        var segmentIndexOrDup: Int32
         var storeKey: UInt64
         var runtimeId: RuneMotion.NodeId
         var screenIdentity: Bool
@@ -183,7 +204,8 @@ final class RetainedLayoutCoordinator {
         var slot: SlotId = SlotId()
         var contentStyle: TaffyBridge.ContentExtent.Child
         var measure: MeasureBox?
-        var childOffsets: [Int] = []
+        var childOffsetStart: Int32 = 0
+        var childOffsetCount: Int32 = 0
         var flow: Flow = .ltr
         var pin: DirPin = .flowing
     }
@@ -199,8 +221,26 @@ final class RetainedLayoutCoordinator {
     private var lastViewport: Vec2 = Vec2(-1, -1)
     private var lastFitHeight: Bool = false
 
+    // Reusable scratch buffers across commits (trimmed on sparse shrink so swap memory stays tight).
+    private var spareFlat: [PreparedNode] = []
+    private var spareFlatChildOffsets: [Int] = []
+    private var spareVisitChildOffsets: [Int] = []
+    private var sparePendingStyles: [RuneTaffy.TaffyStyle] = []
+    private var spareLabelMeasures: [LabelMeasure] = []
+    private var spareNonSecretLeaves: [TextLeafFallback] = []
+    private var spareOverflowLeaves: [OverflowLeaf] = []
+    private var spareMemoRecords: [MemoRecord] = []
+    private var spareGeometryRuns: [(range: Range<Int>, cache: MemoGeometry)] = []
+    private var spareSolved: [(RuneTaffy.Layout, LayoutEngine.ResultNode)] = []
+
     var storageStats: RuneTaffy.StorageStats {
         store.storageStats()
+    }
+
+    @inline(__always)
+    private static func resetSpare<T>(_ array: inout [T], highWater: Int) {
+        let keep = array.capacity <= max(128, highWater * 4)
+        array.removeAll(keepingCapacity: keep)
     }
 
     /// A picture derives its automatic side from the clamped size of the other one.
@@ -239,15 +279,61 @@ final class RetainedLayoutCoordinator {
         onLiveIdsReady: ((Set<RuneMotion.NodeId>) -> Void)? = nil
     ) -> LayoutEngine.ResultNode {
         var flat: [PreparedNode] = []
-        flat.reserveCapacity(max(32, store.liveCount))
+        var flatChildOffsets: [Int] = []
+        var visitChildOffsetScratch: [Int] = []
+        var pendingStyles: [RuneTaffy.TaffyStyle] = []
+        var labelMeasures: [LabelMeasure] = []
+        var nonSecretLeaves: [TextLeafFallback] = []
+        var overflowLeaves: [OverflowLeaf] = []
+        var memoRecords: [MemoRecord] = []
+        var geometryRuns: [(range: Range<Int>, cache: MemoGeometry)] = []
+        var solved: [(RuneTaffy.Layout, LayoutEngine.ResultNode)] = []
+
+        swap(&flat, &spareFlat)
+        swap(&flatChildOffsets, &spareFlatChildOffsets)
+        swap(&visitChildOffsetScratch, &spareVisitChildOffsets)
+        swap(&pendingStyles, &sparePendingStyles)
+        swap(&labelMeasures, &spareLabelMeasures)
+        swap(&nonSecretLeaves, &spareNonSecretLeaves)
+        swap(&overflowLeaves, &spareOverflowLeaves)
+        swap(&memoRecords, &spareMemoRecords)
+        swap(&geometryRuns, &spareGeometryRuns)
+        swap(&solved, &spareSolved)
+
+        defer {
+            let flatCount = flat.count
+            let childCount = flatChildOffsets.count
+            let labelCount = labelMeasures.count
+            let leafCount = nonSecretLeaves.count
+            let ovCount = overflowLeaves.count
+            Self.resetSpare(&flat, highWater: flatCount)
+            Self.resetSpare(&flatChildOffsets, highWater: childCount)
+            Self.resetSpare(&visitChildOffsetScratch, highWater: 64)
+            Self.resetSpare(&pendingStyles, highWater: 64)
+            Self.resetSpare(&labelMeasures, highWater: labelCount)
+            Self.resetSpare(&nonSecretLeaves, highWater: leafCount)
+            Self.resetSpare(&overflowLeaves, highWater: ovCount)
+            Self.resetSpare(&memoRecords, highWater: 32)
+            Self.resetSpare(&geometryRuns, highWater: 32)
+            Self.resetSpare(&solved, highWater: 64)
+            swap(&flat, &spareFlat)
+            swap(&flatChildOffsets, &spareFlatChildOffsets)
+            swap(&visitChildOffsetScratch, &spareVisitChildOffsets)
+            swap(&pendingStyles, &sparePendingStyles)
+            swap(&labelMeasures, &spareLabelMeasures)
+            swap(&nonSecretLeaves, &spareNonSecretLeaves)
+            swap(&overflowLeaves, &spareOverflowLeaves)
+            swap(&memoRecords, &spareMemoRecords)
+            swap(&geometryRuns, &spareGeometryRuns)
+            swap(&solved, &spareSolved)
+        }
+
+        let liveHint = max(32, store.liveCount)
+        if flat.capacity < liveHint { flat.reserveCapacity(liveHint) }
+        if flatChildOffsets.capacity < liveHint { flatChildOffsets.reserveCapacity(liveHint) }
         var aspectFits: [(ratio: Float, raw: RuneTaffy.TaffyStyle)] = []
         var aspectFitOrder: [(index: Int, fit: Int)] = []
         var anchorStyles: [Int: RuneTaffy.TaffyStyle] = [:]
-        // Keep the full solver style only until this node has been synchronized. A replayed
-        // row then transfers compact geometry records without copying grid/style storage.
-        var pendingStyles: [RuneTaffy.TaffyStyle] = []
-        var nonSecretLeaves: [TextLeafFallback] = []
-        var overflowLeaves: [OverflowLeaf] = []
         let fEpoch = textSystem.currentFontEpoch
         let langTag = textSystem.language
         let storeRootPath = "/0"
@@ -275,14 +361,39 @@ final class RetainedLayoutCoordinator {
             memoSpans.removeAll(keepingCapacity: true)
         }
         var nextMemoSpans: [ObjectIdentifier: MemoSpan] = [:]
+        if !memoSpans.isEmpty { nextMemoSpans.reserveCapacity(memoSpans.count) }
         var recordingMemo = false
-        var memoRecords: [MemoRecord] = []
-        var geometryRuns: [(range: Range<Int>, cache: MemoGeometry)] = []
         reusedMemoNodeCount = 0
         reusedVirtualRowRootCount = 0
         reusedMemoGeometry = false
         var geometryChanged = false
         var hasMirroredFlow = false
+
+        /// Reconstructs the runtime path string on demand (only for containers with `virtualEstimate` when `virtualRows` is non-empty).
+        func runtimePathString(for index: Int) -> String {
+            var chain: [Int] = []
+            var cur = index
+            while let offset = flat[cur].parentOffset {
+                chain.append(cur)
+                cur += offset
+            }
+            var result = keyedRootPath ?? storeRootPath
+            for nodeIdx in chain.reversed() {
+                let n = flat[nodeIdx]
+                result.append("/")
+                if let key = n.segmentKey {
+                    result.append("@")
+                    result.append(key)
+                    if n.segmentIndexOrDup > 0 {
+                        result.append("#dup")
+                        result.append(String(n.segmentIndexOrDup))
+                    }
+                } else {
+                    result.append(String(n.segmentIndexOrDup))
+                }
+            }
+            return result
+        }
 
         func hashTextGeometry(_ hasher: inout Hasher, key: TextShapeKey?, text: String,
                               spans: [TextSpan]?, pills: [PillChip], style: TextStyle) {
@@ -300,7 +411,7 @@ final class RetainedLayoutCoordinator {
             }
         }
 
-        func makeMeasure(el: borrowing El<State>, nodeId: RuneMotion.NodeId, flatIndex: Int, forcedTextFlow: TextFlow?) -> (fn: Measure?, hash: UInt64?, redacted: Bool) {
+        func makeMeasure(el: borrowing El<State>, nodeId: RuneMotion.NodeId, flatIndex: Int, forcedTextFlow: TextFlow?) -> (box: MeasureBox?, hash: UInt64?, redacted: Bool) {
             guard el.children.isEmpty else { return (nil, nil, false) }
             if el.hasEditLens, let editLens = el.handlers.editLens {
                 let rawEdit = editLens.get(state)
@@ -372,7 +483,7 @@ final class RetainedLayoutCoordinator {
                     )
                     return Vec2(box.shaped.size.x, max(box.shaped.size.y, lineH))
                 }
-                return (fn, resolved.isSecure ? 0 : h, resolved.isSecure)
+                return (.content(fn), resolved.isSecure ? 0 : h, resolved.isSecure)
             } else if el.richSpans != nil || el.liveText != nil || el.plainText != nil || el.advanceInRun != nil {
                 let rawTxt = el.liveText?.get() ?? el.plainText
                 let resolved = ElDisplayResolver.resolveText(
@@ -432,74 +543,25 @@ final class RetainedLayoutCoordinator {
                 hasher.combine(resolved.truncateFade)
                 hasher.combine(resolved.pretty)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
-                let keep: TextKeep = resolved.isSecure ? .secret : .cached
                 let widthIndependent = labelKey != nil && resolved.style.wrap == .noWrap
-                let byLineReq = Runtime<State>.staticByLineParagraphRequest(
+                let byLineReq = el.isByLine ? Runtime<State>.staticByLineParagraphRequest(
                     nodeId: nodeId, el: el, style: resolved.style, spans: resolved.spans, pills: resolved.pills
-                )
-                let fn: Measure = { maxW, isRealLayout, textLayouts, nodeId in
-                    if widthIndependent, let labelKey, let record = textLayouts?.map[nodeId],
-                       !record.isInput, record.box.maxWidth == nil, record.box.shapeKey == labelKey {
-                        return record.box.shaped.size
-                    }
-                    if resolved.truncateFade || resolved.advanceRun != nil || isClampedOrEllipsis {
-                        // Every text wraps at `w * scale + FIT_SLACK` device px; a truncated or clamped
-                        // one is no wider than its room (`compute_layout`: `lw.min(a)`, #948).
-                        var sz = resolved.measure(using: textSystem, maxWidth: TextBoxGeometry.wrapWidth(maxW, scale: scale), pixelScale: scale)
-                        if resolved.advanceRun == nil, let mw = maxW, mw.isFinite {
-                            sz.x = min(sz.x, max(0, mw))
-                        }
-                        return sz
-                    }
-                    // A text laid out again in its own box fits: it wraps at `w * scale + FIT_SLACK`
-                    // device px (`compute_layout` / `relayout::lay_out_text`, #948).
-                    let shapeMaxW: Float? = (resolved.style.wrap == .noWrap && resolved.style.maxLines == 0) ? nil : TextBoxGeometry.wrapWidth(maxW, scale: scale)
-                    let hasSpans = (resolved.spans?.isEmpty == false)
-                    let box: TextLayoutBox
-                    if let byLineReq {
-                        box = textSystem.layoutInput(
-                            text: hasSpans ? "" : resolved.displayedText,
-                            spans: resolved.spans,
-                            pills: resolved.pills,
-                            style: resolved.style,
-                            maxWidth: shapeMaxW,
-                            pixelScale: scale,
-                            emitGlyphs: false,
-                            keep: keep,
-                            countAsRebreak: (textLayouts != nil) && (isRealLayout || widthIndependent),
-                            request: byLineReq,
-                            forMeasurement: true
-                        )
-                    } else {
-                        box = textSystem.layoutKeyed(
-                            retaining: labelKey,
-                            intrinsicShapes: labelKey != nil && !widthIndependent ? textLayouts?.intrinsicShapes : nil,
-                            text: hasSpans ? "" : resolved.displayedText,
-                            spans: resolved.spans,
-                            pills: resolved.pills,
-                            style: resolved.style,
-                            maxWidth: shapeMaxW,
-                            pixelScale: scale,
-                            emitGlyphs: false,
-                            keep: keep,
-                            // Intrinsic probes and final layout have the same break for an ordinary
-                            // no-wrap label. Keep the first break for later Taffy probes and paint.
-                            countAsRebreak: (textLayouts != nil) && (isRealLayout || widthIndependent),
-                            pretty: resolved.pretty, forMeasurement: true
-                        )
-                    }
-                    if !resolved.isSecure, isRealLayout || widthIndependent, let collector = textLayouts {
-                        collector.map[nodeId] = TextLayoutRecord(box: box, isInput: false)
-                    }
-                    return box.shaped.size
-                }
-                return (fn, resolved.isSecure ? 0 : h, resolved.isSecure)
+                ) : nil
+                let labelIdx = Int32(labelMeasures.count)
+                labelMeasures.append(LabelMeasure(
+                    resolved: resolved,
+                    labelKey: labelKey,
+                    byLineReq: byLineReq,
+                    isClampedOrEllipsis: isClampedOrEllipsis,
+                    widthIndependent: widthIndependent
+                ))
+                return (.label(labelIdx), resolved.isSecure ? 0 : h, resolved.isSecure)
             } else if let (_, iconSize) = el.iconPayload {
                 var hasher = Hasher()
                 hasher.combine(4)
                 hasher.combine(iconSize)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
-                return ({ _, _, _, _ in Vec2(iconSize, iconSize) }, h, false)
+                return (.fixed(Vec2(iconSize, iconSize)), h, false)
             } else if let grid = el.terminalGridPayload {
                 var hasher = Hasher()
                 hasher.combine(5)
@@ -510,19 +572,19 @@ final class RetainedLayoutCoordinator {
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
                 let w = Float(grid.columns) * grid.cellSize.x
                 let rowH = Float(grid.rows.count) * grid.cellSize.y
-                return ({ _, _, _, _ in Vec2(w, rowH) }, h, false)
+                return (.fixed(Vec2(w, rowH)), h, false)
             }
             return (nil, nil, false)
         }
 
         /// Prepare one node before visiting its children. Large style and measure temporaries
         /// stay outside the traversal loop's stack frame.
-
         @inline(never)
         func syncPrepare(
             _ el: borrowing El<State>,
             parent: SyncPrepared?,
             siblingIndex: Int,
+            siblingCount: Int,
             siblingKeysSeen: inout [String: Int]
         ) -> SyncPrepared {
             let pin: DirPin = (el.isUnmirrored || el.anchor != nil) ? .physical : .flowing
@@ -531,30 +593,40 @@ final class RetainedLayoutCoordinator {
             if nodeFlow == .rtl { hasMirroredFlow = true }
             let nodeDirected = (el.explicitDir != nil) || el.isUnmirrored || (parent?.nodeDirected == true)
             let forcedTextFlow: TextFlow? = (nodeDirected && !el.textDirByParagraph) ? nodeFlow.textFlow : nil
-            let segment: String
-            let resolvedKey: String?
-            if let rawK = el.storageKeyId {
-                let count = siblingKeysSeen[rawK, default: 0]
-                siblingKeysSeen[rawK] = count + 1
-                if count == 0 {
-                    resolvedKey = rawK
-                    segment = "@\(rawK)"
+            let rawKey = el.storageKeyId
+            let dupCount: Int
+            if let rawK = rawKey {
+                if siblingCount > 1 {
+                    let count = siblingKeysSeen[rawK, default: 0]
+                    siblingKeysSeen[rawK] = count + 1
+                    dupCount = count
                 } else {
-                    let dup = "\(rawK)#dup\(count)"
-                    resolvedKey = dup
-                    segment = "@\(dup)"
+                    dupCount = 0
                 }
             } else {
-                resolvedKey = nil
-                segment = "\(siblingIndex)"
+                dupCount = 0
             }
-            let path = parent.map { "\($0.path)/\(segment)" } ?? storeRootPath
-            let storePathId = parent?.storePathId.child(segment) ?? storeRootId
-            let runtimePathId = keyedRootPath == nil ? storePathId : (parent?.runtimePathId.child(segment) ?? runtimeRootId)
+            let storePathId: RuneMotion.NodeId
+            if let parent {
+                storePathId = rawKey.map { parent.storePathId.child(key: $0, dup: dupCount) }
+                    ?? parent.storePathId.child(index: siblingIndex)
+            } else {
+                storePathId = storeRootId
+            }
+            let runtimePathId: RuneMotion.NodeId
+            if keyedRootPath == nil {
+                runtimePathId = storePathId
+            } else if let parent {
+                runtimePathId = rawKey.map { parent.runtimePathId.child(key: $0, dup: dupCount) }
+                    ?? parent.runtimePathId.child(index: siblingIndex)
+            } else {
+                runtimePathId = runtimeRootId
+            }
             // Screen travel overrides this node's identity only. Children still derive
             // their stable IDs from the authored parent path.
-            let screenId = el.layoutAnim?.travel == .screen
-                ? resolvedKey.map { RuneMotion.NodeId.hash("screen:@\($0)") } : nil
+            let screenId: RuneMotion.NodeId? = el.layoutAnim?.travel == .screen
+                ? rawKey.map { RuneMotion.NodeId.screenKey($0, dup: dupCount) }
+                : nil
             let keyHash = (screenId ?? storePathId).rawValue
             let runtimeNodeId = screenId ?? runtimePathId
             if let collector = textLayouts {
@@ -643,7 +715,8 @@ final class RetainedLayoutCoordinator {
             pendingStyles.append(effectiveTaffy)
             if el.anchor?.fit == true { anchorStyles[myIndex] = effectiveTaffy }
             flat.append(PreparedNode(
-                path: path,
+                segmentKey: rawKey,
+                segmentIndexOrDup: rawKey != nil ? Int32(dupCount) : Int32(siblingIndex),
                 storeKey: keyHash,
                 runtimeId: runtimeNodeId,
                 screenIdentity: screenId != nil,
@@ -659,7 +732,7 @@ final class RetainedLayoutCoordinator {
                 return aspectFits.count - 1
             }
 
-            let measurement: (fn: Measure?, hash: UInt64?, redacted: Bool)
+            let measurement: (box: MeasureBox?, hash: UInt64?, redacted: Bool)
             if nodeDirected && el.textDirByParagraph && el.hasEditLens {
                 // A `dirByParagraph` field's paragraphs start from the element's flow (`TextDir::Plaintext`).
                 var measured = copy el
@@ -668,12 +741,11 @@ final class RetainedLayoutCoordinator {
             } else {
                 measurement = makeMeasure(el: el, nodeId: runtimeNodeId, flatIndex: myIndex, forcedTextFlow: forcedTextFlow)
             }
-            let (measureFn, measureHash, isRedacted) = measurement
-            flat[myIndex].measure = measureFn.map(MeasureBox.content) ?? pictureRatioToMeasure.map(MeasureBox.picture)
+            let (measureBox, measureHash, isRedacted) = measurement
+            flat[myIndex].measure = measureBox ?? pictureRatioToMeasure.map(MeasureBox.picture)
 
             return SyncPrepared(
                 myIndex: myIndex,
-                path: path,
                 storePathId: storePathId,
                 runtimePathId: runtimePathId,
                 keyHash: keyHash,
@@ -708,54 +780,104 @@ final class RetainedLayoutCoordinator {
         /// Claim the old subtree atomically, including destination paths before any rekey.
         /// General memos prepare root modifiers again. A retained virtual row can also claim its root.
         @inline(never)
-        func reuseChildren(_ span: MemoSpan, _ p: SyncPrepared, syncingRoot: Bool = true) -> Bool {
+        func reuseChildren(
+            _ span: MemoSpan,
+            _ p: SyncPrepared,
+            syncingRoot: Bool = true
+        ) -> (reused: Bool, rebasedStore: [RuneMotion.NodeId], rebasedRuntime: [RuneMotion.NodeId]) {
             guard span.hasSameChildContext(p),
                   store.canReuse(span.slotKeys)
-            else { return false }
+            else { return (false, [], []) }
             let oldStart = span.root.myIndex
             let shift = p.myIndex - oldStart
             let moved = span.root.storePathId != p.storePathId
             let changedIds = moved || span.root.runtimePathId != p.runtimePathId
-            func newPath(_ node: PreparedNode) -> String {
-                p.path + node.path.dropFirst(span.root.path.count)
+
+            var rebasedStore: [RuneMotion.NodeId] = []
+            var rebasedRuntime: [RuneMotion.NodeId] = []
+            if changedIds {
+                let count = span.nodes.count
+                rebasedStore.reserveCapacity(count)
+                rebasedRuntime.reserveCapacity(count)
+                rebasedStore.append(p.storePathId)
+                rebasedRuntime.append(p.runtimePathId)
+                let base = span.nodes.startIndex
+                for offset in 1..<count {
+                    let node = span.nodes[base + offset]
+                    let parentLocal = offset + node.parentOffset!
+                    let sId: RuneMotion.NodeId
+                    if let key = node.segmentKey {
+                        sId = rebasedStore[parentLocal].child(key: key, dup: Int(node.segmentIndexOrDup))
+                    } else {
+                        sId = rebasedStore[parentLocal].child(index: Int(node.segmentIndexOrDup))
+                    }
+                    let rId: RuneMotion.NodeId
+                    if keyedRootPath == nil {
+                        rId = sId
+                    } else if let key = node.segmentKey {
+                        rId = rebasedRuntime[parentLocal].child(key: key, dup: Int(node.segmentIndexOrDup))
+                    } else {
+                        rId = rebasedRuntime[parentLocal].child(index: Int(node.segmentIndexOrDup))
+                    }
+                    rebasedStore.append(sId)
+                    rebasedRuntime.append(rId)
+                }
             }
+
             if moved {
                 var slots: [(UInt64, UInt64, SlotId, UInt32)] = []
                 slots.reserveCapacity(span.nodes.count)
-                for (offset, node) in span.nodes.enumerated() {
+                let base = span.nodes.startIndex
+                for offset in 0..<span.nodes.count {
+                    let node = span.nodes[base + offset]
                     let key: UInt64
-                    if offset == 0 { key = p.keyHash }
-                    else { key = node.screenIdentity ? node.storeKey : RuneMotion.NodeId.hash(newPath(node)).rawValue }
-                    guard !store.isUsedThisCommit(key: key) else { return false }
+                    if offset == 0 {
+                        key = p.keyHash
+                    } else {
+                        key = node.screenIdentity ? node.storeKey : rebasedStore[offset].rawValue
+                    }
+                    guard !store.isUsedThisCommit(key: key) else { return (false, [], []) }
                     slots.append((node.storeKey, key, node.slot, UInt32(p.myIndex + offset)))
                 }
                 store.rekeyAndReuseBatch(slots)
             } else {
                 store.reuseSlots(span.slotKeys.dropFirst(), startingAt: UInt32(p.myIndex + 1))
             }
-            let oldRoot = span.nodes.first!
-            flat[p.myIndex].childOffsets = oldRoot.childOffsets
-            if !changedIds {
-                for node in span.nodes.dropFirst() {
-                    if node.flow == .rtl { hasMirroredFlow = true }
-                    textLayouts?.liveIds.insert(node.runtimeId)
-                }
-                flat.append(contentsOf: span.nodes.dropFirst())
-            } else {
-                for var node in span.nodes.dropFirst() {
-                    if moved {
-                        node.path = newPath(node)
-                        if !node.screenIdentity { node.storeKey = RuneMotion.NodeId.hash(node.path).rawValue }
-                    }
-                    if changedIds && !node.screenIdentity {
-                        let runtimePath = keyedRootPath.map { $0 + node.path.dropFirst(storeRootPath.count) } ?? node.path
-                        node.runtimeId = RuneMotion.NodeId.hash(runtimePath)
-                    }
-                    if node.flow == .rtl { hasMirroredFlow = true }
-                    textLayouts?.liveIds.insert(node.runtimeId)
-                    flat.append(node)
-                }
+
+            let dstChildBase = Int32(flatChildOffsets.count) - span.childOffsetBase
+            if !span.childOffsets.isEmpty {
+                flatChildOffsets.append(contentsOf: span.childOffsets)
             }
+            let labelShift = Int32(labelMeasures.count - span.labelMeasures.startIndex)
+            if !span.labelMeasures.isEmpty {
+                labelMeasures.append(contentsOf: span.labelMeasures)
+            }
+
+            let oldRoot = span.nodes.first!
+            flat[p.myIndex].childOffsetStart = oldRoot.childOffsetStart + dstChildBase
+            flat[p.myIndex].childOffsetCount = oldRoot.childOffsetCount
+
+            let base = span.nodes.startIndex
+            let nodeCount = span.nodes.count
+            for offset in 1..<nodeCount {
+                var node = span.nodes[base + offset]
+                if node.childOffsetCount > 0 {
+                    node.childOffsetStart += dstChildBase
+                }
+                if case .label(let lIdx) = node.measure {
+                    node.measure = .label(lIdx + labelShift)
+                }
+                if moved && !node.screenIdentity {
+                    node.storeKey = rebasedStore[offset].rawValue
+                }
+                if changedIds && !node.screenIdentity {
+                    node.runtimeId = rebasedRuntime[offset]
+                }
+                if node.flow == .rtl { hasMirroredFlow = true }
+                textLayouts?.liveIds.insert(node.runtimeId)
+                flat.append(node)
+            }
+
             for var leaf in span.leaves {
                 leaf.index += shift
                 leaf.nodeId = flat[leaf.index].runtimeId
@@ -766,23 +888,49 @@ final class RetainedLayoutCoordinator {
                 overflowLeaves.append((index, flat[index].runtimeId, leaf.text))
             }
             if syncingRoot {
-                for offset in flat[p.myIndex].childOffsets { store.pushChild(flat[p.myIndex + offset].slot) }
+                let cStart = Int(flat[p.myIndex].childOffsetStart)
+                let cEnd = cStart + Int(flat[p.myIndex].childOffsetCount)
+                for idx in cStart..<cEnd {
+                    store.pushChild(flat[p.myIndex + flatChildOffsets[idx]].slot)
+                }
             }
-            reusedMemoNodeCount += span.nodes.count - 1
-            return true
+            reusedMemoNodeCount += nodeCount - 1
+            return (true, rebasedStore, rebasedRuntime)
         }
 
         @inline(never)
         func installMemoGroup() {
             let group = memoRecords.last!
             let records = memoRecords
-            memoRecords = []
-            let nodes = Array(flat[group.nodes])
+            memoRecords.removeAll(keepingCapacity: true)
+            var nodes = Array(flat[group.nodes])
             // Screen-space travel keys can alias a slot even in distinct sibling branches.
-            guard Set(nodes.map(\.slot)).count == nodes.count else { return }
+            var seenSlots = Set<SlotId>()
+            seenSlots.reserveCapacity(nodes.count)
+            for n in nodes {
+                if !seenSlots.insert(n.slot).inserted { return }
+            }
+            var groupChildOffsets: [Int] = []
+            for i in nodes.indices {
+                let cStart = Int(nodes[i].childOffsetStart)
+                let cCount = Int(nodes[i].childOffsetCount)
+                nodes[i].childOffsetStart = Int32(groupChildOffsets.count)
+                if cCount > 0 {
+                    groupChildOffsets.append(contentsOf: flatChildOffsets[cStart..<(cStart + cCount)])
+                }
+            }
+            let labelBase = Int32(group.labelMeasures.lowerBound)
+            if labelBase != 0 {
+                for i in nodes.indices {
+                    if case .label(let idx) = nodes[i].measure {
+                        nodes[i].measure = .label(idx - labelBase)
+                    }
+                }
+            }
             let slotKeys = nodes.map { RetainedLayoutKey(key: $0.storeKey, slot: $0.slot) }
             let leaves = Array(nonSecretLeaves[group.leaves])
             let overflow = Array(overflowLeaves[group.overflow])
+            let groupLabels = Array(labelMeasures[group.labelMeasures])
             func local(_ range: Range<Int>, _ start: Int) -> Range<Int> {
                 (range.lowerBound - start)..<(range.upperBound - start)
             }
@@ -790,10 +938,16 @@ final class RetainedLayoutCoordinator {
                 guard let id = record.identity else { continue }
                 let localNodes = local(record.nodes, group.nodes.lowerBound)
                 let keys = slotKeys[localNodes]
+                let coStart = localNodes.isEmpty ? 0 : Int(nodes[localNodes.lowerBound].childOffsetStart)
+                let coEnd = localNodes.isEmpty ? 0 : Int(nodes[localNodes.upperBound - 1].childOffsetStart) + Int(nodes[localNodes.upperBound - 1].childOffsetCount)
                 nextMemoSpans[ObjectIdentifier(id)] = MemoSpan(
-                    record: record, nodes: nodes[localNodes], slotKeys: keys,
+                    record: record, nodes: nodes[localNodes],
+                    childOffsets: groupChildOffsets[coStart..<coEnd],
+                    childOffsetBase: Int32(coStart),
+                    slotKeys: keys,
                     leaves: leaves[local(record.leaves, group.leaves.lowerBound)],
                     overflow: overflow[local(record.overflow, group.overflow.lowerBound)],
+                    labelMeasures: groupLabels[local(record.labelMeasures, group.labelMeasures.lowerBound)],
                     nested: records[record.nestedStart..<index], isGroupRoot: index == records.count - 1,
                     geometry: index == records.count - 1 ? MemoGeometry(descendants: keys.dropFirst()) : nil
                 )
@@ -801,30 +955,39 @@ final class RetainedLayoutCoordinator {
         }
 
         @inline(never)
-        func moveNestedRecords(_ span: MemoSpan, _ p: SyncPrepared, firstLeaf: Int, firstOverflow: Int) {
+        func moveNestedRecords(
+            _ span: MemoSpan,
+            _ p: SyncPrepared,
+            firstLeaf: Int,
+            firstOverflow: Int,
+            firstLabelMeasure: Int,
+            rebasedStore: [RuneMotion.NodeId],
+            rebasedRuntime: [RuneMotion.NodeId]
+        ) {
             let shift = p.myIndex - span.root.myIndex
             let recordShift = memoRecords.count - span.nested.startIndex
             let leafShift = firstLeaf - span.record.leaves.lowerBound
             let overflowShift = firstOverflow - span.record.overflow.lowerBound
+            let labelShift = firstLabelMeasure - span.record.labelMeasures.lowerBound
             func moved(_ range: Range<Int>, _ by: Int) -> Range<Int> {
                 (range.lowerBound + by)..<(range.upperBound + by)
             }
             for var record in span.nested {
+                let localOffset = record.root.myIndex - span.root.myIndex
                 record.nodes = moved(record.nodes, shift)
                 record.root.myIndex += shift
                 let node = flat[record.root.myIndex]
-                record.root.path = node.path
                 record.root.keyHash = node.storeKey
-                if node.screenIdentity {
-                    record.root.storePathId = RuneMotion.NodeId.hash(node.path)
-                    let runtimePath = keyedRootPath.map { $0 + node.path.dropFirst(storeRootPath.count) } ?? node.path
-                    record.root.runtimePathId = RuneMotion.NodeId.hash(runtimePath)
-                } else {
+                if !rebasedStore.isEmpty {
+                    record.root.storePathId = rebasedStore[localOffset]
+                    record.root.runtimePathId = rebasedRuntime[localOffset]
+                } else if !node.screenIdentity {
                     record.root.storePathId = RuneMotion.NodeId(node.storeKey)
                     record.root.runtimePathId = node.runtimeId
                 }
                 record.leaves = moved(record.leaves, leafShift)
                 record.overflow = moved(record.overflow, overflowShift)
+                record.labelMeasures = moved(record.labelMeasures, labelShift)
                 record.nestedStart += recordShift
                 memoRecords.append(record)
             }
@@ -845,6 +1008,7 @@ final class RetainedLayoutCoordinator {
             _ el: borrowing El<State>,
             parent: SyncPrepared?,
             siblingIndex: Int,
+            siblingCount: Int,
             siblingKeysSeen: inout [String: Int],
             sourceRows: [String: Runtime<State>.CachedVirtualRow]? = nil
         ) -> SyncStep<State> {
@@ -862,11 +1026,12 @@ final class RetainedLayoutCoordinator {
                     flat.append(node)
                     var prepared = span.root
                     prepared.myIndex = index
-                    if reuseChildren(span, prepared, syncingRoot: false) {
+                    let reused = reuseChildren(span, prepared, syncingRoot: false)
+                    if reused.reused {
                         store.reuseSlot(node.slot, nodeIndex: UInt32(index))
                         textLayouts?.liveIds.insert(node.runtimeId)
                         if node.flow == .rtl { hasMirroredFlow = true }
-                        siblingKeysSeen[key] = 1
+                        if siblingCount > 1 { siblingKeysSeen[key] = 1 }
                         forwardGroup(span, memoKey)
                         if let geometry = span.geometry { geometryRuns.append((index..<flat.count, geometry)) }
                         reusedVirtualRowRootCount += 1
@@ -881,11 +1046,13 @@ final class RetainedLayoutCoordinator {
                     projected.children = memo.children
                     projected.memoLayoutChildren = memo
                     return beginVisit(projected, parent: parent, siblingIndex: siblingIndex,
-                                      siblingKeysSeen: &siblingKeysSeen, sourceRows: sourceRows)
+                                      siblingCount: siblingCount, siblingKeysSeen: &siblingKeysSeen,
+                                      sourceRows: sourceRows)
                 }
                 virtualRoot = VirtualRowRoot(row.layoutProjection?.owner ?? row.rootIdentity, key: key, parent: parent)
             }
-            let p = syncPrepare(el, parent: parent, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
+            let p = syncPrepare(el, parent: parent, siblingIndex: siblingIndex,
+                                siblingCount: siblingCount, siblingKeysSeen: &siblingKeysSeen)
             let myIndex = p.myIndex
             let childMark = store.beginChildren()
             if el.children.isEmpty {
@@ -902,53 +1069,72 @@ final class RetainedLayoutCoordinator {
             }
             let firstLeaf = nonSecretLeaves.count
             let firstOverflow = overflowLeaves.count
-            if let memoKey, let span = memoSpans[memoKey], span.record.identity === identity,
-               reuseChildren(span, p) {
-                let (slot, dirty) = syncFinish(p, childMark: childMark, childrenDirty: false)
-                if !wasRecording, span.isGroupRoot, p.storePathId == span.root.storePathId,
-                   p.runtimePathId == span.root.runtimePathId, span.nodes.first?.slot == slot {
-                    forwardGroup(span, memoKey)
-                } else {
-                    moveNestedRecords(span, p, firstLeaf: firstLeaf, firstOverflow: firstOverflow)
-                    memoRecords.append(MemoRecord(identity: identity, root: p, nodes: myIndex..<flat.count,
-                        leaves: firstLeaf..<nonSecretLeaves.count, overflow: firstOverflow..<overflowLeaves.count,
-                        nestedStart: firstRecord))
-                    if !wasRecording { installMemoGroup() }
+            let firstLabelMeasure = labelMeasures.count
+            if let memoKey, let span = memoSpans[memoKey], span.record.identity === identity {
+                let reuseResult = reuseChildren(span, p)
+                if reuseResult.reused {
+                    let (slot, dirty) = syncFinish(p, childMark: childMark, childrenDirty: false)
+                    if !wasRecording, span.isGroupRoot, p.storePathId == span.root.storePathId,
+                       p.runtimePathId == span.root.runtimePathId, span.nodes.first?.slot == slot {
+                        forwardGroup(span, memoKey)
+                    } else {
+                        moveNestedRecords(span, p, firstLeaf: firstLeaf, firstOverflow: firstOverflow,
+                                          firstLabelMeasure: firstLabelMeasure,
+                                          rebasedStore: reuseResult.rebasedStore,
+                                          rebasedRuntime: reuseResult.rebasedRuntime)
+                        memoRecords.append(MemoRecord(identity: identity, root: p, nodes: myIndex..<flat.count,
+                            leaves: firstLeaf..<nonSecretLeaves.count, overflow: firstOverflow..<overflowLeaves.count,
+                            labelMeasures: firstLabelMeasure..<labelMeasures.count, nestedStart: firstRecord))
+                        if !wasRecording { installMemoGroup() }
+                    }
+                    if !wasRecording, let current = nextMemoSpans[memoKey] {
+                        current.virtualRoot = virtualRoot
+                        if let geometry = current.geometry { geometryRuns.append((myIndex..<flat.count, geometry)) }
+                    }
+                    return .finished((myIndex, slot, dirty))
                 }
-                if !wasRecording, let current = nextMemoSpans[memoKey] {
-                    current.virtualRoot = virtualRoot
-                    if let geometry = current.geometry { geometryRuns.append((myIndex..<flat.count, geometry)) }
-                }
-                return .finished((myIndex, slot, dirty))
             }
             var mark: MemoMark?
             if memoKey != nil, let identity {
                 mark = MemoMark(identity: identity, wasRecording: wasRecording, firstLeaf: firstLeaf,
-                                firstOverflow: firstOverflow, firstRecord: firstRecord, virtualRoot: virtualRoot)
+                                firstOverflow: firstOverflow, firstLabelMeasure: firstLabelMeasure,
+                                firstRecord: firstRecord, virtualRoot: virtualRoot)
                 recordingMemo = true
             }
             let rows: [String: Runtime<State>.CachedVirtualRow]?
             if !virtualRows.isEmpty, el.virtualEstimate != nil {
-                let path = keyedRootPath.map { $0 + p.path.dropFirst(storeRootPath.count) } ?? p.path
-                rows = virtualRows[path]
+                rows = virtualRows[runtimePathString(for: myIndex)]
             } else {
                 rows = nil
             }
-            var visit = SyncVisit(prepared: p, childMark: childMark, children: el.children, virtualRows: rows, memo: mark)
-            visit.childOffsets.reserveCapacity(el.children.count)
+            let visit = SyncVisit(
+                prepared: p,
+                childMark: childMark,
+                childOffsetMark: visitChildOffsetScratch.count,
+                children: el.children,
+                virtualRows: rows,
+                memo: mark
+            )
             return .visit(visit)
         }
 
         @inline(never)
         func finishVisit(_ visit: SyncVisit<State>) -> SyncResult {
             let p = visit.prepared
-            flat[p.myIndex].childOffsets = visit.childOffsets
+            let offsetCount = visitChildOffsetScratch.count - visit.childOffsetMark
+            let offsetStart = flatChildOffsets.count
+            if offsetCount > 0 {
+                flatChildOffsets.append(contentsOf: visitChildOffsetScratch[visit.childOffsetMark...])
+                visitChildOffsetScratch.removeSubrange(visit.childOffsetMark...)
+            }
+            flat[p.myIndex].childOffsetStart = Int32(offsetStart)
+            flat[p.myIndex].childOffsetCount = Int32(offsetCount)
             let (slot, dirty) = syncFinish(p, childMark: visit.childMark, childrenDirty: visit.childrenDirty)
             if let mark = visit.memo {
                 recordingMemo = mark.wasRecording
                 memoRecords.append(MemoRecord(identity: mark.identity, root: p, nodes: p.myIndex..<flat.count,
                     leaves: mark.firstLeaf..<nonSecretLeaves.count, overflow: mark.firstOverflow..<overflowLeaves.count,
-                    nestedStart: mark.firstRecord))
+                    labelMeasures: mark.firstLabelMeasure..<labelMeasures.count, nestedStart: mark.firstRecord))
                 if !mark.wasRecording {
                     installMemoGroup()
                     if let current = nextMemoSpans[ObjectIdentifier(mark.identity)] {
@@ -964,7 +1150,7 @@ final class RetainedLayoutCoordinator {
         // parent frames on the heap and preserve Taffy's postorder child-list synchronization.
         func syncTree() -> SyncResult {
             var rootKeys: [String: Int] = [:]
-            var next = beginVisit(rootEl, parent: nil, siblingIndex: 0, siblingKeysSeen: &rootKeys)
+            var next = beginVisit(rootEl, parent: nil, siblingIndex: 0, siblingCount: 1, siblingKeysSeen: &rootKeys)
             var stack: [SyncVisit<State>] = []
             while true {
                 switch next {
@@ -974,13 +1160,15 @@ final class RetainedLayoutCoordinator {
                     guard !stack.isEmpty else { return result }
                     let parent = stack.count - 1
                     let offset = result.idx - stack[parent].prepared.myIndex
-                    stack[parent].childOffsets.append(offset)
+                    visitChildOffsetScratch.append(offset)
+                    stack[parent].childCountSoFar += 1
                     if result.dirty { stack[parent].childrenDirty = true }
                     store.pushChild(result.slot)
                 }
                 let parent = stack.count - 1
-                let index = stack[parent].childOffsets.count
-                if index == stack[parent].children.count {
+                let index = stack[parent].childCountSoFar
+                let count = stack[parent].children.count
+                if index == count {
                     next = .finished(finishVisit(stack.removeLast()))
                 } else {
                     let prepared = stack[parent].prepared
@@ -988,7 +1176,8 @@ final class RetainedLayoutCoordinator {
                     let children = stack[parent].children
                     let rows = stack[parent].virtualRows
                     next = children.withUnsafeBufferPointer { buffer in
-                        beginVisit(buffer.baseAddress!.advanced(by: index).pointee, parent: prepared, siblingIndex: index,
+                        beginVisit(buffer.baseAddress!.advanced(by: index).pointee, parent: prepared,
+                                   siblingIndex: index, siblingCount: count,
                                    siblingKeysSeen: &stack[parent].childKeys, sourceRows: rows)
                     }
                 }
@@ -1017,53 +1206,117 @@ final class RetainedLayoutCoordinator {
             height: fitHeight ? .maxContent : .definite(viewport.y)
         )
 
-        let prepared = flat
-        let measureClosure: @Sendable (RuneTaffy.LayoutInput, Int?, RuneTaffy.TaffyStyle) -> RuneTaffy.LayoutOutput = { input, ctx, style in
-            guard let idx = ctx, idx >= 0, idx < prepared.count,
-                  let box = prepared[idx].measure
-            else {
-                return RuneTaffy.LayoutOutput.fromOuterSize(.zero)
+        // Scope closure capture inside a helper so `flat` and `labelMeasures` drop back to
+        // refcount 1 immediately after layout and can be reused without COW copies on `defer`.
+        func runStoreComputeLayout() {
+            let prepared = flat
+            let capturedLabels = labelMeasures
+            store.computeLayout(root: rootSlot, availableSpace: available, rounding: false) { input, ctx, style in
+                guard let idx = ctx, idx >= 0, idx < prepared.count,
+                      let box = prepared[idx].measure
+                else {
+                    return RuneTaffy.LayoutOutput.fromOuterSize(.zero)
+                }
+                let maxW: Float?
+                let isRealLayout: Bool
+                switch input.availableSpace.width {
+                case .definite(let w):
+                    maxW = max(0, w)
+                    isRealLayout = true
+                case .minContent:
+                    maxW = 0
+                    isRealLayout = (input.knownDimensions.width != nil)
+                case .maxContent:
+                    maxW = nil
+                    isRealLayout = (input.knownDimensions.width != nil)
+                }
+                let effectiveMaxW = input.knownDimensions.width.map { max(0, $0) } ?? maxW
+                let measured: Vec2
+                switch box {
+                case .label(let labelIdx):
+                    let m = capturedLabels[Int(labelIdx)]
+                    let nodeId = prepared[idx].runtimeId
+                    if m.widthIndependent, let labelKey = m.labelKey, let record = textLayouts?.map[nodeId],
+                       !record.isInput, record.box.maxWidth == nil, record.box.shapeKey == labelKey {
+                        measured = record.box.shaped.size
+                    } else if m.resolved.truncateFade || m.resolved.advanceRun != nil || m.isClampedOrEllipsis {
+                        var sz = m.resolved.measure(
+                            using: textSystem,
+                            maxWidth: TextBoxGeometry.wrapWidth(effectiveMaxW, scale: scale),
+                            pixelScale: scale
+                        )
+                        if m.resolved.advanceRun == nil, let mw = effectiveMaxW, mw.isFinite {
+                            sz.x = min(sz.x, max(0, mw))
+                        }
+                        measured = sz
+                    } else {
+                        let shapeMaxW: Float? = (m.resolved.style.wrap == .noWrap && m.resolved.style.maxLines == 0)
+                            ? nil : TextBoxGeometry.wrapWidth(effectiveMaxW, scale: scale)
+                        let hasSpans = (m.resolved.spans?.isEmpty == false)
+                        let keep: TextKeep = m.resolved.isSecure ? .secret : .cached
+                        let lBox: TextLayoutBox
+                        if let byLineReq = m.byLineReq {
+                            lBox = textSystem.layoutInput(
+                                text: hasSpans ? "" : m.resolved.displayedText,
+                                spans: m.resolved.spans,
+                                pills: m.resolved.pills,
+                                style: m.resolved.style,
+                                maxWidth: shapeMaxW,
+                                pixelScale: scale,
+                                emitGlyphs: false,
+                                keep: keep,
+                                countAsRebreak: (textLayouts != nil) && (isRealLayout || m.widthIndependent),
+                                request: byLineReq,
+                                forMeasurement: true
+                            )
+                        } else {
+                            lBox = textSystem.layoutKeyed(
+                                retaining: m.labelKey,
+                                intrinsicShapes: m.labelKey != nil && !m.widthIndependent ? textLayouts?.intrinsicShapes : nil,
+                                text: hasSpans ? "" : m.resolved.displayedText,
+                                spans: m.resolved.spans,
+                                pills: m.resolved.pills,
+                                style: m.resolved.style,
+                                maxWidth: shapeMaxW,
+                                pixelScale: scale,
+                                emitGlyphs: false,
+                                keep: keep,
+                                countAsRebreak: (textLayouts != nil) && (isRealLayout || m.widthIndependent),
+                                pretty: m.resolved.pretty, forMeasurement: true
+                            )
+                        }
+                        if !m.resolved.isSecure, isRealLayout || m.widthIndependent, let collector = textLayouts {
+                            collector.map[nodeId] = TextLayoutRecord(box: lBox, isInput: false)
+                        }
+                        measured = lBox.shaped.size
+                    }
+                case .fixed(let size):
+                    measured = size
+                case .content(let measure):
+                    measured = measure(effectiveMaxW, isRealLayout, textLayouts, prepared[idx].runtimeId)
+                case .picture(let ratio):
+                    // Rust's picture measure receives known border-box dimensions, and
+                    // available content-box space when neither side is known.
+                    let p = style.padding, b = style.border, parent = input.parentSize.width
+                    let width = input.knownDimensions.width.map {
+                        $0 + p.left.resolveOrZero(parent) + p.right.resolveOrZero(parent)
+                            + b.left.resolveOrZero(parent) + b.right.resolveOrZero(parent)
+                            + (style.overflow.y == .scroll ? style.scrollbarWidth : 0)
+                    } ?? input.knownDimensions.height.map {
+                        ($0 + p.top.resolveOrZero(parent) + p.bottom.resolveOrZero(parent)
+                            + b.top.resolveOrZero(parent) + b.bottom.resolveOrZero(parent)
+                            + (style.overflow.x == .scroll ? style.scrollbarWidth : 0)) * ratio
+                    } ?? maxW ?? 0
+                    measured = Vec2(width, width / ratio)
+                }
+                return RuneTaffy.LayoutOutput.fromOuterSize(RuneTaffy.Size(
+                    width: input.knownDimensions.width ?? measured.x,
+                    height: input.knownDimensions.height ?? measured.y
+                ))
             }
-            let maxW: Float?
-            let isRealLayout: Bool
-            switch input.availableSpace.width {
-            case .definite(let w):
-                maxW = max(0, w)
-                isRealLayout = true
-            case .minContent:
-                maxW = 0
-                isRealLayout = (input.knownDimensions.width != nil)
-            case .maxContent:
-                maxW = nil
-                isRealLayout = (input.knownDimensions.width != nil)
-            }
-            let effectiveMaxW = input.knownDimensions.width.map { max(0, $0) } ?? maxW
-            let measured: Vec2
-            switch box {
-            case .content(let measure):
-                measured = measure(effectiveMaxW, isRealLayout, textLayouts, prepared[idx].runtimeId)
-            case .picture(let ratio):
-                // Rust's picture measure receives known border-box dimensions, and
-                // available content-box space when neither side is known.
-                let p = style.padding, b = style.border, parent = input.parentSize.width
-                let width = input.knownDimensions.width.map {
-                    $0 + p.left.resolveOrZero(parent) + p.right.resolveOrZero(parent)
-                        + b.left.resolveOrZero(parent) + b.right.resolveOrZero(parent)
-                        + (style.overflow.y == .scroll ? style.scrollbarWidth : 0)
-                } ?? input.knownDimensions.height.map {
-                    ($0 + p.top.resolveOrZero(parent) + p.bottom.resolveOrZero(parent)
-                        + b.top.resolveOrZero(parent) + b.bottom.resolveOrZero(parent)
-                        + (style.overflow.x == .scroll ? style.scrollbarWidth : 0)) * ratio
-                } ?? maxW ?? 0
-                measured = Vec2(width, width / ratio)
-            }
-            return RuneTaffy.LayoutOutput.fromOuterSize(RuneTaffy.Size(
-                width: input.knownDimensions.width ?? measured.x,
-                height: input.knownDimensions.height ?? measured.y
-            ))
         }
 
-        store.computeLayout(root: rootSlot, availableSpace: available, rounding: false, measureLeaf: measureClosure)
+        runStoreComputeLayout()
 
         func ancestorSlots(of index: Int) -> [SlotId] {
             var ancestors: [SlotId] = []
@@ -1087,13 +1340,13 @@ final class RetainedLayoutCoordinator {
                 if anchorStyles[idx] != nil { anchorStyles[idx] = fitted }
                 store.setStyleAndMarkAncestors(flat[idx].slot, style: fitted, ancestors: ancestorSlots(of: idx))
             }
-            store.computeLayout(root: rootSlot, availableSpace: available, rounding: false, measureLeaf: measureClosure)
+            runStoreComputeLayout()
         }
 
         // Flat nodes are in preorder. Walking them backwards leaves each node's solved
         // children at the top of the stack in their original painter/layout order.
         func extract(reusingMemos: Bool = false) -> LayoutEngine.ResultNode {
-            var solved: [(RuneTaffy.Layout, LayoutEngine.ResultNode)] = []
+            solved.removeAll(keepingCapacity: true)
             var remaining = flat.count
             var memoIndex = reusingMemos ? geometryRuns.count - 1 : -1
             var capture: MemoGeometry?
@@ -1123,20 +1376,25 @@ final class RetainedLayoutCoordinator {
                 let node = flat[index]
                 let box = store.layout(node.slot)
                 var content = TaffyBridge.ContentExtent(box)
+                let cStart = Int(node.childOffsetStart)
+                let cCount = Int(node.childOffsetCount)
                 var children: [LayoutEngine.ResultNode] = []
-                children.reserveCapacity(node.childOffsets.count)
-                for offset in node.childOffsets {
-                    let child = flat[index + offset]
-                    let (childBox, result) = solved.removeLast()
-                    var placed = result
-                    if node.flow == .rtl && child.pin == .flowing {
-                        let rect = placed.layout.localRect
-                        placed.layout.localRect = MotionRect.fromXYWH(
-                            box.size.width - rect.x - rect.width, rect.y, rect.width, rect.height
-                        )
+                if cCount > 0 {
+                    children.reserveCapacity(cCount)
+                    for i in cStart..<(cStart + cCount) {
+                        let offset = flatChildOffsets[i]
+                        let child = flat[index + offset]
+                        let (childBox, result) = solved.removeLast()
+                        var placed = result
+                        if node.flow == .rtl && child.pin == .flowing {
+                            let rect = placed.layout.localRect
+                            placed.layout.localRect = MotionRect.fromXYWH(
+                                box.size.width - rect.x - rect.width, rect.y, rect.width, rect.height
+                            )
+                        }
+                        children.append(placed)
+                        content.include(childBox, style: child.contentStyle, content: placed.layout.contentSize)
                     }
-                    children.append(placed)
-                    content.include(childBox, style: child.contentStyle, content: placed.layout.contentSize)
                 }
                 let layout = ComputedLayout(
                     localRect: MotionRect.fromXYWH(box.location.x, box.location.y, box.size.width, box.size.height),
@@ -1168,11 +1426,11 @@ final class RetainedLayoutCoordinator {
                 for (idxPath, vertical, bound) in boundsToApply {
                     var targetIdx: Int? = rootRes.idx
                     for c in idxPath {
-                        guard let cur = targetIdx, c >= 0, c < flat[cur].childOffsets.count else {
+                        guard let cur = targetIdx, c >= 0, c < Int(flat[cur].childOffsetCount) else {
                             targetIdx = nil
                             break
                         }
-                        targetIdx = cur + flat[cur].childOffsets[c]
+                        targetIdx = cur + flatChildOffsets[Int(flat[cur].childOffsetStart) + c]
                     }
                     guard let idx = targetIdx, var style = anchorStyles[idx] else { continue }
                     let dim: RuneTaffy.Dimension = .length(max(0, bound))
@@ -1183,7 +1441,7 @@ final class RetainedLayoutCoordinator {
                     }
                     store.setStyleAndMarkAncestors(flat[idx].slot, style: style, ancestors: ancestorSlots(of: idx))
                 }
-                store.computeLayout(root: rootSlot, availableSpace: available, rounding: false, measureLeaf: measureClosure)
+                runStoreComputeLayout()
             }
         }
 

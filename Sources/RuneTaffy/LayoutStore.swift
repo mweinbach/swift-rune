@@ -77,15 +77,342 @@ public struct SlotChildIter: Sequence, IteratorProtocol, Sendable {
 
 private let unmountedIdx: UInt32 = UInt32.max
 
+/// Flat open-addressed `UInt64 -> UInt32` map using Fibonacci hashing and backward-shift
+/// deletion (zero tombstones, single cache-line probe per entry, no SipHash overhead).
+private struct SlotIndexEntry: Sendable {
+    var key: UInt64 = 0
+    var val: UInt32 = unmountedIdx
+}
+
+private struct SlotIndexMap: Sendable {
+    private var entries: [SlotIndexEntry]
+    private var shift: UInt32
+    private(set) var count: Int = 0
+
+    init(minimumCapacity: Int = 32) {
+        let cap = Self.tableSize(forElements: minimumCapacity)
+        self.entries = Array(repeating: SlotIndexEntry(), count: cap)
+        self.shift = UInt32(64 - cap.trailingZeroBitCount)
+    }
+
+    var capacity: Int { entries.count }
+
+    @inline(__always)
+    private static func tableSize(forElements n: Int) -> Int {
+        let needed = Swift.max(32, (n * 10 + 6) / 7)
+        var cap = 32
+        while cap < needed { cap &<<= 1 }
+        return cap
+    }
+
+    @inline(__always)
+    private func bucket(_ key: UInt64) -> Int {
+        Int((key &* 0x9E37_79B9_7F4A_7C15) &>> shift)
+    }
+
+    @inline(__always)
+    func get(_ key: UInt64) -> UInt32? {
+        let mask = entries.count - 1
+        var idx = bucket(key)
+        return entries.withUnsafeBufferPointer { buf in
+            while true {
+                let entry = buf[idx]
+                if entry.val == unmountedIdx { return nil }
+                if entry.key == key { return entry.val }
+                idx = (idx + 1) & mask
+            }
+        }
+    }
+
+    private mutating func grow() {
+        let newCap = entries.count &<< 1
+        let newShift = UInt32(64 - newCap.trailingZeroBitCount)
+        let mask = newCap - 1
+        var newEntries = Array(repeating: SlotIndexEntry(), count: newCap)
+        newEntries.withUnsafeMutableBufferPointer { dst in
+            entries.withUnsafeBufferPointer { src in
+                for i in 0..<src.count {
+                    let e = src[i]
+                    if e.val == unmountedIdx { continue }
+                    var idx = Int((e.key &* 0x9E37_79B9_7F4A_7C15) &>> newShift)
+                    while dst[idx].val != unmountedIdx {
+                        idx = (idx + 1) & mask
+                    }
+                    dst[idx] = e
+                }
+            }
+        }
+        entries = newEntries
+        shift = newShift
+    }
+
+    @inline(__always)
+    mutating func set(_ key: UInt64, _ value: UInt32) {
+        if (count + 1) * 10 >= entries.count * 7 {
+            grow()
+        }
+        let mask = entries.count - 1
+        var idx = bucket(key)
+        var inserted = false
+        entries.withUnsafeMutableBufferPointer { buf in
+            while true {
+                let v = buf[idx].val
+                if v == unmountedIdx {
+                    buf[idx] = SlotIndexEntry(key: key, val: value)
+                    inserted = true
+                    return
+                }
+                if buf[idx].key == key {
+                    buf[idx].val = value
+                    return
+                }
+                idx = (idx + 1) & mask
+            }
+        }
+        if inserted { count += 1 }
+    }
+
+    @discardableResult
+    mutating func remove(_ key: UInt64) -> UInt32? {
+        let mask = entries.count - 1
+        var idx = bucket(key)
+        while true {
+            let v = entries[idx].val
+            if v == unmountedIdx { return nil }
+            if entries[idx].key == key {
+                count -= 1
+                var hole = idx
+                var cur = (hole + 1) & mask
+                while entries[cur].val != unmountedIdx {
+                    let ideal = bucket(entries[cur].key)
+                    if ((hole &- ideal) & mask) < ((cur &- ideal) & mask) {
+                        entries[hole] = entries[cur]
+                        hole = cur
+                    }
+                    cur = (cur + 1) & mask
+                }
+                entries[hole].val = unmountedIdx
+                return v
+            }
+            idx = (idx + 1) & mask
+        }
+    }
+
+    @inline(__always)
+    func forEach(_ body: (UInt64, UInt32) -> Void) {
+        for i in entries.indices {
+            let e = entries[i]
+            if e.val != unmountedIdx {
+                body(e.key, e.val)
+            }
+        }
+    }
+
+    @inline(__always)
+    func forEachValue(_ body: (UInt32) -> Void) {
+        for i in entries.indices {
+            let v = entries[i].val
+            if v != unmountedIdx {
+                body(v)
+            }
+        }
+    }
+}
+
+/// Rare unrounded layout fields moved out of `RetainedSlot` so common nodes fit in 200 bytes.
+private struct ColdLayoutAux: Sendable {
+    var contentSize: Size<Float> = .zero
+    var scrollbarSize: Size<Float> = .zero
+    var border: Rect<Float> = .zero
+    var padding: Rect<Float> = .zero
+    var margin: Rect<Float> = .zero
+}
+
 private struct RetainedSlot: Sendable {
+    private static let childLenMask: UInt32 = 0x03FF_FFFF
+    private static let hasContextBit: UInt32 = 1 << 26
+    private static let mutatedBit: UInt32 = 1 << 27
+    private static let contentModeShift: UInt32 = 28
+    private static let edgesModeShift: UInt32 = 30
+    private static let coldAuxMask: UInt32 = 0xA000_0000 // contentMode == 2 || edgesMode == 2
+
     var style: TaffyStyle = .default
     var cache: Cache = Cache()
-    var unroundedLayout: Layout = .zero
     var measure: UInt64 = 0
-    var hasContext: Bool = false
-    var mutated: Bool = false
-    var childStart: Int = 0
-    var childLen: Int = 0
+    var location: Point<Float> = .zero
+    var size: Size<Float> = .zero
+    var order: UInt32 = 0
+    var childStart: UInt32 = 0
+    var childLenAndFlags: UInt32 = 0
+
+    @inline(__always)
+    var childLen: Int {
+        get { Int(childLenAndFlags & Self.childLenMask) }
+        set { childLenAndFlags = (childLenAndFlags & ~Self.childLenMask) | (UInt32(newValue) & Self.childLenMask) }
+    }
+
+    @inline(__always)
+    var hasContext: Bool {
+        get { (childLenAndFlags & Self.hasContextBit) != 0 }
+        set {
+            if newValue { childLenAndFlags |= Self.hasContextBit }
+            else { childLenAndFlags &= ~Self.hasContextBit }
+        }
+    }
+
+    @inline(__always)
+    var mutated: Bool {
+        get { (childLenAndFlags & Self.mutatedBit) != 0 }
+        set {
+            if newValue { childLenAndFlags |= Self.mutatedBit }
+            else { childLenAndFlags &= ~Self.mutatedBit }
+        }
+    }
+
+    /// 0 = `.zero`, 1 = same as `size`, 2 = stored in `coldAux`.
+    @inline(__always)
+    var contentSizeMode: UInt32 {
+        get { (childLenAndFlags >> Self.contentModeShift) & 3 }
+        set {
+            childLenAndFlags = (childLenAndFlags & ~(3 << Self.contentModeShift)) | ((newValue & 3) << Self.contentModeShift)
+        }
+    }
+
+    /// 0 = all edges `.zero`, 1 = `padding == style.inlinePaddingValues` & other edges `.zero`, 2 = stored in `coldAux`.
+    @inline(__always)
+    var edgesMode: UInt32 {
+        get { (childLenAndFlags >> Self.edgesModeShift) & 3 }
+        set {
+            childLenAndFlags = (childLenAndFlags & ~(3 << Self.edgesModeShift)) | ((newValue & 3) << Self.edgesModeShift)
+        }
+    }
+
+    @inline(__always)
+    var hasColdAux: Bool {
+        (childLenAndFlags & Self.coldAuxMask) != 0
+    }
+
+    @inline(__always)
+    func reconstructLayout(slotRaw: UInt32, coldAux: [UInt32: ColdLayoutAux]) -> Layout {
+        let cMode = contentSizeMode
+        let eMode = edgesMode
+        if !hasColdAux {
+            let cs = cMode == 1 ? size : .zero
+            let pad = eMode == 1 ? style.inlinePaddingValues : .zero
+            return Layout(
+                order: order,
+                location: location,
+                size: size,
+                contentSize: cs,
+                scrollbarSize: .zero,
+                border: .zero,
+                padding: pad,
+                margin: .zero
+            )
+        }
+        let aux = coldAux[slotRaw] ?? ColdLayoutAux()
+        let cs = cMode == 2 ? aux.contentSize : (cMode == 1 ? size : .zero)
+        let pad = eMode == 2 ? aux.padding : (eMode == 1 ? style.inlinePaddingValues : .zero)
+        let border = eMode == 2 ? aux.border : .zero
+        let margin = eMode == 2 ? aux.margin : .zero
+        let sb = eMode == 2 ? aux.scrollbarSize : .zero
+        return Layout(
+            order: order,
+            location: location,
+            size: size,
+            contentSize: cs,
+            scrollbarSize: sb,
+            border: border,
+            padding: pad,
+            margin: margin
+        )
+    }
+
+    @inline(__always)
+    func reconstructBoxLayout(slotRaw: UInt32, coldAux: [UInt32: ColdLayoutAux]) -> BoxLayout {
+        let eMode = edgesMode
+        if eMode == 0 {
+            return BoxLayout(x: location.x, y: location.y, w: size.width, h: size.height, inset: (0, 0, 0, 0))
+        }
+        if eMode == 1 {
+            let p = style.inlinePaddingValues
+            return BoxLayout(x: location.x, y: location.y, w: size.width, h: size.height,
+                             inset: (p.left, p.top, p.right, p.bottom))
+        }
+        let aux = coldAux[slotRaw] ?? ColdLayoutAux()
+        return BoxLayout(
+            x: location.x,
+            y: location.y,
+            w: size.width,
+            h: size.height,
+            inset: (
+                aux.padding.left + aux.border.left,
+                aux.padding.top + aux.border.top,
+                aux.padding.right + aux.border.right,
+                aux.padding.bottom + aux.border.bottom
+            )
+        )
+    }
+
+    @inline(__always)
+    mutating func storeUnroundedLayout(_ layout: Layout, slotRaw: UInt32, coldAux: inout [UInt32: ColdLayoutAux]) {
+        location = layout.location
+        size = layout.size
+        order = layout.order
+
+        let cMode: UInt32
+        if layout.contentSize == .zero {
+            cMode = 0
+        } else if layout.contentSize == layout.size {
+            cMode = 1
+        } else {
+            cMode = 2
+        }
+
+        let eMode: UInt32
+        if layout.border == .zero && layout.margin == .zero && layout.scrollbarSize == .zero {
+            if layout.padding == .zero {
+                eMode = 0
+            } else if !style.hasPercentPadding && layout.padding == style.inlinePaddingValues {
+                eMode = 1
+            } else {
+                eMode = 2
+            }
+        } else {
+            eMode = 2
+        }
+
+        let hadCold = hasColdAux
+        contentSizeMode = cMode
+        edgesMode = eMode
+        if cMode == 2 || eMode == 2 {
+            coldAux[slotRaw] = ColdLayoutAux(
+                contentSize: layout.contentSize,
+                scrollbarSize: layout.scrollbarSize,
+                border: layout.border,
+                padding: layout.padding,
+                margin: layout.margin
+            )
+        } else if hadCold {
+            coldAux.removeValue(forKey: slotRaw)
+        }
+    }
+
+    /// Preserve previously computed padding if style changes before the next layout pass.
+    @inline(__always)
+    mutating func preserveStylePaddingIfNeeded(
+        newStyle: TaffyStyle,
+        slotRaw: UInt32,
+        coldAux: inout [UInt32: ColdLayoutAux]
+    ) {
+        guard edgesMode == 1 else { return }
+        if newStyle.hasPercentPadding || newStyle.inlinePaddingValues != style.inlinePaddingValues {
+            var aux = contentSizeMode == 2 ? (coldAux[slotRaw] ?? ColdLayoutAux()) : ColdLayoutAux()
+            aux.padding = style.inlinePaddingValues
+            coldAux[slotRaw] = aux
+            edgesMode = 2
+        }
+    }
 }
 
 /// Retained flat-arena layout store integrated with commit-pass reconciliation
@@ -93,12 +420,13 @@ private struct RetainedSlot: Sendable {
 public struct LayoutStore: Sendable {
     private var slots: [RetainedSlot] = []
     private var nodeIdx: [UInt32] = []
-    private var byKey: [UInt64: UInt32] = [:]
+    private var byKey: SlotIndexMap
     private var free: [UInt32] = []
     private var prevChildren: [UInt32] = []
     private var currChildren: [UInt32] = []
     private var childScratch: [UInt32] = []
     private var mutatedSlots: [UInt32] = []
+    private var coldAux: [UInt32: ColdLayoutAux] = [:]
     // Rune presents unrounded geometry; allocate overrides only for callers requesting pixel rounding.
     private var roundedLayouts: [UInt32: Layout] = [:]
     private var prevLive: Int = 0
@@ -107,7 +435,7 @@ public struct LayoutStore: Sendable {
     public init(capacity: Int = 32) {
         slots.reserveCapacity(capacity)
         nodeIdx.reserveCapacity(capacity)
-        byKey.reserveCapacity(capacity)
+        byKey = SlotIndexMap(minimumCapacity: capacity)
         prevChildren.reserveCapacity(capacity)
         currChildren.reserveCapacity(capacity)
         childScratch.reserveCapacity(64)
@@ -121,8 +449,8 @@ public struct LayoutStore: Sendable {
         swap(&prevChildren, &currChildren)
         currChildren.removeAll(keepingCapacity: true)
         childScratch.removeAll(keepingCapacity: true)
-        for i in nodeIdx.indices {
-            nodeIdx[i] = unmountedIdx
+        nodeIdx.withUnsafeMutableBufferPointer { buf in
+            buf.update(repeating: unmountedIdx)
         }
         prevLive = byKey.count
         visitedExisting = 0
@@ -138,14 +466,14 @@ public struct LayoutStore: Sendable {
 
     public func canReuse(key: UInt64, slot: SlotId) -> Bool {
         let idx = Int(slot.rawValue)
-        return byKey[key] == slot.rawValue
+        return byKey.get(key) == slot.rawValue
             && idx < nodeIdx.count
             && nodeIdx[idx] == unmountedIdx
             && !slots[idx].mutated
     }
 
     public func isUsedThisCommit(key: UInt64) -> Bool {
-        guard let s = byKey[key] else { return false }
+        guard let s = byKey.get(key) else { return false }
         let idx = Int(s)
         return idx < nodeIdx.count && nodeIdx[idx] != unmountedIdx
     }
@@ -156,13 +484,17 @@ public struct LayoutStore: Sendable {
             visitedExisting += 1
         }
         nodeIdx[idx] = nodeIndex
-        let oldStart = slots[idx].childStart
+        let oldStart = Int(slots[idx].childStart)
         let len = slots[idx].childLen
         let newStart = currChildren.count
         if len > 0 {
+            let needed = newStart + len
+            if needed > currChildren.capacity {
+                currChildren.reserveCapacity(Swift.max(needed, newStart + (newStart >> 1)))
+            }
             currChildren.append(contentsOf: prevChildren[oldStart..<(oldStart + len)])
         }
-        slots[idx].childStart = newStart
+        slots[idx].childStart = UInt32(newStart)
     }
 
     /// Rebases a sequence of `(oldKey, newKey, slot, nodeIndex)` entries when a memoized subtree
@@ -170,19 +502,20 @@ public struct LayoutStore: Sendable {
     public mutating func rekeyAndReuseBatch<S: Sequence>(_ items: S) where S.Element == (UInt64, UInt64, SlotId, UInt32) {
         let batch = Array(items)
         for (oldKey, _, slot, _) in batch {
-            let removed = byKey.removeValue(forKey: oldKey)
+            let removed = byKey.remove(oldKey)
             assert(removed == slot.rawValue, "rekeyAndReuseBatch: oldKey \(oldKey) did not map to slot \(slot.rawValue)")
         }
         for (_, newKey, slot, nodeIndex) in batch {
-            if let stale = byKey.removeValue(forKey: newKey) {
+            if let stale = byKey.remove(newKey) {
                 roundedLayouts.removeValue(forKey: stale)
+                coldAux.removeValue(forKey: stale)
                 slots[Int(stale)] = RetainedSlot()
                 free.append(stale)
                 if prevLive > 0 {
                     prevLive -= 1
                 }
             }
-            byKey[newKey] = slot.rawValue
+            byKey.set(newKey, slot.rawValue)
             reuseSlot(slot, nodeIndex: nodeIndex)
         }
     }
@@ -196,12 +529,22 @@ public struct LayoutStore: Sendable {
         childMark: Int,
         childrenDirty: Bool
     ) -> (SlotId, Bool) {
-        let newKids = childScratch[childMark...]
+        let childLen = childScratch.count - childMark
         let childStart = currChildren.count
-        let childLen = newKids.count
-        currChildren.append(contentsOf: newKids)
+        if childLen == 1 {
+            currChildren.append(childScratch[childMark])
+        } else if childLen == 2 {
+            currChildren.append(childScratch[childMark])
+            currChildren.append(childScratch[childMark + 1])
+        } else if childLen > 0 {
+            let needed = childStart + childLen
+            if needed > currChildren.capacity {
+                currChildren.reserveCapacity(Swift.max(needed, childStart + (childStart >> 1)))
+            }
+            currChildren.append(contentsOf: childScratch[childMark...])
+        }
 
-        if let s = byKey[key] {
+        if let s = byKey.get(key) {
             let idx = Int(s)
             let firstVisit = nodeIdx[idx] == unmountedIdx
             if firstVisit {
@@ -209,66 +552,94 @@ public struct LayoutStore: Sendable {
             }
             nodeIdx[idx] = nodeIndex
 
-            let oldStart = slots[idx].childStart
-            let oldEnd = oldStart + slots[idx].childLen
-            let kidsChanged: Bool
-            if firstVisit {
-                kidsChanged = !prevChildren[oldStart..<oldEnd].elementsEqual(newKids)
-            } else {
-                kidsChanged = !currChildren[oldStart..<oldEnd].elementsEqual(currChildren[childStart...])
+            var dirty = false
+            var markMutated = false
+            slots.withUnsafeMutableBufferPointer { slotBuf in
+                let oldStart = Int(slotBuf[idx].childStart)
+                let oldLen = slotBuf[idx].childLen
+                let kidsChanged: Bool
+                if oldLen != childLen {
+                    kidsChanged = true
+                } else if childLen == 0 {
+                    kidsChanged = false
+                } else if firstVisit {
+                    kidsChanged = prevChildren.withUnsafeBufferPointer { prevBuf in
+                        childScratch.withUnsafeBufferPointer { scratchBuf in
+                            for k in 0..<childLen {
+                                if prevBuf[oldStart + k] != scratchBuf[childMark + k] { return true }
+                            }
+                            return false
+                        }
+                    }
+                } else {
+                    kidsChanged = currChildren.withUnsafeBufferPointer { currBuf in
+                        for k in 0..<childLen {
+                            if currBuf[oldStart + k] != currBuf[childStart + k] { return true }
+                        }
+                        return false
+                    }
+                }
+
+                let styleChanged = slotBuf[idx].style != style
+                if styleChanged {
+                    slotBuf[idx].preserveStylePaddingIfNeeded(newStyle: style, slotRaw: s, coldAux: &coldAux)
+                    slotBuf[idx].style = style
+                }
+                slotBuf[idx].childStart = UInt32(childStart)
+                slotBuf[idx].childLen = childLen
+
+                let hadMeasure = slotBuf[idx].hasContext
+                let hasMeasure = measure != nil
+                let newM = measure ?? 0
+                let measureChanged = hadMeasure != hasMeasure || (hasMeasure && (forceMeasureDirty || slotBuf[idx].measure != newM))
+
+                let wasMutated = slotBuf[idx].mutated
+                let nowMutated = wasMutated || styleChanged || kidsChanged || measureChanged
+                if hadMeasure != hasMeasure { slotBuf[idx].hasContext = hasMeasure }
+                if wasMutated != nowMutated { slotBuf[idx].mutated = nowMutated }
+                if hasMeasure { slotBuf[idx].measure = newM } else if hadMeasure { slotBuf[idx].measure = 0 }
+
+                dirty = styleChanged || kidsChanged || measureChanged || childrenDirty
+                if dirty {
+                    slotBuf[idx].cache.clear()
+                }
+                markMutated = nowMutated && !wasMutated
             }
-
-            let styleChanged = slots[idx].style != style
-            if styleChanged {
-                slots[idx].style = style
-            }
-            slots[idx].childStart = childStart
-            slots[idx].childLen = childLen
-
-            let hadMeasure = slots[idx].hasContext
-            let hasMeasure = measure != nil
-            let newM = measure ?? 0
-            let measureChanged = hadMeasure != hasMeasure || (hasMeasure && (forceMeasureDirty || slots[idx].measure != newM))
-
-            let wasMutated = slots[idx].mutated
-            let nowMutated = wasMutated || styleChanged || kidsChanged || measureChanged
-            slots[idx].hasContext = hasMeasure
-            slots[idx].mutated = nowMutated
-            slots[idx].measure = newM
-
-            let dirty = styleChanged || kidsChanged || measureChanged || childrenDirty
-            if dirty {
-                slots[idx].cache.clear()
-            }
-            if nowMutated && !wasMutated {
+            if markMutated {
                 mutatedSlots.append(s)
             }
-            childScratch.removeSubrange(childMark...)
+            if childLen > 0 {
+                childScratch.removeLast(childLen)
+            }
             return (SlotId(s), dirty)
         } else {
-            childScratch.removeSubrange(childMark...)
-            let slot = RetainedSlot(
-                style: style,
-                cache: Cache(),
-                unroundedLayout: .zero,
-                measure: measure ?? 0,
-                hasContext: measure != nil,
-                mutated: true,
-                childStart: childStart,
-                childLen: childLen
-            )
+            if childLen > 0 {
+                childScratch.removeLast(childLen)
+            }
+            var slot = RetainedSlot()
+            slot.style = style
+            slot.measure = measure ?? 0
+            slot.childStart = UInt32(childStart)
+            slot.childLen = childLen
+            slot.hasContext = measure != nil
+            slot.mutated = true
             let s: UInt32
             if let freeS = free.popLast() {
                 s = freeS
                 slots[Int(freeS)] = slot
                 nodeIdx[Int(freeS)] = nodeIndex
             } else {
+                if slots.count == slots.capacity {
+                    let nextCap = Swift.max(32, slots.count + (slots.count >> 1))
+                    slots.reserveCapacity(nextCap)
+                    nodeIdx.reserveCapacity(nextCap)
+                }
                 s = UInt32(slots.count)
                 slots.append(slot)
                 nodeIdx.append(nodeIndex)
             }
             mutatedSlots.append(s)
-            byKey[key] = s
+            byKey.set(key, s)
             return (SlotId(s), true)
         }
     }
@@ -276,16 +647,17 @@ public struct LayoutStore: Sendable {
     public mutating func finishFlatten() {
         if visitedExisting == prevLive { return }
         var toRemove: [UInt64] = []
-        for (k, s) in byKey {
+        byKey.forEach { k, s in
             if nodeIdx[Int(s)] == unmountedIdx {
                 roundedLayouts.removeValue(forKey: s)
+                coldAux.removeValue(forKey: s)
                 slots[Int(s)] = RetainedSlot()
                 free.append(s)
                 toRemove.append(k)
             }
         }
         for k in toRemove {
-            byKey.removeValue(forKey: k)
+            byKey.remove(k)
         }
     }
 
@@ -314,10 +686,9 @@ public struct LayoutStore: Sendable {
         newSlots.reserveCapacity(cap)
         var newNodeIdx: [UInt32] = []
         newNodeIdx.reserveCapacity(cap)
-        var newByKey: [UInt64: UInt32] = [:]
-        newByKey.reserveCapacity(cap)
+        var newByKey = SlotIndexMap(minimumCapacity: cap)
 
-        for (key, oldRaw) in byKey {
+        byKey.forEach { key, oldRaw in
             let oldS = Int(oldRaw)
             let newS = UInt32(newSlots.count)
             remapTable[oldS] = newS
@@ -326,9 +697,21 @@ public struct LayoutStore: Sendable {
             _ = slot.cache.clear()
             let me = nodeIdx[oldS]
             remap(me, SlotId(newS))
-            newByKey[key] = newS
+            newByKey.set(key, newS)
             newSlots.append(slot)
             newNodeIdx.append(me)
+        }
+
+        if !coldAux.isEmpty {
+            var nextAux: [UInt32: ColdLayoutAux] = [:]
+            nextAux.reserveCapacity(coldAux.count)
+            for (oldKey, aux) in coldAux {
+                let mapped = remapTable[Int(oldKey)]
+                if mapped != unmountedIdx {
+                    nextAux[mapped] = aux
+                }
+            }
+            coldAux = nextAux
         }
 
         if !roundedLayouts.isEmpty {
@@ -372,9 +755,9 @@ public struct LayoutStore: Sendable {
     }
 
     public func childIds(_ parent: SlotId) -> SlotChildIter {
-        let s = slots[Int(parent.rawValue)]
-        let start = s.childStart
-        let end = start + s.childLen
+        let idx = Int(parent.rawValue)
+        let start = Int(slots[idx].childStart)
+        let end = start + slots[idx].childLen
         return SlotChildIter(currChildren[start..<end])
     }
 
@@ -383,24 +766,26 @@ public struct LayoutStore: Sendable {
     }
 
     public func boxLayout(_ id: SlotId) -> BoxLayout {
-        BoxLayout.from(slots[Int(id.rawValue)].unroundedLayout)
+        let idx = Int(id.rawValue)
+        return slots[idx].reconstructBoxLayout(slotRaw: id.rawValue, coldAux: coldAux)
     }
 
     public func layout(_ id: SlotId) -> Layout {
         if !roundedLayouts.isEmpty, let rounded = roundedLayouts[id.rawValue] { return rounded }
-        return slots[Int(id.rawValue)].unroundedLayout
+        let idx = Int(id.rawValue)
+        return slots[idx].reconstructLayout(slotRaw: id.rawValue, coldAux: coldAux)
     }
 
     public func mountedNodeIndex(key: UInt64) -> Int? {
-        guard let s = byKey[key] else { return nil }
+        guard let s = byKey.get(key) else { return nil }
         let idx = nodeIdx[Int(s)]
         return idx == unmountedIdx ? nil : Int(idx)
     }
 
     public func measureHash(key: UInt64) -> UInt64?? {
-        guard let s = byKey[key] else { return nil }
-        let slot = slots[Int(s)]
-        return .some(slot.hasContext ? slot.measure : nil)
+        guard let s = byKey.get(key) else { return nil }
+        let idx = Int(s)
+        return .some(slots[idx].hasContext ? slots[idx].measure : nil)
     }
 
     public mutating func setStyleAndMarkAncestors(
@@ -413,6 +798,7 @@ public struct LayoutStore: Sendable {
             slots[idx].mutated = true
             mutatedSlots.append(id.rawValue)
         }
+        slots[idx].preserveStylePaddingIfNeeded(newStyle: style, slotRaw: id.rawValue, coldAux: &coldAux)
         slots[idx].style = style
         slots[idx].cache.clear()
         for anc in ancestors {
@@ -432,7 +818,7 @@ public struct LayoutStore: Sendable {
     }
 
     public mutating func markAllDirty() {
-        for s in byKey.values {
+        byKey.forEachValue { s in
             slots[Int(s)].cache.clear()
         }
     }
@@ -450,6 +836,7 @@ public struct LayoutStore: Sendable {
         )
         // Give the layout pass unique storage while it writes caches and solved rectangles.
         swap(&slots, &adapter.slots)
+        swap(&coldAux, &adapter.coldAux)
         swap(&roundedLayouts, &adapter.roundedLayouts)
         let rootNode = root.toNodeId
         computeRootLayout(tree: adapter, root: rootNode, availableSpace: availableSpace)
@@ -459,6 +846,7 @@ public struct LayoutStore: Sendable {
             clearRounding(adapter: adapter, node: rootNode)
         }
         swap(&roundedLayouts, &adapter.roundedLayouts)
+        swap(&coldAux, &adapter.coldAux)
         swap(&slots, &adapter.slots)
     }
 
@@ -476,12 +864,13 @@ public struct LayoutStore: Sendable {
                 * MemoryLayout<UInt32>.stride
         var coldStyleBytes = 0
         var coldCacheBytes = 0
-        for s in byKey.values {
-            let slot = slots[Int(s)]
-            coldStyleBytes += slot.style.heapBytes()
-            coldCacheBytes += slot.cache.heapBytes()
+        byKey.forEachValue { s in
+            let idx = Int(s)
+            coldStyleBytes += slots[idx].style.heapBytes()
+            coldCacheBytes += slots[idx].cache.heapBytes()
         }
         let coldAuxBytes = roundedLayouts.capacity * (MemoryLayout<UInt32>.stride + MemoryLayout<Layout>.stride)
+            + coldAux.capacity * (MemoryLayout<UInt32>.stride + MemoryLayout<ColdLayoutAux>.stride)
         let total = inlineBufferBytes + coldStyleBytes + coldCacheBytes + coldAuxBytes
         return StorageStats(
             liveNodes: byKey.count,
@@ -543,6 +932,7 @@ extension LayoutEngine {
 private final class LayoutStoreAdapter: LayoutTree {
     var containerDepth: Int = 0
     var slots: [RetainedSlot] = []
+    var coldAux: [UInt32: ColdLayoutAux] = [:]
     var roundedLayouts: [UInt32: Layout] = [:]
     let nodeIdx: [UInt32]
     let currChildren: [UInt32]
@@ -558,47 +948,58 @@ private final class LayoutStoreAdapter: LayoutTree {
         self.measureLeaf = measureLeaf
     }
 
+    @inline(__always)
     func childCount(_ node: NodeId) -> Int {
         slots[node.index].childLen
     }
 
+    @inline(__always)
     func childId(_ node: NodeId, at index: Int) -> NodeId {
-        let start = slots[node.index].childStart
+        let start = Int(slots[node.index].childStart)
         return NodeId(UInt64(currChildren[start + index]))
     }
 
+    @inline(__always)
     func style(_ node: NodeId) -> TaffyStyle {
         slots[node.index].style
     }
 
+    @inline(__always)
     func unroundedLayout(_ node: NodeId) -> Layout {
-        slots[node.index].unroundedLayout
+        let idx = node.index
+        return slots[idx].reconstructLayout(slotRaw: UInt32(idx), coldAux: coldAux)
     }
 
+    @inline(__always)
     func setUnroundedLayout(_ node: NodeId, _ layout: Layout) {
-        slots[node.index].unroundedLayout = layout
+        let idx = node.index
+        slots[idx].storeUnroundedLayout(layout, slotRaw: UInt32(idx), coldAux: &coldAux)
     }
 
+    @inline(__always)
     func setFinalLayout(_ node: NodeId, _ layout: Layout) {
         roundedLayouts[UInt32(node.index)] = layout
     }
 
+    @inline(__always)
     func cacheClear(_ node: NodeId) {
         slots[node.index].cache.clear()
     }
 
+    @inline(__always)
     func cacheGet(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput? {
         slots[node.index].cache.get(input)
     }
 
+    @inline(__always)
     func cacheStore(_ node: NodeId, _ input: LayoutInput, _ output: LayoutOutput) {
         slots[node.index].cache.store(input, output: output)
     }
 
-    func measureLeafNode(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput {
+    @inline(__always)
+    func measureLeafNode(_ node: NodeId, _ style: TaffyStyle, _ input: LayoutInput) -> LayoutOutput {
         let idx = node.index
-        let slot = slots[idx]
-        let ctx: Int? = slot.hasContext ? Int(nodeIdx[idx]) : nil
-        return measureLeaf(input, ctx, slot.style)
+        let ctx: Int? = slots[idx].hasContext ? Int(nodeIdx[idx]) : nil
+        return measureLeaf(input, ctx, style)
     }
 }

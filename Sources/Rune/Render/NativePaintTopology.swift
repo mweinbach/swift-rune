@@ -110,10 +110,15 @@ extension Runtime {
         var exits: [FlatNode] = []
         var dissolveIndices: [Int] = []
         var hasSticky = false
+        var hasStickyNodes = false
         var hasHolds = false
         var hasRaised = false
         var hasGroupOpacity = false
         var hasPressColor = false
+        var hasAnchors = false
+        var hasTraceNamespace = false
+        var hasFlightId = false
+        var hasGroupColor = false
 
         /// Remounts may change every row ID while leaving the slot permutation and edges intact.
         /// Compare scene order and parent IDs at the old slots without indexing by ID again.
@@ -158,6 +163,25 @@ extension Runtime {
                     topology.identity[i].id = frame.nodes[i].id
                     topology.identity[i].parent = frame.nodes[i].parent
                 }
+                var remountAnchors = false
+                var remountTraceNs = false
+                var remountFlightId = false
+                var remountGroupColor = false
+                flatNodes.withUnsafeBufferPointer { mounted in
+                    guard let base = mounted.baseAddress else { return }
+                    for i in 0..<mounted.count {
+                        (base + i).pointee.element.withValuePointer { elPtr in
+                            if elPtr.pointee.anchor != nil { remountAnchors = true }
+                            if elPtr.pointee.traceNamespaceValue != nil { remountTraceNs = true }
+                            if elPtr.pointee.flightId != nil { remountFlightId = true }
+                            if elPtr.pointee.groupColor != nil { remountGroupColor = true }
+                        }
+                    }
+                }
+                topology.hasAnchors = remountAnchors
+                topology.hasTraceNamespace = remountTraceNs
+                topology.hasFlightId = remountFlightId
+                topology.hasGroupColor = remountGroupColor
                 nativePaintTopology = topology
                 return topology
             }
@@ -165,9 +189,10 @@ extension Runtime {
 
         var tree = NativePaintTopology()
         tree.hasHolds = holds
-        tree.hasSticky = holds || flatNodes.withUnsafeBufferPointer { nodes in
+        tree.hasStickyNodes = flatNodes.withUnsafeBufferPointer { nodes in
             nodes.indices.contains { nodes[$0].paintTraits.contains(.sticky) }
         }
+        tree.hasSticky = holds || tree.hasStickyNodes
         tree.order.reserveCapacity(frame.nodes.count)
         tree.identity.reserveCapacity(frame.nodes.count)
         // A public, synthetic frame can override the ordered samples through its keyed poses.
@@ -182,12 +207,24 @@ extension Runtime {
                     slot = mounted[index].index
                     z = mounted[index].zOrder
                     traits = mounted[index].paintTraits
+                    if let base = mounted.baseAddress {
+                        (base + index).pointee.element.withValuePointer { elPtr in
+                            if elPtr.pointee.anchor != nil { tree.hasAnchors = true }
+                            if elPtr.pointee.traceNamespaceValue != nil { tree.hasTraceNamespace = true }
+                            if elPtr.pointee.flightId != nil { tree.hasFlightId = true }
+                            if elPtr.pointee.groupColor != nil { tree.hasGroupColor = true }
+                        }
+                    }
                 } else if let exiting = exitingSnapshots[p.id] {
                     slot = ~tree.exits.count
                     tree.exitingSlot[p.id] = mounted.count + tree.exits.count
                     tree.exits.append(exiting)
                     z = exiting.zOrder
                     traits = exiting.paintTraits
+                    if exiting.el.anchor != nil { tree.hasAnchors = true }
+                    if exiting.el.traceNamespaceValue != nil { tree.hasTraceNamespace = true }
+                    if exiting.el.flightId != nil { tree.hasFlightId = true }
+                    if exiting.el.groupColor != nil { tree.hasGroupColor = true }
                 } else {
                     continue
                 }

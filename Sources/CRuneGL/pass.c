@@ -21,8 +21,9 @@
 struct RuneGLPassDevice {
     RuneGLAPI gl;
     GLuint vao, uniforms, transparent;
+    size_t uniforms_capacity;
     GLint max_size;
-    int es;
+    int es, check_errors;
     GLuint (RUNE_GL_CALL *GetUniformBlockIndex)(GLuint, const GLchar *);
     void (RUNE_GL_CALL *GetActiveUniformBlockiv)(GLuint, GLuint, GLenum, GLint *);
     void (RUNE_GL_CALL *BindBufferBase)(GLenum, GLuint, GLuint);
@@ -66,6 +67,8 @@ RuneGLPassDevice *rune_gl_pass_open(RuneGLResolve resolve, char *error, size_t s
     const char *version = (const char *)d->gl.GetString(GL_VERSION);
     if (!version) { free(d); fail(error, size, "GL passes require a current context"); return NULL; }
     d->es = strncmp(version, "OpenGL ES", 9) == 0;
+    const char *check_env = getenv("RUNE_GL_CHECK_ERRORS");
+    d->check_errors = check_env && strcmp(check_env, "1") == 0;
     d->gl.GetIntegerv(GL_MAX_TEXTURE_SIZE, &d->max_size);
     d->gl.GenVertexArrays(1, &d->vao);
     d->gl.GenBuffers(1, &d->uniforms);
@@ -164,7 +167,14 @@ int rune_gl_pass_draw_instances(RuneGLPassDevice *d, const RuneGLPassProgram *p,
     gl->BindVertexArray(d->vao);
     if (p->block_size) {
         gl->BindBuffer(RUNE_GL_UNIFORM_BUFFER, d->uniforms);
-        gl->BufferData(RUNE_GL_UNIFORM_BUFFER, (GLsizeiptr)bytes, uniforms, GL_STREAM_DRAW);
+        if (bytes > d->uniforms_capacity) {
+            size_t cap = d->uniforms_capacity ? d->uniforms_capacity : 256;
+            while (cap < bytes && cap <= (size_t)PTRDIFF_MAX / 2) cap *= 2;
+            if (cap < bytes) cap = bytes;
+            gl->BufferData(RUNE_GL_UNIFORM_BUFFER, (GLsizeiptr)cap, NULL, GL_STREAM_DRAW);
+            d->uniforms_capacity = cap;
+        }
+        gl->BufferSubData(RUNE_GL_UNIFORM_BUFFER, 0, (GLsizeiptr)bytes, uniforms);
         d->BindBufferBase(RUNE_GL_UNIFORM_BUFFER, 0, d->uniforms);
     }
     for (size_t i = 0; i < 16; ++i) {
@@ -174,7 +184,7 @@ int rune_gl_pass_draw_instances(RuneGLPassDevice *d, const RuneGLPassProgram *p,
         gl->BindTexture(GL_TEXTURE_2D, (i < nt && textures[i]) ? textures[i] : d->transparent);
     }
     gl->DrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, instances);
-    return check(d, error, size, "GL effect draw");
+    return d->check_errors ? check(d, error, size, "GL effect draw") : 1;
 }
 
 int rune_gl_pass_draw(RuneGLPassDevice *d, const RuneGLPassProgram *p, GLuint framebuffer,
