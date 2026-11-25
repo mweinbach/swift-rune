@@ -1,8 +1,156 @@
 # swift-rune
 
-A Swift 6.4 port of [anomalyco/rune](https://github.com/anomalyco/rune), a GPU-rendered declarative UI framework for **macOS**, **iOS / iPadOS / tvOS / visionOS**, **Windows**, **Linux**, **Android**, and **WebAssembly (`wasm32-unknown-wasip1`)**, with its own layout engine, analytic spring & scene animation runtime, glyph atlas, CPU reference rasterizer, and component kit.
+[![Swift 6.4+](https://img.shields.io/badge/Swift-6.4%2B-F05138?logo=swift&logoColor=white)](https://www.swift.org/)
+[![Platforms](https://img.shields.io/badge/Platforms-macOS%20%7C%20iOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Android%20%7C%20Wasm-blue)](#cross-platform-architecture--builds)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+A **SwiftPM** cross-platform, GPU-rendered declarative UI framework in Swift 6.4 — a port of [anomalyco/rune](https://github.com/anomalyco/rune) for **macOS**, **iOS / iPadOS / tvOS / visionOS**, **Windows**, **Linux**, **Android**, and **WebAssembly (`wasm32-unknown-wasip1`)**, complete with its own Flexbox/Grid layout engine, analytic spring & scene animation runtime, glyph atlas, CPU reference rasterizer, and WCAG-checked component kit (`RuneKit`).
 
 Every `RuneApp` supports headless execution (`--snap`, `--tree`, `--script`, `--frames`, `--strip`) so UIs and automated tests can render PNGs, inspect the element tree, and drive scripted input without a window.
+
+## Documentation
+
+- [**Getting Started**](docs/getting-started.md) — Add `swift-rune` via SwiftPM, build your first cross-platform UI app, and configure platform prerequisites.
+- [**UI Programming Guide**](docs/ui-guide.md) — Declarative `El<State>` trees, Flexbox/Grid layout, design tokens, text editing, accessibility, springs & layout morphing, custom GPU `Compositor` passes, and headless testing.
+- [**RuneKit Component Guide**](docs/runekit-components.md) — Theming with `Kit.fromPalette`, buttons, form controls, dialogs, menus, popovers, app shells, virtualized tables/trees, Markdown, syntax highlighting, Mermaid diagrams, and diff views.
+- [**Products & Modules**](docs/products-and-modules.md) — Full guide to all SwiftPM library products, package traits (`DesktopMedia`), and platform backends.
+- [**Standalone App Example**](examples/SparkStudio) — Complete multi-panel SwiftPM desktop app consuming `Rune`, `RuneKit`, and `RuneMotion`.
+
+## Installation (SwiftPM)
+
+Add `swift-rune` to your `Package.swift` dependencies (requires **Swift 6.4+**):
+
+```swift
+// swift-tools-version: 6.4
+import PackageDescription
+
+let package = Package(
+    name: "MyApp",
+    platforms: [
+        .macOS(.v14),
+        .iOS(.v17),
+        .tvOS(.v17),
+        .visionOS(.v1),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/mweinbach/swift-rune.git", from: "0.1.0"),
+        // Or track the latest commits on main:
+        // .package(url: "https://github.com/mweinbach/swift-rune.git", branch: "main"),
+    ],
+    targets: [
+        .executableTarget(
+            name: "MyApp",
+            dependencies: [
+                .product(name: "Rune", package: "swift-rune"),
+                .product(name: "RuneKit", package: "swift-rune"),
+                // Optional add-on libraries:
+                // .product(name: "RuneFX", package: "swift-rune"),
+                // .product(name: "RuneLight", package: "swift-rune"),
+                // .product(name: "RuneNotify", package: "swift-rune"),
+                // .product(name: "OpenCodeTheme", package: "swift-rune"),
+            ]
+        ),
+    ]
+)
+```
+
+> **Tip:** `Rune` re-exports `RuneMotion` and `RuneRef`. For UI-only builds on Linux/Windows without desktop audio/video playback, pass `traits: []` on the `swift-rune` dependency in your `Package.swift` (or `--disable-default-traits` when building inside this checkout) to disable the default `DesktopMedia` trait.
+
+## Quick Start
+
+Put the following in `Sources/MyApp/main.swift` (or use `@main` in any Swift file) to launch a cross-platform animated UI window:
+
+```swift
+import Rune
+
+struct HelloState {
+    var on: Bool = false
+}
+
+func helloView(_ s: HelloState, _ cx: inout Cx<HelloState>) -> El<HelloState> {
+    let t = Tok.theme(dark: cx.systemDark)
+    let accent = Tok.accent(0, dark: cx.systemDark)
+
+    return col()
+        .sizeFull()
+        .center()
+        .gap(16)
+        .bg(t.bg)
+        .child(text(s.on ? "Lights on" : "Lights off").size(18).semibold().color(t.text))
+        .child(
+            el()
+                .key("sw")
+                .role(.switchControl)
+                .label("Lights")
+                .selected(s.on ? "true" : "false")
+                .focusable(true)
+                .size(40, 22)
+                .pill()
+                .bg(s.on ? accent : t.controlOff)
+                .animate(Tok.Motion.SNAPPY)
+                .onClick { $0.on.toggle() }
+                .child(
+                    el()
+                        .key("knob")
+                        .square(18)
+                        .pill()
+                        .bg(t.knob)
+                        .absolute(x: s.on ? 20 : 2, y: 2)
+                        .animateLayout(Tok.Motion.SNAPPY)
+                )
+        )
+}
+
+let spec = AppSpec<HelloState>(
+    title: "Hello Rune",
+    size: Vec2(460, 300),
+    state: HelloState(),
+    view: helloView
+)
+.scene("on") { $0.on = true }
+
+try RuneApp.run(spec)
+```
+
+To build rich themed interfaces with `RuneKit` controls (cards, buttons, inputs, dialogs, tables, trees, markdown, and app shells):
+
+```swift
+import Rune
+import RuneKit
+
+let kit = Kit.fromPalette(
+    PaletteSeed(
+        bg: Color.hex("#111318")!,
+        fg: Color.hex("#f1f3f5")!,
+        accent: Tok.accent(0, dark: true)
+    ),
+    focus: .accent
+)
+
+func settingsView(_ state: HelloState, _ cx: inout Cx<HelloState>) -> El<HelloState> {
+    col()
+        .sizeFull()
+        .center()
+        .bg(kit.c.page)
+        .child(
+            kit.card(
+                key: "panel",
+                col()
+                    .w(300)
+                    .gap(12)
+                    .child(text("Settings").font(kit.ty.uiMedium).color(kit.c.textBase))
+                    .child(kit.divider())
+                    .child(
+                        kit.switchControl(key: "toggle", isOn: state.on, label: "Lights") { state, isOn in
+                            state.on = isOn
+                        }
+                    )
+            )
+        )
+}
+```
+
+### Large-View Benchmarks
 
 To measure scrolling on your machine, run `swift run --package-path Tests/Support/LargeViews -c release ScrollBench table window` for the 100,000-row table. Use `tree` for the 50,000-file tree or `diff` for the 50,000-line code diff. Each workload sends 600 wheel events and verifies the visible rows. On macOS, add `--metal-presents .build/scroll/frames.csv` to record when each frame appeared on screen. [Large-view benchmark and Rust comparison](Tests/Support/LargeViews/README.md)
 
@@ -68,90 +216,6 @@ To measure scrolling on your machine, run `swift run --package-path Tests/Suppor
 | `rune-video-tiles` | `RuneVideoTiles` | `examples/video-tiles` | Multi-stream synchronized video tile grid demo. |
 | `rune-web-hello` | `RuneWebHello` | `examples/web-hello` | Minimal web/DOM export target example. |
 | `rune-web-showcase` | `RuneWebShowcase` | `examples/web-showcase` | Interactive `RuneKit` + `RuneMotion` web export showcase. |
-
-## Quick Start
-
-For a SwiftPM app beside this checkout, add `.package(path: "../swift-rune")` to the package dependencies and `.product(name: "Rune", package: "swift-rune")` to the executable target. An app using the component kit can also add the `RuneKit` product. Put the following in `main.swift`.
-
-```swift
-import Rune
-
-struct HelloState {
-    var on: Bool = false
-}
-
-func helloView(_ s: HelloState, _ cx: inout Cx<HelloState>) -> El<HelloState> {
-    let t = Tok.theme(dark: cx.systemDark)
-    let accent = Tok.accent(0, dark: cx.systemDark)
-
-    return col()
-        .sizeFull()
-        .center()
-        .gap(16)
-        .bg(t.bg)
-        .child(text(s.on ? "Lights on" : "Lights off").size(18).semibold().color(t.text))
-        .child(
-            el()
-                .key("sw")
-                .role(.switchControl)
-                .label("Lights")
-                .selected(s.on ? "true" : "false")
-                .focusable(true)
-                .size(40, 22)
-                .pill()
-                .bg(s.on ? accent : t.controlOff)
-                .animate(Tok.Motion.SNAPPY)
-                .onClick { $0.on.toggle() }
-                .child(
-                    el()
-                        .key("knob")
-                        .square(18)
-                        .pill()
-                        .bg(t.knob)
-                        .absolute(x: s.on ? 20 : 2, y: 2)
-                        .animateLayout(Tok.Motion.SNAPPY)
-                )
-        )
-}
-
-let spec = AppSpec<HelloState>(
-    title: "Hello Rune",
-    size: Vec2(460, 300),
-    state: HelloState(),
-    view: helloView
-)
-.scene("on") { $0.on = true }
-
-try RuneApp.run(spec)
-```
-
-To use RuneKit controls in the same app, add the `RuneKit` product and pass `settingsView` as the `AppSpec` view.
-
-```swift
-import Rune
-import RuneKit
-
-let kit = Kit.fromPalette(
-    PaletteSeed(
-        bg: Color.hex("#111318")!,
-        fg: Color.hex("#f1f3f5")!,
-        accent: Tok.accent(0, dark: true)
-    ),
-    focus: .accent
-)
-
-func settingsView(_ state: HelloState, _ cx: inout Cx<HelloState>) -> El<HelloState> {
-    kit.card(
-        key: "panel",
-        col().gap(12)
-            .child(text("Settings").font(kit.ty.uiMedium).color(kit.c.textBase))
-            .child(kit.divider())
-            .child(kit.switchControl(key: "toggle", isOn: state.on, label: "Lights") { state, isOn in
-                state.on = isOn
-            })
-    )
-}
-```
 
 ## Build & Test
 

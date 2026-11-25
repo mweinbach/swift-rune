@@ -314,10 +314,6 @@ let package = Package(
                 .copy("Resources/Fonts"),
                 .copy("Resources/Web"),
             ],
-            // Let browser apps specialize Rune's layout and frame code for their own state type.
-            swiftSettings: [
-                .unsafeFlags(["-enable-cmo-everything"], .when(platforms: [.wasi], configuration: .release)),
-            ],
             linkerSettings: [
                 .linkedLibrary("_FoundationICU", .when(platforms: [.linux, .windows, .android, .wasi])),
                 .linkedLibrary("user32", .when(platforms: [.windows])),
@@ -434,8 +430,7 @@ let package = Package(
             path: "Sources/Examples/RuneHello"
         ),
         .target(name: "RuneHelloScene", dependencies: ["Rune"], path: "Sources/Examples/RuneHelloScene"),
-        .target(name: "RuneHelloAndroid", dependencies: ["Rune", "RuneHelloScene"], path: "Sources/Examples/RuneHelloAndroid",
-                linkerSettings: [.unsafeFlags(["-Xlinker", "--no-undefined"], .when(platforms: [.android]))]),
+        .target(name: "RuneHelloAndroid", dependencies: ["Rune", "RuneHelloScene"], path: "Sources/Examples/RuneHelloAndroid"),
         .executableTarget(
             name: "RuneTodo",
             dependencies: ["Rune"],

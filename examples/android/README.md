@@ -8,7 +8,7 @@ From the package root, set `ANDROID_HOME` to the Android SDK directory, `ANDROID
 
 ```sh
 swift build --build-system native --swift-sdk swift-6.4.2-RELEASE_android \
-  --triple aarch64-unknown-linux-android24 --product RuneHelloAndroid
+  --triple aarch64-unknown-linux-android24 -Xlinker --no-undefined --product RuneHelloAndroid
 python3 scripts/package-android-hello.py \
   .build/aarch64-unknown-linux-android24/debug/libRuneHelloAndroid.so \
   --swift-sdk "$RUNE_SWIFT_SDK" --keystore .build/rune-android-debug.jks \
